@@ -1,11 +1,11 @@
 {
   "domain": "album_slideshow",
   "name": "Album Slideshow Camera",
-  "version": "0.1.0",
-  "documentation": "https://github.com/eyalgal/album_slideshow",
-  "issue_tracker": "https://github.com/eyalgal/album_slideshow/issues",
   "codeowners": ["@eyalgal"],
   "config_flow": true,
+  "documentation": "https://github.com/eyalgal/album_slideshow",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/eyalgal/album_slideshow/issues",
   "requirements": [],
-  "iot_class": "cloud_polling"
+  "version": "0.1.0"
 }
