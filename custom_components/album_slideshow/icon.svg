@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Album Slideshow icon">
+  <rect width="256" height="256" rx="36" fill="#1f2937"/>
+  <rect x="32" y="44" width="148" height="104" rx="12" fill="#60a5fa"/>
+  <circle cx="76" cy="78" r="14" fill="#f8fafc"/>
+  <path d="M40 136l34-30 24 22 20-18 54 38H40z" fill="#dbeafe"/>
+  <rect x="76" y="116" width="148" height="104" rx="12" fill="#34d399" opacity="0.95"/>
+  <circle cx="120" cy="150" r="14" fill="#ecfeff"/>
+  <path d="M84 208l34-30 24 22 20-18 54 26H84z" fill="#dcfce7"/>
+</svg>

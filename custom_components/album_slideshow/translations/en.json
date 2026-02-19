@@ -1,0 +1,34 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add album slideshow",
+        "description": "Choose a source for the slideshow.",
+        "data": {
+          "provider": "Source"
+        }
+      },
+      "google_shared": {
+        "title": "Google Photos",
+        "description": "Paste a Google Photos shared album link like https://photos.app.goo.gl/....",
+        "data": {
+          "album_name": "Album name",
+          "album_url": "Shared album link"
+        }
+      },
+      "local_folder": {
+        "title": "Local Folder",
+        "description": "Pick a folder path on your Home Assistant filesystem. Use /local/... (maps to /config/www/...) or /media/local/... for NAS-mounted media folders. See the README for details.",
+        "data": {
+          "album_name": "Album name",
+          "local_path": "Folder path",
+          "recursive": "Include subfolders"
+        }
+      }
+    },
+    "error": {
+      "invalid_album_url": "That does not look like a Google Photos shared album link.",
+      "invalid_path": "Path is empty or invalid."
+    }
+  }
+}

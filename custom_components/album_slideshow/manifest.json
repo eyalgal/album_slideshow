@@ -1,0 +1,9 @@
+{
+  "domain": "album_slideshow",
+  "name": "Album Slideshow Camera",
+  "version": "0.1.0",
+  "documentation": "https://github.com/eyalgal/album_slideshow",
+  "requirements": [],
+  "config_flow": true,
+  "iot_class": "cloud_polling"
+}
