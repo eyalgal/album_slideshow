@@ -79,17 +79,12 @@ The following entities allow you to adjust slideshow behavior without restarting
 
 ## 📦 Installation
 
-### HACS Recommended
+### HACS (recommended)
 
-1. HACS → Integrations → ⋮ → Custom repositories  
-2. Add  
-   `https://github.com/eyalgal/album_slideshow`  
-   Category: **Integration**
-3. Install **Album Slideshow Camera**
-4. Restart Home Assistant
-5. Go to **Settings → Devices & services → Add integration**
+Album Slideshow Camera is available in **HACS**.
 
----
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=eyalgal&repository=album_slideshow)
+
 
 ### Manual Installation
 
