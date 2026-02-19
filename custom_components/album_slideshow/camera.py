@@ -223,7 +223,6 @@ def _parse_divider_color(color: str) -> tuple[tuple[int, int, int] | tuple[int, 
         "clear",
         "rgba(0,0,0,0)",
     ):
-    if raw in ("transparent", "none", "clear", "rgba(0,0,0,0)"):
         return (0, 0, 0, 0), True
     try:
         return ImageColor.getrgb(color), False
