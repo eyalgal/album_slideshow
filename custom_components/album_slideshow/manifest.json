@@ -3,7 +3,9 @@
   "name": "Album Slideshow Camera",
   "version": "0.1.0",
   "documentation": "https://github.com/eyalgal/album_slideshow",
-  "requirements": [],
+  "issue_tracker": "https://github.com/eyalgal/album_slideshow/issues",
+  "codeowners": ["@eyalgal"],
   "config_flow": true,
+  "requirements": [],
   "iot_class": "cloud_polling"
 }
