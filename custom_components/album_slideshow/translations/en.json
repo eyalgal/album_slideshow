@@ -10,7 +10,7 @@
       },
       "google_shared": {
         "title": "Google Photos",
-        "description": "Paste a Google Photos shared album link like https://photos.app.goo.gl/....",
+        "description": "Paste a Google Photos shared album share link.",
         "data": {
           "album_name": "Album name",
           "album_url": "Shared album link"
