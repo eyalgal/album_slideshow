@@ -47,10 +47,9 @@ class _BaseSelect(SelectEntity, RestoreEntity):
         self.entry = entry
         self.store = store
 
-        def _on_store_change() -> None:
-            self.async_write_ha_state()
-
-        store.add_listener(_on_store_change)
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.store.add_listener(self.async_write_ha_state)
 
     @property
     def device_info(self):
