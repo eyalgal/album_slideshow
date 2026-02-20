@@ -22,7 +22,11 @@ from .store import SlideshowStore
 ASPECT_RATIO_OPTIONS = ["16:9", "16:10", "4:3", "1:1", "3:4", "10:16", "9:16"]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     store: SlideshowStore = hass.data[DOMAIN][entry.entry_id]["store"]
     async_add_entities(
         [
@@ -37,6 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 class _BaseSelect(SelectEntity, RestoreEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
+    _attr_entity_registry_enabled_default = True
 
     def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
         self.entry = entry
@@ -67,7 +72,8 @@ class FillModeSelect(_BaseSelect):
 
     @property
     def current_option(self):
-        return self.store.fill_mode
+        value = self.store.fill_mode
+        return value if value in self.options else self.options[0]
 
     async def async_select_option(self, option: str) -> None:
         if option not in self.options:
@@ -90,11 +96,16 @@ class PortraitModeSelect(_BaseSelect):
         super().__init__(entry, store)
         self._attr_unique_id = f"{entry.entry_id}_portrait_mode"
         self._attr_name = "Orientation mismatch mode"
-        self._attr_options = [ORIENTATION_MISMATCH_PAIR, ORIENTATION_MISMATCH_SINGLE, ORIENTATION_MISMATCH_AVOID]
+        self._attr_options = [
+            ORIENTATION_MISMATCH_PAIR,
+            ORIENTATION_MISMATCH_SINGLE,
+            ORIENTATION_MISMATCH_AVOID,
+        ]
 
     @property
     def current_option(self):
-        return self.store.portrait_mode
+        value = self.store.portrait_mode
+        return value if value in self.options else self.options[0]
 
     async def async_select_option(self, option: str) -> None:
         if option not in self.options:
@@ -111,7 +122,7 @@ class PortraitModeSelect(_BaseSelect):
                 restored = ORIENTATION_MISMATCH_SINGLE
             if restored in self.options:
                 self.store.portrait_mode = restored
-            self.store.notify()
+                self.store.notify()
 
 
 class OrderModeSelect(_BaseSelect):
@@ -125,7 +136,8 @@ class OrderModeSelect(_BaseSelect):
 
     @property
     def current_option(self):
-        return self.store.order_mode
+        value = self.store.order_mode
+        return value if value in self.options else self.options[0]
 
     async def async_select_option(self, option: str) -> None:
         if option not in self.options:
@@ -152,7 +164,8 @@ class AspectRatioSelect(_BaseSelect):
 
     @property
     def current_option(self):
-        return self.store.aspect_ratio
+        value = self.store.aspect_ratio
+        return value if value in self.options else self.options[0]
 
     async def async_select_option(self, option: str) -> None:
         if option not in self.options:
