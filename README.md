@@ -68,9 +68,9 @@ The following entities allow you to adjust slideshow behavior without restarting
 
 | Entity Type | Name | Default | Accepted Values | Description |
 |-------------|------|---------|----------------|-------------|
-| Number | Slide interval | 30 | Any positive integer (seconds) | Time between slides |
-| Number | Album refresh | 6 | Any positive integer (hours) | How often album contents refresh |
-| Number | Pair divider size | 8 | 0 or positive integer (px) | Width of divider between paired images |
+| Number | Slide interval | 60 | Any positive integer (seconds) | Time between slides |
+| Number | Album refresh | 24 | Any positive integer (hours) | How often album contents refresh |
+| Number | Pair divider size | 8 | 0-64 (px) | Width of divider between paired images |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
 | Select | Order mode | shuffle | shuffle, album | Slide ordering behavior |
