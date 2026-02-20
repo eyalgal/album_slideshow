@@ -53,6 +53,7 @@ class PairDividerColorText(TextEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        self.store.add_listener(self.async_write_ha_state)
         old = await self.async_get_last_state()
         if old and old.state not in (None, "unknown", "unavailable"):
             self.store.pair_divider_color = old.state.strip() or DEFAULT_PAIR_DIVIDER_COLOR
