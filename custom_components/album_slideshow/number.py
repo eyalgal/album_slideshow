@@ -114,7 +114,7 @@ class RefreshHoursNumber(_BaseNumber):
 
 
 class PairDividerWidthNumber(_BaseNumber):
-    _attr_icon = "mdi:border-vertical-variant"
+    _attr_icon = "mdi:border-vertical"
     _attr_native_min_value = 0
     _attr_native_max_value = 64
     _attr_native_step = 1
