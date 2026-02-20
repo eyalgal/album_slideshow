@@ -67,6 +67,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_register(DOMAIN, SERVICE_REFRESH_ALBUM, _refresh_album)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    store.notify()
+
     return True
 
 
