@@ -1,14 +1,15 @@
-name: HACS
+name: HACS validation
 
 on:
   push:
   pull_request:
 
 jobs:
-  validate:
+  hacs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: hacs/action@main
         with:
           category: integration
+          ignore: brands
