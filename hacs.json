@@ -1,7 +1,7 @@
 {
   "name": "Album Slideshow Camera",
   "content_in_root": false,
-  "domain": "album_slideshow",
+  "zip_release": false,
   "homeassistant": "2024.8.0",
   "render_readme": true
 }
