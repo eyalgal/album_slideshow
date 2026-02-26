@@ -29,6 +29,11 @@ class PairDividerColorText(TextEntity, RestoreEntity):
         self._attr_unique_id = f"{entry.entry_id}_pair_divider_color"
         self._attr_name = "Pair divider color"
 
+        def _on_store_change() -> None:
+            self.async_write_ha_state()
+
+        store.add_listener(_on_store_change)
+
     @property
     def native_value(self) -> str:
         return self.store.pair_divider_color
