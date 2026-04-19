@@ -5,14 +5,15 @@
 
 ## Problem
 
-The integration causes Home Assistant to lag and become unresponsive immediately after installation. The root cause is that all PIL image processing runs synchronously on the HA async event loop, blocking it for seconds at a time. Secondary issues compound this: default 4K output, blur fill mode, a 2-second render cache, and an unbounded download cache.
+The integration causes Home Assistant to lag and become unresponsive immediately after installation. The root cause is that all PIL image processing runs synchronously on the HA async event loop, blocking it for seconds at a time. Secondary issues compound this: default 4K output, blur fill mode, a 2-second render cache, and a large download cache consume CPU and memory on 
+constrained devices.
 
 ## Goals
 
 - Move all CPU-bound image processing off the event loop
 - Serve camera images instantly (never block waiting for a render)
 - Cache rendered images intelligently (invalidate on slide change, not on a short TTL)
-- Bound the download cache by memory in MB, user-configurable
+- Bound the download cache by memory in MB not image sizes, user-configurable
 - Degrade gracefully when images fail; resume automatically when they recover
 
 ## Out of Scope
@@ -85,12 +86,12 @@ async_camera_image
 
 Two callers set this event to wake the loop early:
 
-| Caller | Meaning |
-|--------|---------|
-| `async_force_next` | Advance to next slide immediately |
-| `_on_store_change` | Re-render current slide with updated settings (fill mode, aspect ratio, etc.) — do NOT advance index |
+| Caller | Action |
+|--------|--------|
+| `async_force_next` | Sets `_force_next = True`, then sets the event |
+| `_on_store_change` | Sets the event (leaves `_force_next` unchanged) |
 
-The loop reads a flag (`_force_next: bool`) to distinguish the two cases. `async_force_next` sets `_force_next = True` before setting the event; `_on_store_change` leaves it False.
+On wakeup the loop always does the same thing: **advance the index if `_force_next` is True (then clear the flag), then render the current slide.** Settings changes are picked up automatically because the loop reads from the store at render time — no special handling required. If a settings change and a force-next arrive before the loop wakes, the result is correct: the index advances and the new settings are applied to the new slide.
 
 ### Sequencing
 
