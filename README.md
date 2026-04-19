@@ -72,6 +72,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Slide interval | 60 | Any positive integer (seconds) | Time between slides |
 | Number | Album refresh | 24 | Any positive integer (hours) | How often album contents refresh |
 | Number | Pair divider size | 8 | 0-64 (px) | Width of divider between paired images |
+| Number | Image cache size | 150 | 50–1000 (MB) | Memory budget for downloaded image data |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
 | Select | Order mode | shuffle | shuffle, album | Slide ordering behavior |
@@ -164,6 +165,7 @@ Each album you configure creates the following entities in Home Assistant.
 |--------|------------|
 | Album title | Title of the source album |
 | Media count | Number of images currently available |
+| Image cache usage *(diagnostic)* | Current download cache size in MB |
 
 ---
 
