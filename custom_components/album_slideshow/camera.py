@@ -180,6 +180,10 @@ class AlbumSlideshowCamera(Camera):
             "pagination_debug": data.get("pagination_debug"),
         }
 
+    @property
+    def cache_usage_mb(self) -> float:
+        return round(self._download_cache.total_bytes / (1024 * 1024), 1)
+
     async def async_force_next(self) -> None:
         self._force_next = True
         self._interrupt_event.set()
@@ -237,14 +241,14 @@ class AlbumSlideshowCamera(Camera):
 
         count = len(items)
         if advance:
-            self._do_advance(count)
+            self._do_advance(count, items)
 
         out = await self._render_current(items)
         if out is not None:
             self._framebuffer = out
             self.async_write_ha_state()
 
-    def _do_advance(self, count: int) -> None:
+    def _do_advance(self, count: int, items: list) -> None:
         """Advance _index to the next slide."""
         if count <= 0:
             self._index = 0
@@ -258,7 +262,7 @@ class AlbumSlideshowCamera(Camera):
             return
 
         self._index = self._next_random_index(count)
-        cur_url = self.coordinator.data["items"][self._index].url
+        cur_url = items[self._index].url
         self._recent_urls.append(cur_url)
         keep = min(20, max(1, count - 1))
         if len(self._recent_urls) > keep:

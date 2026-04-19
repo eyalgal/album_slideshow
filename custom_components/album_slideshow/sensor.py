@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
@@ -77,7 +77,9 @@ class AlbumTitleSensor(_BaseAlbumSensor):
 class CacheUsageSensor(_BaseAlbumSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = "MB"
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:database"
+    _attr_should_poll = True
 
     def __init__(self, entry: ConfigEntry, coordinator: AlbumCoordinator) -> None:
         super().__init__(entry, coordinator)
@@ -89,4 +91,4 @@ class CacheUsageSensor(_BaseAlbumSensor):
         cam = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("camera")
         if cam is None:
             return None
-        return round(cam._download_cache.total_bytes / (1024 * 1024), 1)
+        return cam.cache_usage_mb

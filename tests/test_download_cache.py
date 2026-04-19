@@ -35,6 +35,7 @@ def test_overwrite_updates_byte_count():
     assert cache.get("http://a") == b"XY"
     # Total is now 2 bytes; adding 9 more pushes to 11 — evict oldest (a, inserted first)
     cache.put("http://b", b"123456789")  # 9 bytes → total 11, evict a
+    assert cache.get("http://a") is None
     assert cache.get("http://b") is not None
 
 
