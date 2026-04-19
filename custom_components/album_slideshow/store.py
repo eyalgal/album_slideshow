@@ -13,6 +13,7 @@ from .const import (
     DEFAULT_PAIR_DIVIDER_PX,
     DEFAULT_PAIR_DIVIDER_COLOR,
     DEFAULT_IMAGE_CACHE_MB,
+    DEFAULT_MAX_RESOLUTION,
 )
 
 
@@ -30,6 +31,7 @@ class SlideshowStore:
     pair_divider_px: int = DEFAULT_PAIR_DIVIDER_PX
     pair_divider_color: str = DEFAULT_PAIR_DIVIDER_COLOR
     image_cache_mb: int = DEFAULT_IMAGE_CACHE_MB
+    max_resolution: str = DEFAULT_MAX_RESOLUTION
 
     _listeners: list[Listener] = field(default_factory=list)
 

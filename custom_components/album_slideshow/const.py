@@ -32,6 +32,17 @@ DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"
 DEFAULT_RECURSIVE = True
 DEFAULT_IMAGE_CACHE_MB = 150
 
+MAX_RESOLUTION_OPTIONS = ["480p", "720p", "1080p", "1440p", "4K (2160p)", "original"]
+DEFAULT_MAX_RESOLUTION = "4K (2160p)"
+MAX_RESOLUTION_SHORT_EDGE: dict[str, int | None] = {
+    "480p": 480,
+    "720p": 720,
+    "1080p": 1080,
+    "1440p": 1440,
+    "4K (2160p)": 2160,
+    "original": None,
+}
+
 PUBLICALBUM_ENDPOINT = "https://www.publicalbum.org/api/v2/webapp/embed-player/jsonrpc"
 
 SERVICE_NEXT_SLIDE = "next_slide"

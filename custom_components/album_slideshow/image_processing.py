@@ -38,7 +38,12 @@ def is_portrait_item(item: MediaItem, img: Image.Image | None = None) -> bool:
     return False
 
 
-def resolve_output_size(req_w: int | None, req_h: int | None, ratio: str) -> tuple[int, int]:
+def resolve_output_size(
+    req_w: int | None,
+    req_h: int | None,
+    ratio: str,
+    max_short_edge: int | None = None,
+) -> tuple[int, int]:
     ratio_w, ratio_h = _parse_aspect_ratio(ratio)
     target = ratio_w / ratio_h
 
@@ -49,26 +54,28 @@ def resolve_output_size(req_w: int | None, req_h: int | None, ratio: str) -> tup
         else:
             height = 3840
             width = max(1, int(round(height * target)))
-        return (width, height)
-
-    if req_w is None:
+    elif req_w is None:
         height = max(1, int(req_h or 2160))
         width = max(1, int(round(height * target)))
-        return (width, height)
-
-    if req_h is None:
+    elif req_h is None:
         width = max(1, int(req_w or 3840))
         height = max(1, int(round(width / target)))
-        return (width, height)
-
-    req_w = max(1, int(req_w))
-    req_h = max(1, int(req_h))
-    if (req_w / req_h) >= target:
-        height = req_h
-        width = max(1, int(round(height * target)))
     else:
-        width = req_w
-        height = max(1, int(round(width / target)))
+        req_w = max(1, int(req_w))
+        req_h = max(1, int(req_h))
+        if (req_w / req_h) >= target:
+            height = req_h
+            width = max(1, int(round(height * target)))
+        else:
+            width = req_w
+            height = max(1, int(round(width / target)))
+
+    if max_short_edge is not None:
+        short = min(width, height)
+        if short > max_short_edge:
+            scale = max_short_edge / short
+            width = max(1, int(round(width * scale)))
+            height = max(1, int(round(height * scale)))
 
     return (width, height)
 

@@ -18,6 +18,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
+    MAX_RESOLUTION_SHORT_EDGE,
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_AVOID,
     ORDER_ALBUM,
@@ -274,7 +275,8 @@ class AlbumSlideshowCamera(Camera):
         portrait_mode = self.store.portrait_mode
         divider = max(0, int(self.store.pair_divider_px))
         divider_fill, transparent_divider = ip.parse_divider_color(self.store.pair_divider_color)
-        width, height = ip.resolve_output_size(None, None, self.store.aspect_ratio)
+        max_short_edge = MAX_RESOLUTION_SHORT_EDGE.get(self.store.max_resolution)
+        width, height = ip.resolve_output_size(None, None, self.store.aspect_ratio, max_short_edge)
 
         cur = items[self._index]
         cur_bytes = await self._fetch_bytes(cur.url)
