@@ -124,7 +124,7 @@ No TTL, no lock, no PIL work. Width/height parameters are ignored — the backgr
 
 Unchanged eviction strategy (oldest-first), but the cap changes from entry count to total bytes.
 
-**Budget:** Configured by the user as `image_cache_mb` (see Config Flow section). Default: 150 MB.
+**Budget:** Configured by the user as `image_cache_mb` (see Config Flow section). Default: 150 MB. This is sized for the Google Photos use case (1–2 MB per image, up to 31 lookahead images in avoid mode ≈ 50 MB peak). Local file re-reads are cheap executor jobs and do not need to be cached aggressively.
 
 **Tracking:** `_cache_bytes: int` is maintained incrementally — incremented when an image is added, decremented when entries are evicted. No full scan on every access.
 
@@ -159,7 +159,7 @@ DEFAULT_IMAGE_CACHE_MB = 150
 `image_cache_mb` added alongside existing settings (`slide_interval`, `fill_mode`, etc.). Read/written through the same store listener pattern.
 
 ### config_flow.py
-`image_cache_mb` added to the **Options flow only** (not initial setup), as a `NumberSelector` with `min=50, max=1000, step=50, unit_of_measurement="MB"`. Appears alongside the existing interval/fill/pairing controls.
+`image_cache_mb` added to the **Options flow only** (not initial setup), as a `NumberSelector` with `min=50, max=1000, step=50, unit_of_measurement="MB"`, default 150. Appears alongside the existing interval/fill/pairing controls.
 
 ---
 
