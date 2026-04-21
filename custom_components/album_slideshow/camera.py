@@ -326,11 +326,11 @@ class AlbumSlideshowCamera(Camera):
             cur = items[self._index]
             b = await self._fetch_bytes(cur.url)
             if not b:
-                self._do_advance(count)
+                self._do_advance(count, items)
                 continue
             img = await self.hass.async_add_executor_job(ip.open_image, b)
             if ip.is_portrait_item(cur, img) != is_portrait_canvas:
-                self._do_advance(count)
+                self._do_advance(count, items)
                 continue
 
             self._last_is_portrait = is_portrait_canvas

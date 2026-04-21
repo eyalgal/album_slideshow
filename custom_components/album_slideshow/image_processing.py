@@ -16,6 +16,7 @@ def open_image(data: bytes) -> Image.Image:
     """Open image bytes, apply EXIF orientation, normalise to RGB/RGBA."""
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img)
+    img.load()  # force pixel data into memory; BytesIO must stay reachable until here
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGB")
     return img
