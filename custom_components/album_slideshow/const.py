@@ -5,6 +5,7 @@ CONF_ALBUM_URL = "album_url"
 CONF_ALBUM_NAME = "album_name"
 CONF_LOCAL_PATH = "local_path"
 CONF_RECURSIVE = "recursive"
+CONF_IMAGE_CACHE_MB = "image_cache_mb"
 
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
@@ -29,6 +30,18 @@ DEFAULT_ASPECT_RATIO = "16:9"
 DEFAULT_PAIR_DIVIDER_PX = 8
 DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"
 DEFAULT_RECURSIVE = True
+DEFAULT_IMAGE_CACHE_MB = 150
+
+MAX_RESOLUTION_OPTIONS = ["480p", "720p", "1080p", "1440p", "4K (2160p)", "original"]
+DEFAULT_MAX_RESOLUTION = "1080p"
+MAX_RESOLUTION_SHORT_EDGE: dict[str, int | None] = {
+    "480p": 480,
+    "720p": 720,
+    "1080p": 1080,
+    "1440p": 1440,
+    "4K (2160p)": 2160,
+    "original": None,
+}
 
 PUBLICALBUM_ENDPOINT = "https://www.publicalbum.org/api/v2/webapp/embed-player/jsonrpc"
 

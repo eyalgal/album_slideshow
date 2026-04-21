@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-import io
+from datetime import datetime, timezone
 import logging
 import random
 from pathlib import Path
-from typing import Any
 
 import async_timeout
-from PIL import Image, ImageColor, ImageFilter, ImageOps
+from PIL import Image
 
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
@@ -19,16 +18,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
-    FILL_COVER,
-    FILL_CONTAIN,
-    FILL_BLUR,
+    MAX_RESOLUTION_SHORT_EDGE,
     ORIENTATION_MISMATCH_PAIR,
-    ORIENTATION_MISMATCH_SINGLE,
     ORIENTATION_MISMATCH_AVOID,
-    ORDER_RANDOM,
     ORDER_ALBUM,
     PROVIDER_GOOGLE_SHARED,
 )
+from . import image_processing as ip
 from .coordinator import AlbumCoordinator, MediaItem
 from .store import SlideshowStore
 
@@ -41,193 +37,44 @@ class _BytesCache:
     data: bytes
 
 
-def _open_image(data: bytes) -> Image.Image:
-    img = Image.open(io.BytesIO(data))
-    img = ImageOps.exif_transpose(img)
-    if img.mode not in ("RGB", "RGBA"):
-        img = img.convert("RGB")
-    return img
+class _DownloadCache:
+    """Byte-budget LRU cache for downloaded image data."""
 
+    def __init__(self, max_bytes: int) -> None:
+        self._cache: dict[str, _BytesCache] = {}
+        self._total_bytes: int = 0
+        self._max_bytes: int = max(max_bytes, 1)
 
-def _is_portrait_img(img: Image.Image) -> bool:
-    try:
-        w, h = img.size
-        return h > w
-    except Exception:
-        return False
+    @property
+    def total_bytes(self) -> int:
+        return self._total_bytes
 
-
-def _is_portrait_dims(width: int | None, height: int | None) -> bool | None:
-    if not width or not height:
-        return None
-    try:
-        w = int(width)
-        h = int(height)
-        if w <= 0 or h <= 0:
+    def get(self, url: str) -> bytes | None:
+        entry = self._cache.get(url)
+        if entry is None:
             return None
-        return h >= w
-    except Exception:
-        return None
+        entry.when = datetime.now(timezone.utc)
+        return entry.data
 
+    def put(self, url: str, data: bytes) -> None:
+        if len(data) > self._max_bytes:
+            # Item exceeds the entire cache budget; skip caching but don't raise.
+            return
+        if url in self._cache:
+            self._total_bytes -= len(self._cache[url].data)
+        self._cache[url] = _BytesCache(when=datetime.now(timezone.utc), data=data)
+        self._total_bytes += len(data)
+        self._evict()
 
-def _is_portrait_item(item: MediaItem, img: Image.Image | None = None) -> bool:
-    by_meta = _is_portrait_dims(item.width, item.height)
-    if by_meta is not None:
-        return by_meta
-    if img is not None:
-        return _is_portrait_img(img)
-    return False
+    def resize(self, max_bytes: int) -> None:
+        self._max_bytes = max(max_bytes, 1)
+        self._evict()
 
-
-def _parse_aspect_ratio(ratio: str) -> tuple[int, int]:
-    try:
-        left, right = ratio.split(":", maxsplit=1)
-        w = int(left)
-        h = int(right)
-        if w > 0 and h > 0:
-            return (w, h)
-    except Exception:
-        pass
-    return (16, 9)
-
-
-def _resolve_output_size(req_w: int | None, req_h: int | None, ratio: str) -> tuple[int, int]:
-    ratio_w, ratio_h = _parse_aspect_ratio(ratio)
-    target = ratio_w / ratio_h
-
-    if req_w is None and req_h is None:
-        # Default to 4K: longest side = 3840
-        if ratio_w >= ratio_h:
-            width = 3840
-            height = max(1, int(round(width / target)))
-        else:
-            height = 3840
-            width = max(1, int(round(height * target)))
-        return (width, height)
-
-    if req_w is None:
-        height = max(1, int(req_h or 2160))
-        width = max(1, int(round(height * target)))
-        return (width, height)
-
-    if req_h is None:
-        width = max(1, int(req_w or 3840))
-        height = max(1, int(round(width / target)))
-        return (width, height)
-
-    req_w = max(1, int(req_w))
-    req_h = max(1, int(req_h))
-    if (req_w / req_h) >= target:
-        height = req_h
-        width = max(1, int(round(height * target)))
-    else:
-        width = req_w
-        height = max(1, int(round(width / target)))
-
-    return (width, height)
-
-
-def _resize_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    src_w, src_h = img.size
-    if src_w <= 0 or src_h <= 0:
-        return img.resize((target_w, target_h))
-    scale = max(target_w / src_w, target_h / src_h)
-    new_w = max(1, int(round(src_w * scale)))
-    new_h = max(1, int(round(src_h * scale)))
-    resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    left = max(0, int(round((new_w - target_w) / 2)))
-    top = max(0, int(round((new_h - target_h) / 2)))
-    return resized.crop((left, top, left + target_w, top + target_h))
-
-
-def _resize_contain(img: Image.Image, target_w: int, target_h: int, bg=(0, 0, 0)) -> Image.Image:
-    src_w, src_h = img.size
-    if src_w <= 0 or src_h <= 0:
-        return img.resize((target_w, target_h))
-    scale = min(target_w / src_w, target_h / src_h)
-    new_w = max(1, int(src_w * scale))
-    new_h = max(1, int(src_h * scale))
-    resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    canvas = Image.new("RGB", (target_w, target_h), bg)
-    left = (target_w - new_w) // 2
-    top = (target_h - new_h) // 2
-    canvas.paste(resized.convert("RGB"), (left, top))
-    return canvas
-
-
-def _blur_fill(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    bg = _resize_cover(img, target_w, target_h).filter(ImageFilter.GaussianBlur(radius=24))
-
-    src_w, src_h = img.size
-    if src_w <= 0 or src_h <= 0:
-        return bg
-
-    scale = min(target_w / src_w, target_h / src_h)
-    new_w = max(1, int(src_w * scale))
-    new_h = max(1, int(src_h * scale))
-    fg = img.resize((new_w, new_h), Image.Resampling.LANCZOS).convert("RGB")
-
-    left = (target_w - new_w) // 2
-    top = (target_h - new_h) // 2
-    bg.paste(fg, (left, top))
-    return bg
-
-
-def _render_by_fill_mode(img: Image.Image, fill_mode: str, width: int, height: int) -> Image.Image:
-    if fill_mode == FILL_CONTAIN:
-        return _resize_contain(img, width, height)
-    if fill_mode == FILL_BLUR:
-        return _blur_fill(img, width, height)
-    return _resize_cover(img, width, height)
-
-
-def _pair_images(
-    img1: Image.Image,
-    img2: Image.Image,
-    target_w: int,
-    target_h: int,
-    fill_mode: str,
-    portrait_canvas: bool,
-    divider: int,
-    divider_fill: tuple[int, int, int] | tuple[int, int, int, int],
-    transparent_divider: bool,
-) -> Image.Image:
-    canvas_mode = "RGBA" if transparent_divider else "RGB"
-    canvas = Image.new(canvas_mode, (target_w, target_h), divider_fill)
-
-    if portrait_canvas:
-        top_h = max(1, (target_h - divider) // 2)
-        bottom_h = max(1, target_h - divider - top_h)
-        top_img = _render_by_fill_mode(img1, fill_mode, target_w, top_h)
-        bottom_img = _render_by_fill_mode(img2, fill_mode, target_w, bottom_h)
-        canvas.paste(top_img.convert(canvas_mode), (0, 0))
-        canvas.paste(bottom_img.convert(canvas_mode), (0, top_h + divider))
-        return canvas
-
-    left_w = max(1, (target_w - divider) // 2)
-    right_w = max(1, target_w - divider - left_w)
-    left_img = _render_by_fill_mode(img1, fill_mode, left_w, target_h)
-    right_img = _render_by_fill_mode(img2, fill_mode, right_w, target_h)
-    canvas.paste(left_img.convert(canvas_mode), (0, 0))
-    canvas.paste(right_img.convert(canvas_mode), (left_w + divider, 0))
-    return canvas
-
-
-def _parse_divider_color(color: str) -> tuple[tuple[int, int, int] | tuple[int, int, int, int], bool]:
-    raw = (color or "").strip().lower()
-    compact = raw.replace(" ", "")
-    if compact in (
-        "transparent",
-        "transperant",
-        "none",
-        "clear",
-        "rgba(0,0,0,0)",
-    ):
-        return (0, 0, 0, 0), True
-    try:
-        return ImageColor.getrgb(color), False
-    except Exception:
-        return (255, 255, 255), False
+    def _evict(self) -> None:
+        while self._total_bytes > self._max_bytes and self._cache:
+            oldest_key = min(self._cache, key=lambda k: self._cache[k].when)
+            self._total_bytes -= len(self._cache[oldest_key].data)
+            del self._cache[oldest_key]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -258,19 +105,44 @@ class AlbumSlideshowCamera(Camera):
         self._random_order: list[int] = []
         self._random_pos = 0
 
-        self._next_advance_at: datetime | None = None
-        self._render_cache: _BytesCache | None = None
-        self._download_cache: dict[str, _BytesCache] = {}
+        self._download_cache = _DownloadCache(
+            max_bytes=store.image_cache_mb * 1024 * 1024
+        )
         self._recent_urls: list[str] = []
         self._last_is_portrait: bool | None = None
 
-        coordinator.async_add_listener(self.async_write_ha_state)
+        self._framebuffer: bytes | None = None
+        self._interrupt_event: asyncio.Event = asyncio.Event()
+        self._force_next: bool = False
+        self._consecutive_failures: int = 0
+        self._render_task: asyncio.Task | None = None
+
+        def _on_coordinator_update() -> None:
+            self._interrupt_event.set()
+            self.async_write_ha_state()
+
+        coordinator.async_add_listener(_on_coordinator_update)
 
         def _on_store_change() -> None:
-            self._render_cache = None
+            self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
+            self._interrupt_event.set()
             self.async_write_ha_state()
 
         store.add_listener(_on_store_change)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._render_task = self.hass.async_create_background_task(
+            self._render_loop(), name="album_slideshow_render_loop"
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._render_task is not None:
+            self._render_task.cancel()
+            try:
+                await self._render_task
+            except asyncio.CancelledError:
+                pass
 
     @property
     def device_info(self):
@@ -309,91 +181,133 @@ class AlbumSlideshowCamera(Camera):
             "pagination_debug": data.get("pagination_debug"),
         }
 
+    @property
+    def cache_usage_mb(self) -> float:
+        return round(self._download_cache.total_bytes / (1024 * 1024), 1)
+
     async def async_force_next(self) -> None:
-        data = self.coordinator.data or {}
-        items: list[MediaItem] = data.get("items", [])
-        if not items:
-            return
-        self._advance(len(items), force=True)
-        self._render_cache = None
+        self._force_next = True
+        self._interrupt_event.set()
         self.async_write_ha_state()
 
     async def async_force_refresh(self) -> None:
         await self.coordinator.async_request_refresh()
-        self._render_cache = None
-        self.async_write_ha_state()
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
-        width, height = _resolve_output_size(width, height, self.store.aspect_ratio)
+        return self._framebuffer
 
+    async def _render_loop(self) -> None:
+        """Background task: render slides into _framebuffer, advance on timer or interrupt."""
+        should_advance = False  # Don't advance on the very first render
+        while True:
+            try:
+                await self._render_cycle(advance=should_advance)
+                self._consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self._consecutive_failures += 1
+                backoff = min(2 ** self._consecutive_failures, 60)
+                _LOGGER.warning(
+                    "Album Slideshow: render cycle failed (attempt %d), retrying in %ds: %s",
+                    self._consecutive_failures, backoff, err,
+                )
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    raise
+                should_advance = True  # Skip the broken image on retry
+                continue
+
+            # Wait for slide_interval, or wake early on interrupt
+            # clear() before wait_for() is safe: there is no await between them,
+            # so no interrupt can fire in between on the single-threaded event loop.
+            self._interrupt_event.clear()
+            interval = int(self.store.slide_interval)
+            try:
+                await asyncio.wait_for(self._interrupt_event.wait(), timeout=float(interval))
+                # Woken by interrupt: advance only if force_next was set
+                should_advance = self._force_next
+                self._force_next = False
+            except asyncio.TimeoutError:
+                # Normal timer expiry: advance to next slide
+                should_advance = True
+
+    async def _render_cycle(self, advance: bool) -> None:
+        """Fetch, render, and store one frame into _framebuffer."""
         data = self.coordinator.data or {}
         items: list[MediaItem] = data.get("items", [])
         if not items:
-            return None
+            return
 
-        self._advance(len(items), force=False)
+        count = len(items)
+        if advance:
+            self._do_advance(count, items)
 
-        now = datetime.utcnow()
-        if self._render_cache and (now - self._render_cache.when) < timedelta(seconds=2):
-            return self._render_cache.data
+        out = await self._render_current(items)
+        if out is not None:
+            self._framebuffer = out
+            self.async_write_ha_state()
 
+    def _do_advance(self, count: int, items: list) -> None:
+        """Advance _index to the next slide."""
+        if count <= 0:
+            self._index = 0
+            return
+
+        self._index %= count
+        order_mode = self.store.order_mode
+
+        if order_mode == ORDER_ALBUM:
+            self._index = (self._index + 1) % count
+            return
+
+        self._index = self._next_random_index(count)
+        cur_url = items[self._index].url
+        self._recent_urls.append(cur_url)
+        keep = min(20, max(1, count - 1))
+        if len(self._recent_urls) > keep:
+            self._recent_urls = self._recent_urls[-keep:]
+
+    async def _render_current(self, items: list[MediaItem]) -> bytes | None:
+        """Render the image at self._index and return encoded bytes."""
         fill_mode = self.store.fill_mode
         portrait_mode = self.store.portrait_mode
         divider = max(0, int(self.store.pair_divider_px))
-        divider_fill, transparent_divider = _parse_divider_color(self.store.pair_divider_color)
+        divider_fill, transparent_divider = ip.parse_divider_color(self.store.pair_divider_color)
+        max_short_edge = MAX_RESOLUTION_SHORT_EDGE.get(self.store.max_resolution)
+        width, height = ip.resolve_output_size(None, None, self.store.aspect_ratio, max_short_edge)
 
         cur = items[self._index]
-
         cur_bytes = await self._fetch_bytes(cur.url)
         if not cur_bytes:
-            return None
+            raise RuntimeError(f"Failed to fetch image: {cur.url}")
 
-        img = _open_image(cur_bytes)
-        cur_is_portrait = _is_portrait_item(cur, img)
+        img = await self.hass.async_add_executor_job(ip.open_image, cur_bytes)
+        cur_is_portrait = ip.is_portrait_item(cur, img)
         self._last_is_portrait = cur_is_portrait
 
         is_portrait_canvas = height > width
         orientation_mismatch = cur_is_portrait != is_portrait_canvas
 
         if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_AVOID:
-            out = await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
-            self._render_cache = _BytesCache(when=now, data=out) if out else None
-            return out
+            return await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
 
         if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_PAIR:
             other = await self._find_next_mismatch_image(items, is_portrait_canvas, limit=12)
             if other:
-                composed = _pair_images(
-                    img,
-                    other,
-                    width,
-                    height,
-                    fill_mode,
-                    is_portrait_canvas,
-                    divider,
-                    divider_fill,
-                    transparent_divider,
+                composed = await self.hass.async_add_executor_job(
+                    ip.pair_images, img, other, width, height, fill_mode,
+                    is_portrait_canvas, divider, divider_fill, transparent_divider,
                 )
-                out = self._encode_image(composed)
-                self._render_cache = _BytesCache(when=now, data=out)
-                return out
+            else:
+                composed = await self.hass.async_add_executor_job(
+                    ip.render_image, img, fill_mode, width, height,
+                )
+            return await self.hass.async_add_executor_job(ip.encode_image, composed)
 
-            composed = _render_by_fill_mode(img, fill_mode, width, height)
-            out = self._encode_image(composed)
-            self._render_cache = _BytesCache(when=now, data=out)
-            return out
-
-        if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_SINGLE:
-            composed = _render_by_fill_mode(img, fill_mode, width, height)
-            out = self._encode_image(composed)
-            self._render_cache = _BytesCache(when=now, data=out)
-            return out
-
-        composed = _render_by_fill_mode(img, fill_mode, width, height)
-
-        out = self._encode_image(composed)
-        self._render_cache = _BytesCache(when=now, data=out)
-        return out
+        composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
+        return await self.hass.async_add_executor_job(ip.encode_image, composed)
 
     async def _skip_mismatch_and_render(
         self,
@@ -408,30 +322,30 @@ class AlbumSlideshowCamera(Camera):
             return None
 
         start = self._index
-        for _ in range(0, min(count, 30)):
+        for _ in range(min(count, 30)):
             cur = items[self._index]
             b = await self._fetch_bytes(cur.url)
             if not b:
-                self._advance(count, force=True)
+                self._do_advance(count, items)
                 continue
-            img = _open_image(b)
-            if _is_portrait_item(cur, img) != is_portrait_canvas:
-                self._advance(count, force=True)
+            img = await self.hass.async_add_executor_job(ip.open_image, b)
+            if ip.is_portrait_item(cur, img) != is_portrait_canvas:
+                self._do_advance(count, items)
                 continue
 
             self._last_is_portrait = is_portrait_canvas
-            composed = _render_by_fill_mode(img, fill_mode, width, height)
-            return self._encode_image(composed)
+            composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
+            return await self.hass.async_add_executor_job(ip.encode_image, composed)
 
         self._index = start
         cur = items[self._index]
         b = await self._fetch_bytes(cur.url)
         if not b:
             return None
-        img = _open_image(b)
-        self._last_is_portrait = _is_portrait_item(cur, img)
-        composed = _render_by_fill_mode(img, fill_mode, width, height)
-        return self._encode_image(composed)
+        img = await self.hass.async_add_executor_job(ip.open_image, b)
+        self._last_is_portrait = ip.is_portrait_item(cur, img)
+        composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
+        return await self.hass.async_add_executor_job(ip.encode_image, composed)
 
     async def _find_next_mismatch_image(
         self,
@@ -458,46 +372,14 @@ class AlbumSlideshowCamera(Camera):
                 continue
 
             try:
-                img = _open_image(b)
+                img = await self.hass.async_add_executor_job(ip.open_image, b)
             except Exception:
                 continue
 
-            if _is_portrait_item(it, img) != is_portrait_canvas:
+            if ip.is_portrait_item(it, img) != is_portrait_canvas:
                 return img
 
         return None
-
-    def _advance(self, count: int, force: bool) -> None:
-        interval = int(self.store.slide_interval)
-        now = datetime.utcnow()
-
-        if force:
-            self._next_advance_at = now + timedelta(seconds=interval)
-        else:
-            if self._next_advance_at is None:
-                self._next_advance_at = now + timedelta(seconds=interval)
-                return
-            if now < self._next_advance_at:
-                return
-            self._next_advance_at = now + timedelta(seconds=interval)
-
-        if count <= 0:
-            self._index = 0
-            return
-
-        self._index %= count
-        order_mode = self.store.order_mode
-
-        if order_mode == ORDER_ALBUM:
-            self._index = (self._index + 1) % count
-            return
-
-        self._index = self._next_random_index(count)
-        cur_url = self.coordinator.data["items"][self._index].url
-        self._recent_urls.append(cur_url)
-        keep = min(20, max(1, count - 1))
-        if len(self._recent_urls) > keep:
-            self._recent_urls = self._recent_urls[-keep:]
 
     def _next_random_index(self, count: int) -> int:
         if count <= 1:
@@ -519,17 +401,16 @@ class AlbumSlideshowCamera(Camera):
         return idx
 
     async def _fetch_bytes(self, url: str) -> bytes | None:
-        now = datetime.utcnow()
         cached = self._download_cache.get(url)
-        if cached and (now - cached.when) < timedelta(minutes=10):
-            return cached.data
+        if cached is not None:
+            return cached
 
         if url.startswith("file://"):
             try:
                 p = Path(url[7:])
                 data = await self.hass.async_add_executor_job(p.read_bytes)
             except Exception as err:
-                _LOGGER.warning("Failed to read local image: %s", err)
+                _LOGGER.warning("Album Slideshow: failed to read local image: %s", err)
                 return None
         else:
             session = async_get_clientsession(self.hass)
@@ -539,24 +420,10 @@ class AlbumSlideshowCamera(Camera):
                     resp.raise_for_status()
                     data = await resp.read()
             except Exception as err:
-                _LOGGER.warning("Failed to fetch image: %s", err)
+                _LOGGER.warning("Album Slideshow: failed to fetch image: %s", err)
                 return None
 
-        self._download_cache[url] = _BytesCache(when=now, data=data)
-
-        if len(self._download_cache) > 120:
-            oldest = sorted(self._download_cache.items(), key=lambda kv: kv[1].when)[:25]
-            for k, _ in oldest:
-                self._download_cache.pop(k, None)
+        self._download_cache.put(url, data)
 
         return data
 
-    def _encode_image(self, img: Image.Image) -> bytes:
-        out = io.BytesIO()
-        save_opts: dict[str, Any] = {}
-        if "A" in img.getbands():
-            img.save(out, format="PNG", optimize=True)
-            return out.getvalue()
-        save_opts.update({"quality": 88, "optimize": True})
-        img.convert("RGB").save(out, format="JPEG", **save_opts)
-        return out.getvalue()
