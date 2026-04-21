@@ -11,7 +11,6 @@ from .const import (
     FILL_COVER,
     FILL_CONTAIN,
     FILL_BLUR,
-    MAX_RESOLUTION_OPTIONS,
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_SINGLE,
     ORIENTATION_MISMATCH_AVOID,
@@ -35,7 +34,6 @@ async def async_setup_entry(
             PortraitModeSelect(entry, store),
             OrderModeSelect(entry, store),
             AspectRatioSelect(entry, store),
-            MaxResolutionSelect(entry, store),
         ]
     )
 
@@ -179,32 +177,4 @@ class AspectRatioSelect(_BaseSelect):
         old = await self.async_get_last_state()
         if old and old.state in self.options:
             self.store.aspect_ratio = old.state
-            self.store.notify()
-
-
-class MaxResolutionSelect(_BaseSelect):
-    _attr_icon = "mdi:image-size-select-large"
-
-    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
-        super().__init__(entry, store)
-        self._attr_unique_id = f"{entry.entry_id}_max_resolution"
-        self._attr_name = "Max resolution"
-        self._attr_options = MAX_RESOLUTION_OPTIONS
-
-    @property
-    def current_option(self):
-        value = self.store.max_resolution
-        return value if value in self.options else self.options[0]
-
-    async def async_select_option(self, option: str) -> None:
-        if option not in self.options:
-            return
-        self.store.max_resolution = option
-        self.store.notify()
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        old = await self.async_get_last_state()
-        if old and old.state in self.options:
-            self.store.max_resolution = old.state
             self.store.notify()
