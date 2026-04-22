@@ -33,6 +33,10 @@ class SlideshowStore:
     image_cache_mb: int = DEFAULT_IMAGE_CACHE_MB
     max_resolution: str = DEFAULT_MAX_RESOLUTION
 
+    # In-memory last rendered frame. Not user-configurable; used to re-serve
+    # the previous slide instantly across a camera reload.
+    last_frame: bytes | None = None
+
     _listeners: list[Listener] = field(default_factory=list)
 
     def add_listener(self, cb: Listener) -> None:
