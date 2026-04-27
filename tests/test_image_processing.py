@@ -211,3 +211,75 @@ def test_parse_divider_color_invalid_falls_back_to_white():
     color, transparent = ip.parse_divider_color("notacolor")
     assert color == (255, 255, 255)
     assert transparent is False
+
+
+# -- is_portrait_item_by_metadata -------------------------------------------
+
+def test_metadata_only_portrait():
+    item = MediaItem(url="x", width=100, height=200, mime_type=None, filename=None)
+    assert ip.is_portrait_item_by_metadata(item) is True
+
+
+def test_metadata_only_landscape():
+    item = MediaItem(url="x", width=300, height=100, mime_type=None, filename=None)
+    assert ip.is_portrait_item_by_metadata(item) is False
+
+
+def test_metadata_only_unknown_returns_none():
+    item = MediaItem(url="x", width=None, height=None, mime_type=None, filename=None)
+    assert ip.is_portrait_item_by_metadata(item) is None
+
+
+def test_metadata_only_zero_dims_returns_none():
+    item = MediaItem(url="x", width=0, height=0, mime_type=None, filename=None)
+    assert ip.is_portrait_item_by_metadata(item) is None
+
+
+# -- encode_image (Android compatibility) -----------------------------------
+
+def test_encoded_jpeg_is_baseline_not_progressive():
+    # Baseline JPEGs start with SOF0 (0xFFC0). Progressive would be SOF2 (0xFFC2).
+    # Scan the encoded bytes for an SOF marker.
+    img = Image.new("RGB", (64, 64), color=(100, 150, 200))
+    data = ip.encode_image(img)
+    # Find first SOF marker (0xFFCn where n in {0,1,2,3})
+    sof = None
+    for i in range(len(data) - 1):
+        if data[i] == 0xFF and data[i + 1] in (0xC0, 0xC1, 0xC2, 0xC3):
+            sof = data[i + 1]
+            break
+    assert sof is not None, "No SOF marker found in JPEG"
+    assert sof == 0xC0, f"Expected baseline (SOF0=0xC0), got 0x{sof:02X}"
+
+
+# -- safe_close -------------------------------------------------------------
+
+def test_safe_close_none_is_noop():
+    ip.safe_close(None)  # must not raise
+
+
+def test_safe_close_closes_image():
+    img = Image.new("RGB", (10, 10))
+    ip.safe_close(img)
+    # Accessing .load on a closed image raises; we just assert no exception
+    # from the close call itself.
+
+
+# -- open_image draft-mode does not crash on non-JPEG -----------------------
+
+def test_open_image_with_target_size_png_ok():
+    # PNG has no draft support; open_image must not raise when given a target.
+    data = _make_png_rgba(100, 100)
+    img = ip.open_image(data, target_size=(50, 50))
+    assert img.size == (100, 100)
+    ip.safe_close(img)
+
+
+def test_open_image_with_target_size_jpeg_ok():
+    data = _make_jpeg(2000, 2000)
+    img = ip.open_image(data, target_size=(200, 200))
+    # Draft mode is best-effort; we don't require a specific downscale,
+    # only that we got a usable image back.
+    assert img.mode == "RGB"
+    assert img.size[0] > 0 and img.size[1] > 0
+    ip.safe_close(img)

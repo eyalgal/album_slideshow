@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from collections import OrderedDict
 import logging
 import random
 from pathlib import Path
@@ -30,18 +29,27 @@ from .store import SlideshowStore
 
 _LOGGER = logging.getLogger(__name__)
 
+# Cap a single download at 64 MB. Larger images are rejected before decode
+# to protect low-memory devices. This is well above any realistic camera
+# JPEG; RAW/NEF/etc. aren't supported as camera frames anyway.
+_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 
-@dataclass
-class _BytesCache:
-    when: datetime
-    data: bytes
+# Only these content types are accepted as image bodies. If a server returns
+# HTML (captive portal, 404 page rendered as 200, etc.) we reject it early.
+_ACCEPTED_IMAGE_PREFIX = ("image/",)
+
+# Max candidates we'll scan when searching for a mismatched-orientation
+# pairing partner. Metadata-only checks are nearly free; decode-only checks
+# (no metadata available) are expensive.
+_PAIR_SEARCH_LIMIT = 12
+_SKIP_SEARCH_LIMIT = 30
 
 
 class _DownloadCache:
-    """Byte-budget LRU cache for downloaded image data."""
+    """Byte-budget LRU cache for downloaded image data, O(1) per operation."""
 
     def __init__(self, max_bytes: int) -> None:
-        self._cache: dict[str, _BytesCache] = {}
+        self._cache: "OrderedDict[str, bytes]" = OrderedDict()
         self._total_bytes: int = 0
         self._max_bytes: int = max(max_bytes, 1)
 
@@ -50,19 +58,20 @@ class _DownloadCache:
         return self._total_bytes
 
     def get(self, url: str) -> bytes | None:
-        entry = self._cache.get(url)
-        if entry is None:
+        data = self._cache.get(url)
+        if data is None:
             return None
-        entry.when = datetime.now(timezone.utc)
-        return entry.data
+        self._cache.move_to_end(url)
+        return data
 
     def put(self, url: str, data: bytes) -> None:
         if len(data) > self._max_bytes:
             # Item exceeds the entire cache budget; skip caching but don't raise.
             return
         if url in self._cache:
-            self._total_bytes -= len(self._cache[url].data)
-        self._cache[url] = _BytesCache(when=datetime.now(timezone.utc), data=data)
+            self._total_bytes -= len(self._cache[url])
+            del self._cache[url]
+        self._cache[url] = data
         self._total_bytes += len(data)
         self._evict()
 
@@ -72,9 +81,8 @@ class _DownloadCache:
 
     def _evict(self) -> None:
         while self._total_bytes > self._max_bytes and self._cache:
-            oldest_key = min(self._cache, key=lambda k: self._cache[k].when)
-            self._total_bytes -= len(self._cache[oldest_key].data)
-            del self._cache[oldest_key]
+            _, data = self._cache.popitem(last=False)
+            self._total_bytes -= len(data)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -132,6 +140,12 @@ class AlbumSlideshowCamera(Camera):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        # Restore last framebuffer (if the store kept one) so the camera has
+        # something to show immediately after a restart, rather than a broken
+        # image placeholder while the first render completes.
+        restored = getattr(self.store, "last_frame", None)
+        if isinstance(restored, (bytes, bytearray)) and restored:
+            self._framebuffer = bytes(restored)
         self._render_task = self.hass.async_create_background_task(
             self._render_loop(), name="album_slideshow_render_loop"
         )
@@ -196,6 +210,21 @@ class AlbumSlideshowCamera(Camera):
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         return self._framebuffer
 
+    async def _wait_or_interrupt(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds, returning True if interrupted.
+
+        Safe wrapper around clear() + wait_for() - callers don't have to
+        worry about the ordering of the two operations. The clear() runs
+        synchronously before the awaitable is created, so no interrupt can
+        be lost on the single-threaded event loop.
+        """
+        self._interrupt_event.clear()
+        try:
+            await asyncio.wait_for(self._interrupt_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     async def _render_loop(self) -> None:
         """Background task: render slides into _framebuffer, advance on timer or interrupt."""
         should_advance = False  # Don't advance on the very first render
@@ -219,18 +248,11 @@ class AlbumSlideshowCamera(Camera):
                 should_advance = True  # Skip the broken image on retry
                 continue
 
-            # Wait for slide_interval, or wake early on interrupt
-            # clear() before wait_for() is safe: there is no await between them,
-            # so no interrupt can fire in between on the single-threaded event loop.
-            self._interrupt_event.clear()
-            interval = int(self.store.slide_interval)
-            try:
-                await asyncio.wait_for(self._interrupt_event.wait(), timeout=float(interval))
-                # Woken by interrupt: advance only if force_next was set
+            interrupted = await self._wait_or_interrupt(float(int(self.store.slide_interval)))
+            if interrupted:
                 should_advance = self._force_next
                 self._force_next = False
-            except asyncio.TimeoutError:
-                # Normal timer expiry: advance to next slide
+            else:
                 should_advance = True
 
     async def _render_cycle(self, advance: bool) -> None:
@@ -247,10 +269,13 @@ class AlbumSlideshowCamera(Camera):
         out = await self._render_current(items)
         if out is not None:
             self._framebuffer = out
+            # Cached on the store so a camera reload (without full HA restart)
+            # can rehydrate the framebuffer instantly.
+            self.store.last_frame = out
             self.async_write_ha_state()
 
     def _do_advance(self, count: int, items: list) -> None:
-        """Advance _index to the next slide."""
+        """Advance _index to the next slide and commit random-order position."""
         if count <= 0:
             self._index = 0
             return
@@ -269,6 +294,17 @@ class AlbumSlideshowCamera(Camera):
         if len(self._recent_urls) > keep:
             self._recent_urls = self._recent_urls[-keep:]
 
+    def _peek_advance(self, count: int, items: list) -> None:
+        """Advance _index without committing to random-order bookkeeping.
+
+        Used by the orientation-avoid search so that rejected candidates
+        don't burn through the random cycle and cause premature repeats.
+        """
+        if count <= 0:
+            self._index = 0
+            return
+        self._index = (self._index + 1) % count
+
     async def _render_current(self, items: list[MediaItem]) -> bytes | None:
         """Render the image at self._index and return encoded bytes."""
         fill_mode = self.store.fill_mode
@@ -279,35 +315,63 @@ class AlbumSlideshowCamera(Camera):
         width, height = ip.resolve_output_size(None, None, self.store.aspect_ratio, max_short_edge)
 
         cur = items[self._index]
+        is_portrait_canvas = height > width
+
+        # Metadata fast path: if we can resolve orientation without downloading,
+        # we may short-circuit the mismatch handling before any bytes are read.
+        meta_portrait = ip.is_portrait_item_by_metadata(cur)
+        if (
+            meta_portrait is not None
+            and meta_portrait != is_portrait_canvas
+            and portrait_mode == ORIENTATION_MISMATCH_AVOID
+        ):
+            return await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
+
         cur_bytes = await self._fetch_bytes(cur.url)
         if not cur_bytes:
             raise RuntimeError(f"Failed to fetch image: {cur.url}")
 
-        img = await self.hass.async_add_executor_job(ip.open_image, cur_bytes)
-        cur_is_portrait = ip.is_portrait_item(cur, img)
-        self._last_is_portrait = cur_is_portrait
+        img = await self.hass.async_add_executor_job(
+            ip.open_image, cur_bytes, (width, height)
+        )
+        try:
+            cur_is_portrait = ip.is_portrait_item(cur, img)
+            self._last_is_portrait = cur_is_portrait
+            orientation_mismatch = cur_is_portrait != is_portrait_canvas
 
-        is_portrait_canvas = height > width
-        orientation_mismatch = cur_is_portrait != is_portrait_canvas
+            if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_AVOID:
+                ip.safe_close(img)
+                img = None
+                return await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
 
-        if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_AVOID:
-            return await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
-
-        if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_PAIR:
-            other = await self._find_next_mismatch_image(items, is_portrait_canvas, limit=12)
-            if other:
-                composed = await self.hass.async_add_executor_job(
-                    ip.pair_images, img, other, width, height, fill_mode,
-                    is_portrait_canvas, divider, divider_fill, transparent_divider,
+            if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_PAIR:
+                other = await self._find_next_mismatch_image(
+                    items, is_portrait_canvas, width, height, limit=_PAIR_SEARCH_LIMIT
                 )
-            else:
-                composed = await self.hass.async_add_executor_job(
-                    ip.render_image, img, fill_mode, width, height,
-                )
-            return await self.hass.async_add_executor_job(ip.encode_image, composed)
+                try:
+                    if other:
+                        composed = await self.hass.async_add_executor_job(
+                            ip.pair_images, img, other, width, height, fill_mode,
+                            is_portrait_canvas, divider, divider_fill, transparent_divider,
+                        )
+                    else:
+                        composed = await self.hass.async_add_executor_job(
+                            ip.render_image, img, fill_mode, width, height,
+                        )
+                finally:
+                    ip.safe_close(other)
+                try:
+                    return await self.hass.async_add_executor_job(ip.encode_image, composed)
+                finally:
+                    ip.safe_close(composed)
 
-        composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
-        return await self.hass.async_add_executor_job(ip.encode_image, composed)
+            composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
+            try:
+                return await self.hass.async_add_executor_job(ip.encode_image, composed)
+            finally:
+                ip.safe_close(composed)
+        finally:
+            ip.safe_close(img)
 
     async def _skip_mismatch_and_render(
         self,
@@ -317,42 +381,92 @@ class AlbumSlideshowCamera(Camera):
         fill_mode: str,
         is_portrait_canvas: bool,
     ) -> bytes | None:
+        """Skip mismatched images (peeking through candidates) and render the first match.
+
+        Peek-advances _index without touching the random cycle for rejected
+        candidates, so the random order stays long.
+        """
         count = len(items)
         if count <= 0:
             return None
 
         start = self._index
-        for _ in range(min(count, 30)):
+
+        for _ in range(min(count, _SKIP_SEARCH_LIMIT)):
             cur = items[self._index]
+
+            # Metadata fast path: reject without ever downloading.
+            meta_portrait = ip.is_portrait_item_by_metadata(cur)
+            if meta_portrait is not None:
+                if meta_portrait != is_portrait_canvas:
+                    self._peek_advance(count, items)
+                    continue
+                # Metadata says it matches - commit and render.
+                if self._index != start:
+                    self._do_advance(count, items)
+                return await self._render_single(cur, width, height, fill_mode, is_portrait_canvas)
+
+            # No metadata; must download + decode to decide.
             b = await self._fetch_bytes(cur.url)
             if not b:
-                self._do_advance(count, items)
+                self._peek_advance(count, items)
                 continue
-            img = await self.hass.async_add_executor_job(ip.open_image, b)
-            if ip.is_portrait_item(cur, img) != is_portrait_canvas:
-                self._do_advance(count, items)
-                continue
+            img = await self.hass.async_add_executor_job(ip.open_image, b, (width, height))
+            try:
+                if ip.is_portrait_item(cur, img) != is_portrait_canvas:
+                    self._peek_advance(count, items)
+                    continue
+                if self._index != start:
+                    self._do_advance(count, items)
+                self._last_is_portrait = is_portrait_canvas
+                composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
+                try:
+                    return await self.hass.async_add_executor_job(ip.encode_image, composed)
+                finally:
+                    ip.safe_close(composed)
+            finally:
+                ip.safe_close(img)
 
-            self._last_is_portrait = is_portrait_canvas
-            composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
-            return await self.hass.async_add_executor_job(ip.encode_image, composed)
-
+        # Nothing matched within the limit; fall back to rendering the original.
         self._index = start
-        cur = items[self._index]
-        b = await self._fetch_bytes(cur.url)
+        return await self._render_single(items[self._index], width, height, fill_mode, is_portrait_canvas)
+
+    async def _render_single(
+        self,
+        item: MediaItem,
+        width: int,
+        height: int,
+        fill_mode: str,
+        is_portrait_canvas: bool,
+    ) -> bytes | None:
+        b = await self._fetch_bytes(item.url)
         if not b:
             return None
-        img = await self.hass.async_add_executor_job(ip.open_image, b)
-        self._last_is_portrait = ip.is_portrait_item(cur, img)
-        composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
-        return await self.hass.async_add_executor_job(ip.encode_image, composed)
+        img = await self.hass.async_add_executor_job(ip.open_image, b, (width, height))
+        try:
+            self._last_is_portrait = ip.is_portrait_item(item, img)
+            composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
+            try:
+                return await self.hass.async_add_executor_job(ip.encode_image, composed)
+            finally:
+                ip.safe_close(composed)
+        finally:
+            ip.safe_close(img)
 
     async def _find_next_mismatch_image(
         self,
         items: list[MediaItem],
         is_portrait_canvas: bool,
-        limit: int = 10,
+        width: int,
+        height: int,
+        limit: int = _PAIR_SEARCH_LIMIT,
     ) -> Image.Image | None:
+        """Find an image with the opposite orientation of the canvas.
+
+        Uses metadata wherever possible - only candidates without width/height
+        metadata are downloaded and decoded for their orientation. The returned
+        PIL image is the caller's to close.
+        """
         if not items:
             return None
         n = len(items)
@@ -367,17 +481,23 @@ class AlbumSlideshowCamera(Camera):
             if it.url in self._recent_urls:
                 continue
 
+            meta_portrait = ip.is_portrait_item_by_metadata(it)
+            if meta_portrait is not None and meta_portrait == is_portrait_canvas:
+                # Metadata says this one is the wrong orientation for pairing; skip.
+                continue
+
             b = await self._fetch_bytes(it.url)
             if not b:
                 continue
 
             try:
-                img = await self.hass.async_add_executor_job(ip.open_image, b)
+                img = await self.hass.async_add_executor_job(ip.open_image, b, (width, height))
             except Exception:
                 continue
 
             if ip.is_portrait_item(it, img) != is_portrait_canvas:
                 return img
+            ip.safe_close(img)
 
         return None
 
@@ -412,18 +532,61 @@ class AlbumSlideshowCamera(Camera):
             except Exception as err:
                 _LOGGER.warning("Album Slideshow: failed to read local image: %s", err)
                 return None
+            if len(data) > _MAX_DOWNLOAD_BYTES:
+                _LOGGER.warning(
+                    "Album Slideshow: local image %s is %d bytes, exceeds %d byte limit; skipping",
+                    url, len(data), _MAX_DOWNLOAD_BYTES,
+                )
+                return None
         else:
-            session = async_get_clientsession(self.hass)
-            try:
-                async with async_timeout.timeout(30):
-                    resp = await session.get(url)
-                    resp.raise_for_status()
-                    data = await resp.read()
-            except Exception as err:
-                _LOGGER.warning("Album Slideshow: failed to fetch image: %s", err)
+            data = await self._http_get(url)
+            if data is None:
                 return None
 
         self._download_cache.put(url, data)
-
         return data
 
+    async def _http_get(self, url: str) -> bytes | None:
+        session = async_get_clientsession(self.hass)
+        try:
+            async with async_timeout.timeout(30):
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+
+                    content_type = resp.headers.get("Content-Type", "")
+                    primary = content_type.split(";", 1)[0].strip().lower()
+                    if primary and not primary.startswith(_ACCEPTED_IMAGE_PREFIX):
+                        _LOGGER.debug(
+                            "Album Slideshow: rejecting %s, content-type %r is not an image",
+                            url, primary,
+                        )
+                        return None
+
+                    content_length = resp.headers.get("Content-Length")
+                    if content_length is not None:
+                        try:
+                            declared = int(content_length)
+                        except ValueError:
+                            declared = -1
+                        if declared > _MAX_DOWNLOAD_BYTES:
+                            _LOGGER.warning(
+                                "Album Slideshow: %s advertises %d bytes, exceeds %d byte limit; skipping",
+                                url, declared, _MAX_DOWNLOAD_BYTES,
+                            )
+                            return None
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > _MAX_DOWNLOAD_BYTES:
+                            _LOGGER.warning(
+                                "Album Slideshow: %s exceeded %d byte limit mid-download; aborting",
+                                url, _MAX_DOWNLOAD_BYTES,
+                            )
+                            return None
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+        except Exception as err:
+            _LOGGER.warning("Album Slideshow: failed to fetch image: %s", err)
+            return None
