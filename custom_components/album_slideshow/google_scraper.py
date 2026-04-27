@@ -115,8 +115,9 @@ async def fetch_album(session, share_url: str, *, timeout: float = 30.0) -> tupl
         if not page_id or len(items) >= _MAX_ITEMS or added == 0:
             break
 
-    _LOGGER.debug(
-        "Album scrape: completed in %d page(s), %d unique photos", page_no, len(items)
+    _LOGGER.info(
+        "Album scraper: batchexecute fetched %d photos in %d page(s)",
+        len(items), page_no,
     )
     return title, items
 

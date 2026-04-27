@@ -354,8 +354,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Threshold: if scrape returns >= 250 items we trust it; otherwise we
         # also call publicalbum.org and use whichever returns more.
         if len(scraped_items) >= 250:
-            _LOGGER.debug(
-                "Google shared album: scrape returned %d items, skipping publicalbum.org",
+            _LOGGER.info(
+                "Album scraper: source=batchexecute items=%d",
                 len(scraped_items),
             )
             return {
@@ -368,7 +368,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         except UpdateFailed:
             if scraped_items:
                 _LOGGER.info(
-                    "Google shared album: publicalbum.org failed; using %d scraped items",
+                    "Album scraper: source=batchexecute items=%d (publicalbum.org failed)",
                     len(scraped_items),
                 )
                 return {
@@ -409,8 +409,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Pick the source with more items; prefer publicalbum.org on a tie
         # because its URLs come pre-decorated with size hints.
         if len(scraped_items) > len(api_items):
-            _LOGGER.debug(
-                "Google shared album: scrape (%d) > publicalbum.org (%d); using scrape",
+            _LOGGER.info(
+                "Album scraper: source=batchexecute items=%d (publicalbum.org=%d)",
                 len(scraped_items), len(api_items),
             )
             return {
@@ -435,9 +435,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 )
             raise UpdateFailed("No photos returned from Google shared album")
 
-        _LOGGER.debug(
-            "Google shared album: scrape=%d, publicalbum.org=%d; using publicalbum.org",
-            len(scraped_items), len(api_items),
+        _LOGGER.info(
+            "Album scraper: source=publicalbum items=%d (batchexecute=%d)",
+            len(api_items), len(scraped_items),
         )
         return {
             "title": result.get("title") or self.entry.title,
