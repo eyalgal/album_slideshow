@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 
 import async_timeout
@@ -334,14 +335,91 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
         session = async_get_clientsession(self.hass)
 
-        data = await self._call_publicalbum(session, 500)
+        # Try direct HTML scrape first - bypasses publicalbum.org's ~300 cap.
+        scraped_items: list[MediaItem] = []
+        scraped_title: str | None = None
+        try:
+            from . import google_scraper
+
+            html = await google_scraper.fetch_album_html(session, self.album_url)
+            if html:
+                scraped_items = google_scraper.parse_album_html(html)
+                scraped_title = _extract_html_title(html)
+        except Exception as err:  # never let scrape failure break the integration
+            _LOGGER.debug(
+                "Google shared album: HTML scrape raised %s; falling back to publicalbum.org",
+                err,
+            )
+
+        # Run publicalbum.org in parallel-ish: only call it if scrape was thin.
+        # Threshold: if scrape returns >= 250 items we trust it; otherwise we
+        # also call publicalbum.org and use whichever returns more.
+        if len(scraped_items) >= 250:
+            _LOGGER.debug(
+                "Google shared album: scrape returned %d items, skipping publicalbum.org",
+                len(scraped_items),
+            )
+            return {
+                "title": scraped_title or self.entry.title,
+                "items": scraped_items,
+            }
+
+        try:
+            data = await self._call_publicalbum(session, 500)
+        except UpdateFailed:
+            if scraped_items:
+                _LOGGER.info(
+                    "Google shared album: publicalbum.org failed; using %d scraped items",
+                    len(scraped_items),
+                )
+                return {
+                    "title": scraped_title or self.entry.title,
+                    "items": scraped_items,
+                }
+            raise
 
         result = data.get("result") if isinstance(data, dict) else {}
         if not isinstance(result, dict):
             result = {}
 
         page_items = _find_largest_item_list(result) or _find_largest_item_list(data)
-        if not page_items:
+        api_items: list[MediaItem] = []
+        if page_items:
+            seen_urls: set[str] = set()
+            for raw in page_items:
+                if _looks_like_video(raw):
+                    continue
+
+                url = _pick_url(raw)
+                if not url:
+                    continue
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                filename = raw.get("filename") or raw.get("name")
+                width = _pick_int(raw, "mediaMetadata", "width") or _pick_int(raw, "width")
+                height = _pick_int(raw, "mediaMetadata", "height") or _pick_int(raw, "height")
+                mime = raw.get("mimeType") if isinstance(raw.get("mimeType"), str) else None
+
+                api_items.append(MediaItem(
+                    url=url, width=width, height=height,
+                    mime_type=mime, filename=filename,
+                ))
+
+        # Pick the source with more items; prefer publicalbum.org on a tie
+        # because its URLs come pre-decorated with size hints.
+        if len(scraped_items) > len(api_items):
+            _LOGGER.debug(
+                "Google shared album: scrape (%d) > publicalbum.org (%d); using scrape",
+                len(scraped_items), len(api_items),
+            )
+            return {
+                "title": scraped_title or result.get("title") or self.entry.title,
+                "items": scraped_items,
+            }
+
+        if not api_items and not scraped_items:
             try:
                 raw_json = json.dumps(data, default=str)
                 _LOGGER.warning(
@@ -356,37 +434,28 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     list(data.keys()) if isinstance(data, dict) else type(data).__name__,
                     list(result.keys()) if isinstance(result, dict) else type(result).__name__,
                 )
-            raise UpdateFailed("No photos returned from publicalbum.org API")
-
-        items: list[MediaItem] = []
-        seen_urls: set[str] = set()
-        for raw in page_items:
-            if _looks_like_video(raw):
-                continue
-
-            url = _pick_url(raw)
-            if not url:
-                continue
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-
-            filename = raw.get("filename") or raw.get("name")
-            width = _pick_int(raw, "mediaMetadata", "width") or _pick_int(raw, "width")
-            height = _pick_int(raw, "mediaMetadata", "height") or _pick_int(raw, "height")
-            mime = raw.get("mimeType") if isinstance(raw.get("mimeType"), str) else None
-
-            items.append(MediaItem(
-                url=url, width=width, height=height,
-                mime_type=mime, filename=filename,
-            ))
+            raise UpdateFailed("No photos returned from Google shared album")
 
         _LOGGER.debug(
-            "Google shared album: %d raw items, %d photos returned",
-            len(page_items), len(items),
+            "Google shared album: scrape=%d, publicalbum.org=%d; using publicalbum.org",
+            len(scraped_items), len(api_items),
         )
-
         return {
             "title": result.get("title") or self.entry.title,
-            "items": items,
+            "items": api_items,
         }
+
+
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_html_title(html: str) -> str | None:
+    m = _TITLE_RE.search(html)
+    if not m:
+        return None
+    title = m.group(1).strip()
+    # Google's share pages title is typically '<album name> - Google Photos'.
+    suffix = " - Google Photos"
+    if title.endswith(suffix):
+        title = title[: -len(suffix)].strip()
+    return title or None
