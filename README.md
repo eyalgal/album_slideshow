@@ -191,10 +191,11 @@ When transparency is used, the integration outputs PNG to preserve alpha.
 
 ### Google Photos
 
-- Shared albums typically return only about 300 photos  
-- This is an upstream API limitation  
-- Videos are skipped  
-- Internet connection required  
+- Public shared albums only (link sharing must be enabled)
+- Up to 20,000 photos per album
+- Videos are skipped
+- Internet connection required
+- Relies on Google's public web endpoints; if Google changes them, the integration falls back to a 300-photo limit until the scraper is updated
 
 ### General
 
