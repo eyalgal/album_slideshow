@@ -5,7 +5,6 @@ from datetime import timedelta
 import json
 import logging
 from pathlib import Path
-import re
 from typing import Any
 
 import async_timeout
@@ -335,19 +334,19 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
         session = async_get_clientsession(self.hass)
 
-        # Try direct HTML scrape first - bypasses publicalbum.org's ~300 cap.
+        # Try direct scrape first - paginates via Google's batchexecute RPC
+        # to bypass publicalbum.org's ~300 cap.
         scraped_items: list[MediaItem] = []
         scraped_title: str | None = None
         try:
             from . import google_scraper
 
-            html = await google_scraper.fetch_album_html(session, self.album_url)
-            if html:
-                scraped_items = google_scraper.parse_album_html(html)
-                scraped_title = _extract_html_title(html)
+            scraped_title, scraped_items = await google_scraper.fetch_album(
+                session, self.album_url
+            )
         except Exception as err:  # never let scrape failure break the integration
             _LOGGER.debug(
-                "Google shared album: HTML scrape raised %s; falling back to publicalbum.org",
+                "Google shared album: scrape raised %s; falling back to publicalbum.org",
                 err,
             )
 
@@ -444,18 +443,3 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "title": result.get("title") or self.entry.title,
             "items": api_items,
         }
-
-
-_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
-
-
-def _extract_html_title(html: str) -> str | None:
-    m = _TITLE_RE.search(html)
-    if not m:
-        return None
-    title = m.group(1).strip()
-    # Google's share pages title is typically '<album name> - Google Photos'.
-    suffix = " - Google Photos"
-    if title.endswith(suffix):
-        title = title[: -len(suffix)].strip()
-    return title or None

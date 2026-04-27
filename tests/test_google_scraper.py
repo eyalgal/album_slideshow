@@ -194,3 +194,88 @@ def test_normalise_size_falls_back_when_dimensions_missing():
     assert gs._normalise_size(
         "https://lh3.googleusercontent.com/x", None, None
     ) == "https://lh3.googleusercontent.com/x=w1920-h1080"
+
+# -- batchexecute / snAcKc parsing -----------------------------------------
+
+import json as _json
+
+
+def _make_batchexecute_response(items, next_page_id, title="Album"):
+    inner = [None, items, next_page_id, [None, title]]
+    inner_json = _json.dumps(inner)
+    outer = [["wrb.fr", "snAcKc", inner_json, None, None, "generic"]]
+    return ")]}'\n\n" + _json.dumps(outer)
+
+
+def test_batchexecute_parses_items_and_next_page():
+    items = [
+        ["mk1", ["https://lh3.googleusercontent.com/aaa", 1920, 1080], 0, "d1"],
+        ["mk2", ["https://lh3.googleusercontent.com/bbb", 800, 600], 0, "d2"],
+    ]
+    body = _make_batchexecute_response(items, "next-token-123")
+    parsed_items, next_id = gs._parse_batchexecute_album_page(body)
+    assert next_id == "next-token-123"
+    assert len(parsed_items) == 2
+    assert parsed_items[0].url.startswith("https://lh3.googleusercontent.com/aaa=")
+    assert parsed_items[0].width == 1920
+
+
+def test_batchexecute_empty_next_page_becomes_none():
+    body = _make_batchexecute_response([], "")
+    items, next_id = gs._parse_batchexecute_album_page(body)
+    assert items == []
+    assert next_id is None
+
+
+def test_batchexecute_handles_garbage():
+    items, next_id = gs._parse_batchexecute_album_page("not valid")
+    assert items == []
+    assert next_id is None
+
+
+def test_batchexecute_filters_videos():
+    # A video has a duration dict (key 76647426) as its last element.
+    photo = ["mk1", ["https://lh3.googleusercontent.com/p", 100, 100], 0, "d1"]
+    video = [
+        "mk2",
+        ["https://lh3.googleusercontent.com/v", 100, 100],
+        0,
+        "d2",
+        None,
+        None,
+        {"76647426": [12345]},
+    ]
+    body = _make_batchexecute_response([photo, video], None)
+    items, _ = gs._parse_batchexecute_album_page(body)
+    assert len(items) == 1
+    assert items[0].url.startswith("https://lh3.googleusercontent.com/p=")
+
+
+# -- _extract_keys ----------------------------------------------------------
+
+def test_extract_keys_finds_request_payload():
+    html = '''
+    <script>some unrelated stuff</script>
+    <script>
+    "snAcKc",ext:foo,request:["AF1QipOTestKey-12345_-",null,null,"AuthKey-67890_-"]
+    </script>
+    '''
+    keys = gs._extract_keys(html)
+    assert keys is not None
+    assert keys.album_key == "AF1QipOTestKey-12345_-"
+    assert keys.auth_key == "AuthKey-67890_-"
+
+
+def test_extract_keys_returns_none_when_absent():
+    assert gs._extract_keys("<html>nothing here</html>") is None
+
+
+# -- _extract_title ---------------------------------------------------------
+
+def test_extract_title_strips_google_photos_suffix():
+    html = "<title>My Holiday - Google Photos</title>"
+    assert gs._extract_title(html) == "My Holiday"
+
+
+def test_extract_title_returns_none_when_missing():
+    assert gs._extract_title("<html></html>") is None
