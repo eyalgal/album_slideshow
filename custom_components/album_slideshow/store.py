@@ -14,6 +14,7 @@ from .const import (
     DEFAULT_PAIR_DIVIDER_COLOR,
     DEFAULT_IMAGE_CACHE_MB,
     DEFAULT_MAX_RESOLUTION,
+    DEFAULT_DATE_FILTER,
 )
 
 
@@ -32,6 +33,15 @@ class SlideshowStore:
     pair_divider_color: str = DEFAULT_PAIR_DIVIDER_COLOR
     image_cache_mb: int = DEFAULT_IMAGE_CACHE_MB
     max_resolution: str = DEFAULT_MAX_RESOLUTION
+
+    # Date filter mode + (optional) custom range as ISO date strings
+    # YYYY-MM-DD. Empty string means "no bound on this side".
+    date_filter: str = DEFAULT_DATE_FILTER
+    date_filter_from: str = ""
+    date_filter_to: str = ""
+
+    # Pause toggle - when True, the slideshow holds on the current frame.
+    paused: bool = False
 
     # In-memory last rendered frame. Not user-configurable; used to re-serve
     # the previous slide instantly across a camera reload.

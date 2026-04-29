@@ -300,8 +300,8 @@ def _parse_album_item(raw: Any) -> MediaItem | None:
     """Parse a single album item array.
 
     Layout used in both AF blocks and snAcKc responses:
-      [mediaKey, [url, w, h, ...], timestamp, dedupKey, timezoneOffset,
-       creationTimestamp, ..., {<numeric_keys>: ...}]
+      [mediaKey, [url, w, h, ..., [byte_size]], captured_ms, dedupKey,
+       timezoneOffsetMin, uploaded_ms, ..., {<numeric_keys>: ...}]
     """
     if not isinstance(raw, list) or len(raw) < 2:
         return None
@@ -323,13 +323,35 @@ def _parse_album_item(raw: Any) -> MediaItem | None:
             # missing live photos we can revisit by checking 146008172 too.
             return None
 
+    captured_at = raw[2] if len(raw) > 2 and _looks_like_timestamp_ms(raw[2]) else None
+    uploaded_at = raw[5] if len(raw) > 5 and _looks_like_timestamp_ms(raw[5]) else None
+
+    # File size, when present, lives at visual[-1][0] as a single int.
+    byte_size: int | None = None
+    if visual and isinstance(visual[-1], list) and visual[-1]:
+        candidate = visual[-1][0]
+        if isinstance(candidate, int) and candidate > 0:
+            byte_size = candidate
+
     return MediaItem(
         url=_normalise_size(url, width, height),
         width=width,
         height=height,
         mime_type=None,
         filename=None,
+        captured_at=captured_at,
+        uploaded_at=uploaded_at,
+        byte_size=byte_size,
     )
+
+
+# Plausible epoch-ms range: 2000-01-01 to 2100-01-01.
+_MIN_TS_MS = 946_684_800_000
+_MAX_TS_MS = 4_102_444_800_000
+
+
+def _looks_like_timestamp_ms(value: Any) -> bool:
+    return isinstance(value, int) and _MIN_TS_MS <= value <= _MAX_TS_MS
 
 
 # -- AF block parsing (for the initial 300 items embedded in the HTML) ------

@@ -279,3 +279,40 @@ def test_extract_title_strips_google_photos_suffix():
 
 def test_extract_title_returns_none_when_missing():
     assert gs._extract_title("<html></html>") is None
+# -- timestamps + byte_size -------------------------------------------------
+
+def test_parse_album_item_extracts_timestamps_and_size():
+    raw = [
+        "AF1QipMediaKey",
+        ["https://lh3.googleusercontent.com/x", 1920, 1080, None, None, None, None, None, None, [None, None, 1], [2700088]],
+        997560567000,   # captured_at: 2001-08
+        "dedup",
+        0,
+        1616254072047, # uploaded_at: 2021-03
+    ]
+    item = gs._parse_album_item(raw)
+    assert item is not None
+    assert item.captured_at == 997560567000
+    assert item.uploaded_at == 1616254072047
+    assert item.byte_size == 2700088
+
+
+def test_parse_album_item_rejects_implausible_timestamps():
+    raw = [
+        "mk", ["https://lh3.googleusercontent.com/x", 100, 100], 12345,  # too small
+        "dedup", 0, 99999,
+    ]
+    item = gs._parse_album_item(raw)
+    assert item is not None
+    assert item.captured_at is None
+    assert item.uploaded_at is None
+
+
+def test_parse_album_item_handles_missing_size():
+    raw = [
+        "mk", ["https://lh3.googleusercontent.com/x", 100, 100], None, "dedup",
+    ]
+    item = gs._parse_album_item(raw)
+    assert item is not None
+    assert item.byte_size is None
+    assert item.captured_at is None

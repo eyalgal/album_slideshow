@@ -21,9 +21,11 @@ from .const import (
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_AVOID,
     ORDER_ALBUM,
+    ORDER_RANDOM,
     PROVIDER_GOOGLE_SHARED,
 )
 from . import image_processing as ip
+from . import playlist
 from .coordinator import AlbumCoordinator, MediaItem
 from .store import SlideshowStore
 
@@ -43,6 +45,17 @@ _ACCEPTED_IMAGE_PREFIX = ("image/",)
 # (no metadata available) are expensive.
 _PAIR_SEARCH_LIMIT = 12
 _SKIP_SEARCH_LIMIT = 30
+
+
+def _ts_to_iso(ts_ms: int | None) -> str | None:
+    """Convert epoch milliseconds to an ISO-8601 string in UTC, or None."""
+    if not isinstance(ts_ms, int):
+        return None
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 class _DownloadCache:
@@ -118,6 +131,12 @@ class AlbumSlideshowCamera(Camera):
         )
         self._recent_urls: list[str] = []
         self._last_is_portrait: bool | None = None
+        # When the current frame is a paired image, this is [taken_a, taken_b]
+        # ISO strings (top/left first); None for single frames.
+        self._last_captured_at_pair: list[str | None] | None = None
+        # Cached effective playlist (after date filter + ordering). Invalidated
+        # by any store change or coordinator update.
+        self._effective_cache: tuple[int, list[MediaItem]] | None = None
 
         self._framebuffer: bytes | None = None
         self._interrupt_event: asyncio.Event = asyncio.Event()
@@ -126,6 +145,7 @@ class AlbumSlideshowCamera(Camera):
         self._render_task: asyncio.Task | None = None
 
         def _on_coordinator_update() -> None:
+            self._effective_cache = None
             self._interrupt_event.set()
             self.async_write_ha_state()
 
@@ -133,6 +153,7 @@ class AlbumSlideshowCamera(Camera):
 
         def _on_store_change() -> None:
             self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
+            self._effective_cache = None
             self._interrupt_event.set()
             self.async_write_ha_state()
 
@@ -175,19 +196,30 @@ class AlbumSlideshowCamera(Camera):
     @property
     def extra_state_attributes(self):
         data = self.coordinator.data or {}
-        items: list[MediaItem] = data.get("items", [])
+        items: list[MediaItem] = self._effective_items()
         cur = items[self._index] if items and 0 <= self._index < len(items) else None
+        captured_at = _ts_to_iso(getattr(cur, "captured_at", None))
+        captured_at_pair = self._last_captured_at_pair
         return {
             "album_title": data.get("title"),
             "media_count": len(items),
+            "media_count_total": len(data.get("items", []) or []),
             "current_index": self._index,
             "current_filename": getattr(cur, "filename", None),
             "current_url": getattr(cur, "url", None),
             "current_is_portrait": self._last_is_portrait,
+            "captured_at": captured_at_pair if captured_at_pair else captured_at,
+            "captured_at_primary": captured_at,
+            "uploaded_at": _ts_to_iso(getattr(cur, "uploaded_at", None)),
+            "byte_size": getattr(cur, "byte_size", None),
             "slide_interval": int(self.store.slide_interval),
             "fill_mode": self.store.fill_mode,
             "portrait_mode": self.store.portrait_mode,
             "order_mode": self.store.order_mode,
+            "date_filter": self.store.date_filter,
+            "date_filter_from": self.store.date_filter_from,
+            "date_filter_to": self.store.date_filter_to,
+            "paused": bool(self.store.paused),
             "refresh_hours": int(self.store.refresh_hours),
             "aspect_ratio": self.store.aspect_ratio,
             "pair_divider_px": int(self.store.pair_divider_px),
@@ -198,6 +230,34 @@ class AlbumSlideshowCamera(Camera):
     @property
     def cache_usage_mb(self) -> float:
         return round(self._download_cache.total_bytes / (1024 * 1024), 1)
+
+    def _effective_items(self) -> list[MediaItem]:
+        """Return the playlist after applying the date filter and order mode.
+
+        Cached until the coordinator or store changes (see invalidations
+        wired up in __init__).
+        """
+        data = self.coordinator.data or {}
+        raw: list[MediaItem] = data.get("items", []) or []
+        cache_key = (
+            id(raw),
+            self.store.date_filter,
+            self.store.date_filter_from,
+            self.store.date_filter_to,
+            self.store.order_mode,
+        )
+        if self._effective_cache is not None and self._effective_cache[0] == hash(cache_key):
+            return self._effective_cache[1]
+
+        filtered = playlist.filter_items(
+            raw,
+            mode=self.store.date_filter,
+            custom_from=self.store.date_filter_from,
+            custom_to=self.store.date_filter_to,
+        )
+        ordered = playlist.order_items(filtered, self.store.order_mode)
+        self._effective_cache = (hash(cache_key), ordered)
+        return ordered
 
     async def async_force_next(self) -> None:
         self._force_next = True
@@ -253,12 +313,13 @@ class AlbumSlideshowCamera(Camera):
                 should_advance = self._force_next
                 self._force_next = False
             else:
-                should_advance = True
+                # Paused slideshows hold the current frame until the user
+                # un-pauses or hits "next slide" explicitly.
+                should_advance = not bool(self.store.paused)
 
     async def _render_cycle(self, advance: bool) -> None:
         """Fetch, render, and store one frame into _framebuffer."""
-        data = self.coordinator.data or {}
-        items: list[MediaItem] = data.get("items", [])
+        items: list[MediaItem] = self._effective_items()
         if not items:
             return
 
@@ -283,7 +344,10 @@ class AlbumSlideshowCamera(Camera):
         self._index %= count
         order_mode = self.store.order_mode
 
-        if order_mode == ORDER_ALBUM:
+        # Sequential modes (album order + sorted-by-time orderings) walk in
+        # order. The list is already pre-sorted by ``order_items``, so we
+        # only need to step forward.
+        if order_mode != ORDER_RANDOM:
             self._index = (self._index + 1) % count
             return
 
@@ -337,6 +401,7 @@ class AlbumSlideshowCamera(Camera):
         try:
             cur_is_portrait = ip.is_portrait_item(cur, img)
             self._last_is_portrait = cur_is_portrait
+            self._last_captured_at_pair = None
             orientation_mismatch = cur_is_portrait != is_portrait_canvas
 
             if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_AVOID:
@@ -345,21 +410,29 @@ class AlbumSlideshowCamera(Camera):
                 return await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
 
             if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_PAIR:
-                other = await self._find_next_mismatch_image(
+                pair = await self._find_next_mismatch_image(
                     items, is_portrait_canvas, width, height, limit=_PAIR_SEARCH_LIMIT
                 )
+                other_img = pair[0] if pair else None
+                other_item = pair[1] if pair else None
                 try:
-                    if other:
+                    if other_img is not None:
                         composed = await self.hass.async_add_executor_job(
-                            ip.pair_images, img, other, width, height, fill_mode,
+                            ip.pair_images, img, other_img, width, height, fill_mode,
                             is_portrait_canvas, divider, divider_fill, transparent_divider,
                         )
+                        # Top/left first matches the renderer's pair layout
+                        # (landscape canvas: cur on left; portrait canvas: cur on top).
+                        self._last_captured_at_pair = [
+                            _ts_to_iso(getattr(cur, "captured_at", None)),
+                            _ts_to_iso(getattr(other_item, "captured_at", None)),
+                        ]
                     else:
                         composed = await self.hass.async_add_executor_job(
                             ip.render_image, img, fill_mode, width, height,
                         )
                 finally:
-                    ip.safe_close(other)
+                    ip.safe_close(other_img)
                 try:
                     return await self.hass.async_add_executor_job(ip.encode_image, composed)
                 finally:
@@ -460,12 +533,13 @@ class AlbumSlideshowCamera(Camera):
         width: int,
         height: int,
         limit: int = _PAIR_SEARCH_LIMIT,
-    ) -> Image.Image | None:
+    ) -> tuple[Image.Image, MediaItem] | None:
         """Find an image with the opposite orientation of the canvas.
 
         Uses metadata wherever possible - only candidates without width/height
         metadata are downloaded and decoded for their orientation. The returned
-        PIL image is the caller's to close.
+        PIL image is the caller's to close. The matching ``MediaItem`` is
+        returned alongside so the caller can attribute timestamps etc.
         """
         if not items:
             return None
@@ -496,7 +570,7 @@ class AlbumSlideshowCamera(Camera):
                 continue
 
             if ip.is_portrait_item(it, img) != is_portrait_canvas:
-                return img
+                return img, it
             ip.safe_close(img)
 
         return None

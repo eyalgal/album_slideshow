@@ -15,8 +15,10 @@ from .const import (
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_SINGLE,
     ORIENTATION_MISMATCH_AVOID,
+    ORDER_OPTIONS,
     ORDER_RANDOM,
-    ORDER_ALBUM,
+    DATE_FILTER_OPTIONS,
+    DATE_FILTER_OFF,
 )
 from .store import SlideshowStore
 
@@ -36,6 +38,7 @@ async def async_setup_entry(
             OrderModeSelect(entry, store),
             AspectRatioSelect(entry, store),
             MaxResolutionSelect(entry, store),
+            DateFilterSelect(entry, store),
         ]
     )
 
@@ -133,12 +136,12 @@ class OrderModeSelect(_BaseSelect):
         super().__init__(entry, store)
         self._attr_unique_id = f"{entry.entry_id}_order_mode"
         self._attr_name = "Order mode"
-        self._attr_options = [ORDER_RANDOM, ORDER_ALBUM]
+        self._attr_options = list(ORDER_OPTIONS)
 
     @property
     def current_option(self):
         value = self.store.order_mode
-        return value if value in self.options else self.options[0]
+        return value if value in self.options else ORDER_RANDOM
 
     async def async_select_option(self, option: str) -> None:
         if option not in self.options:
@@ -207,4 +210,32 @@ class MaxResolutionSelect(_BaseSelect):
         old = await self.async_get_last_state()
         if old and old.state in self.options:
             self.store.max_resolution = old.state
+            self.store.notify()
+
+
+class DateFilterSelect(_BaseSelect):
+    _attr_icon = "mdi:calendar-filter"
+
+    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
+        super().__init__(entry, store)
+        self._attr_unique_id = f"{entry.entry_id}_date_filter"
+        self._attr_name = "Date filter"
+        self._attr_options = list(DATE_FILTER_OPTIONS)
+
+    @property
+    def current_option(self):
+        value = self.store.date_filter
+        return value if value in self.options else DATE_FILTER_OFF
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in self.options:
+            return
+        self.store.date_filter = option
+        self.store.notify()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        old = await self.async_get_last_state()
+        if old and old.state in self.options:
+            self.store.date_filter = old.state
             self.store.notify()

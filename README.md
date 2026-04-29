@@ -38,6 +38,16 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - NAS mounted directories
 - Optional recursive scanning
 
+### 🗓 Filter & Order by Date
+- Date filter: last 7 / 30 / 365 days, this month, this year, **On this day** memories, or a custom range
+- Order modes: random, album order, **newest taken**, **oldest taken**, **newest added**, **oldest added**
+- Capture date and upload date exposed as camera attributes (with paired-photo support)
+
+### ⏯ Pause / Resume
+- Pause switch holds the current slide indefinitely
+- Manual "Next slide" button still works while paused
+- Survives Home Assistant restarts
+
 ### 🎨 Smart Rendering Engine
 
 #### Orientation Mismatch Handling
@@ -75,10 +85,14 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Image cache size | 150 | 50–1000 (MB) | Memory budget for downloaded image data |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
-| Select | Order mode | shuffle | shuffle, album | Slide ordering behavior |
+| Select | Order mode | random | random, album_order, newest_taken, oldest_taken, newest_added, oldest_added | Slide ordering behavior |
 | Select | Aspect ratio | 16:9 | 16:9, 4:3, 1:1, 9:16, and more | Canvas aspect ratio |
 | Select | Max resolution | 4K (2160p) | 480p, 720p, 1080p, 1440p, 4K (2160p), original | Cap output resolution by short edge; use original to render at native size |
+| Select | Date filter | off | off, last_7_days, last_30_days, last_365_days, this_month, this_year, on_this_day, custom_range | Restrict the slideshow to a date window based on photo capture date |
+| Text | Date filter (from) | empty | YYYY-MM-DD or empty | Start of custom date range (inclusive) |
+| Text | Date filter (to) | empty | YYYY-MM-DD or empty | End of custom date range (inclusive) |
 | Text | Pair divider color | #FFFFFF | Hex, named colors, transparent | Divider color between paired images |
+| Switch | Pause slideshow | off | on / off | Hold the current frame; advances pause until turned off |
 
 ---
 
@@ -170,6 +184,28 @@ Each album you configure creates the following entities in Home Assistant.
 
 ---
 
+### 📋 Camera Attributes
+
+The slideshow camera exposes per-frame metadata as attributes (use with `state_attr('camera.x', '<name>')` in templates):
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `album_title` | string | Title of the source album |
+| `media_count` | int | Photos in the active playlist (after date filter) |
+| `media_count_total` | int | Total photos available before filtering |
+| `current_index` | int | Index of the current slide |
+| `current_filename` | string \| null | Source filename when known |
+| `current_url` | string \| null | URL of the current slide |
+| `current_is_portrait` | bool \| null | Orientation of the current slide |
+| `captured_at` | string \| list \| null | ISO-8601 capture date. List of `[primary, partner]` when paired (top/left first) |
+| `captured_at_primary` | string \| null | Capture date of the primary image only |
+| `uploaded_at` | string \| null | ISO-8601 date when added to the album (Google Photos only) |
+| `byte_size` | int \| null | Original file size in bytes (Google Photos only) |
+| `paused` | bool | Whether the slideshow is paused |
+| `date_filter` | string | Active date filter mode |
+
+---
+
 ## 🎨 Transparent Divider
 
 To remove visible spacing between paired images:
@@ -196,6 +232,7 @@ When transparency is used, the integration outputs PNG to preserve alpha.
 - Videos are skipped
 - Internet connection required
 - Relies on Google's public web endpoints; if Google changes them, the integration falls back to a 300-photo limit until the scraper is updated
+- The last successful album fetch is cached to disk; if a refresh fails or returns no photos, the slideshow keeps running with the cached list
 
 ### General
 

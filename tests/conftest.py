@@ -28,6 +28,7 @@ _make_stub(
     "homeassistant.helpers.aiohttp_client",
     "homeassistant.helpers.entity_platform",
     "homeassistant.helpers.entity_registry",
+    "homeassistant.helpers.storage",
     "homeassistant.helpers.update_coordinator",
     "async_timeout",
 )
@@ -64,3 +65,19 @@ _er.async_entries_for_config_entry = lambda *a, **kw: []  # type: ignore[attr-de
 
 import homeassistant.helpers.aiohttp_client as _aiohttp_client
 _aiohttp_client.async_get_clientsession = lambda *a, **kw: None  # type: ignore[attr-defined]
+
+import homeassistant.helpers.storage as _storage
+
+
+class _Store:
+    def __init__(self, *a, **kw):
+        pass
+
+    async def async_load(self):
+        return None
+
+    async def async_save(self, *a, **kw):
+        return None
+
+
+_storage.Store = _Store  # type: ignore[attr-defined]
