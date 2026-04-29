@@ -34,11 +34,8 @@ class SlideshowStore:
     image_cache_mb: int = DEFAULT_IMAGE_CACHE_MB
     max_resolution: str = DEFAULT_MAX_RESOLUTION
 
-    # Date filter mode + (optional) custom range as ISO date strings
-    # YYYY-MM-DD. Empty string means "no bound on this side".
+    # Date filter mode (preset windows like this_year / on_this_day).
     date_filter: str = DEFAULT_DATE_FILTER
-    date_filter_from: str = ""
-    date_filter_to: str = ""
 
     # Pause toggle - when True, the slideshow holds on the current frame.
     paused: bool = False

@@ -217,8 +217,6 @@ class AlbumSlideshowCamera(Camera):
             "portrait_mode": self.store.portrait_mode,
             "order_mode": self.store.order_mode,
             "date_filter": self.store.date_filter,
-            "date_filter_from": self.store.date_filter_from,
-            "date_filter_to": self.store.date_filter_to,
             "paused": bool(self.store.paused),
             "refresh_hours": int(self.store.refresh_hours),
             "aspect_ratio": self.store.aspect_ratio,
@@ -242,8 +240,6 @@ class AlbumSlideshowCamera(Camera):
         cache_key = (
             id(raw),
             self.store.date_filter,
-            self.store.date_filter_from,
-            self.store.date_filter_to,
             self.store.order_mode,
         )
         if self._effective_cache is not None and self._effective_cache[0] == hash(cache_key):
@@ -252,8 +248,6 @@ class AlbumSlideshowCamera(Camera):
         filtered = playlist.filter_items(
             raw,
             mode=self.store.date_filter,
-            custom_from=self.store.date_filter_from,
-            custom_to=self.store.date_filter_to,
         )
         ordered = playlist.order_items(filtered, self.store.order_mode)
         self._effective_cache = (hash(cache_key), ordered)

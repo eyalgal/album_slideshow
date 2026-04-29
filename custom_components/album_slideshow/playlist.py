@@ -6,11 +6,10 @@ implementation. Operates on ``MediaItem``-like objects that expose
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, TypeVar
 
 from .const import (
-    DATE_FILTER_CUSTOM,
     DATE_FILTER_LAST_7,
     DATE_FILTER_LAST_30,
     DATE_FILTER_LAST_365,
@@ -73,14 +72,12 @@ def filter_items(
     items: Iterable[T],
     *,
     mode: str,
-    custom_from: str = "",
-    custom_to: str = "",
     now: datetime | None = None,
 ) -> list[T]:
     """Filter items by ``captured_at`` according to ``mode``.
 
     Items with no ``captured_at`` are kept by default unless the mode is
-    ``custom_range`` with both bounds supplied (treated as a strict filter).
+    ``on_this_day`` (treated as a strict filter).
 
     ``now`` is overridable for deterministic tests.
     """
@@ -89,7 +86,7 @@ def filter_items(
 
     today_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
-    pred, strict = _build_predicate(mode, today_utc, custom_from, custom_to)
+    pred, strict = _build_predicate(mode, today_utc)
     if pred is None:
         return list(items)
 
@@ -108,8 +105,6 @@ def filter_items(
 def _build_predicate(
     mode: str,
     today_utc: datetime,
-    custom_from: str,
-    custom_to: str,
 ):
     """Return (predicate, strict). ``strict`` drops items without timestamps."""
     if mode == DATE_FILTER_LAST_7:
@@ -139,35 +134,5 @@ def _build_predicate(
             return (d.month, d.day) == today_md
 
         return _on_this_day, True
-    if mode == DATE_FILTER_CUSTOM:
-        from_ms = _parse_iso_date_to_ms(custom_from, end_of_day=False)
-        to_ms = _parse_iso_date_to_ms(custom_to, end_of_day=True)
-        if from_ms is None and to_ms is None:
-            return None, False
-
-        def _in_range(ts: int) -> bool:
-            if from_ms is not None and ts < from_ms:
-                return False
-            if to_ms is not None and ts > to_ms:
-                return False
-            return True
-
-        # When the user supplies a date filter, items lacking timestamps
-        # can't satisfy it - drop them rather than masking the filter.
-        return _in_range, True
 
     return None, False
-
-
-def _parse_iso_date_to_ms(value: str, *, end_of_day: bool) -> int | None:
-    if not value:
-        return None
-    try:
-        d = date.fromisoformat(value.strip())
-    except ValueError:
-        return None
-    if end_of_day:
-        dt = datetime(d.year, d.month, d.day, 23, 59, 59, 999000, tzinfo=timezone.utc)
-    else:
-        dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)

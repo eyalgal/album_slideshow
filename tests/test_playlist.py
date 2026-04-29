@@ -3,11 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import pytest
-
 from custom_components.album_slideshow import playlist
 from custom_components.album_slideshow.const import (
-    DATE_FILTER_CUSTOM,
     DATE_FILTER_LAST_7,
     DATE_FILTER_LAST_30,
     DATE_FILTER_OFF,
@@ -160,36 +157,3 @@ def test_filter_on_this_day_drops_undated():
     out = [it.url for it in playlist.filter_items(items, mode=DATE_FILTER_ON_THIS_DAY, now=_NOW)]
     # On-this-day is strict - undated items can't satisfy it, so they are dropped.
     assert out == ["anniversary"]
-
-
-def test_filter_custom_range_both_bounds():
-    items = [
-        _Item("before", captured_at=_ms(2024, 12, 31)),
-        _Item("inside", captured_at=_ms(2025, 6, 15)),
-        _Item("after", captured_at=_ms(2026, 1, 2)),
-        _Item("undated"),
-    ]
-    out = [it.url for it in playlist.filter_items(
-        items, mode=DATE_FILTER_CUSTOM, custom_from="2025-01-01", custom_to="2025-12-31", now=_NOW,
-    )]
-    # Custom range with explicit bounds is strict - drops undated items.
-    assert out == ["inside"]
-
-
-def test_filter_custom_range_only_from():
-    items = [
-        _Item("before", captured_at=_ms(2024, 1, 1)),
-        _Item("after", captured_at=_ms(2025, 6, 15)),
-    ]
-    out = [it.url for it in playlist.filter_items(
-        items, mode=DATE_FILTER_CUSTOM, custom_from="2025-01-01", now=_NOW,
-    )]
-    assert out == ["after"]
-
-
-def test_filter_custom_range_invalid_dates_disable_filter():
-    items = [_Item("a", captured_at=_ms(2020, 1, 1))]
-    out = [it.url for it in playlist.filter_items(
-        items, mode=DATE_FILTER_CUSTOM, custom_from="not-a-date", custom_to="", now=_NOW,
-    )]
-    assert out == ["a"]
