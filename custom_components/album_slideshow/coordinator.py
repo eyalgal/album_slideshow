@@ -11,6 +11,7 @@ import async_timeout
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -19,6 +20,7 @@ from .const import (
     CONF_ALBUM_URL,
     CONF_LOCAL_PATH,
     CONF_RECURSIVE,
+    DOMAIN,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
 )
@@ -34,6 +36,12 @@ class MediaItem:
     height: int | None
     mime_type: str | None
     filename: str | None
+    # Epoch milliseconds; UTC. ``captured_at`` is when the photo was taken
+    # (EXIF-style), ``uploaded_at`` is when it was added to the album.
+    captured_at: int | None = None
+    uploaded_at: int | None = None
+    # File size of the original asset in bytes, when known.
+    byte_size: int | None = None
 
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -60,6 +68,36 @@ def _pick_int(d: dict[str, Any], *path: str) -> int | None:
         return int(cur)
     except Exception:
         return None
+
+
+def _pick_timestamp_ms(d: dict[str, Any], *path: str) -> int | None:
+    """Pull a timestamp from a JSON path and normalise to epoch milliseconds.
+
+    Accepts ints (seconds or milliseconds based on magnitude) and ISO-8601
+    strings. Returns ``None`` if the value can't be parsed.
+    """
+    from datetime import datetime, timezone
+
+    cur: Any = d
+    for p in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    if cur is None:
+        return None
+    if isinstance(cur, int):
+        # Heuristic: < 1e12 means seconds, otherwise milliseconds.
+        return cur * 1000 if cur < 10**12 else cur
+    if isinstance(cur, str):
+        try:
+            iso = cur.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except Exception:
+            return None
+    return None
 
 
 def _find_largest_item_list(obj: Any) -> list[dict[str, Any]]:
@@ -169,6 +207,9 @@ def _looks_like_video(raw: dict[str, Any]) -> bool:
 
 
 class AlbumCoordinator(DataUpdateCoordinator):
+    # Bump when the persisted item shape changes incompatibly.
+    _ITEM_CACHE_VERSION = 1
+
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, store: SlideshowStore) -> None:
         self.hass = hass
         self.entry = entry
@@ -178,6 +219,15 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self.album_url: str | None = entry.data.get(CONF_ALBUM_URL)
         self.local_path: str | None = entry.data.get(CONF_LOCAL_PATH)
         self.recursive: bool = bool(entry.data.get(CONF_RECURSIVE, True))
+
+        # Persist the most recent successful album fetch so that a transient
+        # network/Google failure doesn't blank the slideshow on restart.
+        self._items_cache_store: Store = Store(
+            hass,
+            self._ITEM_CACHE_VERSION,
+            f"{DOMAIN}.{entry.entry_id}.items",
+        )
+        self._items_cache_loaded: bool = False
 
         super().__init__(
             hass,
@@ -192,13 +242,100 @@ class AlbumCoordinator(DataUpdateCoordinator):
         store.add_listener(_on_store_change)
 
     async def _async_update_data(self) -> dict[str, Any]:
-        if self.provider == PROVIDER_LOCAL_FOLDER:
-            return await self._update_local_folder()
+        try:
+            if self.provider == PROVIDER_LOCAL_FOLDER:
+                data = await self._update_local_folder()
+            elif self.provider == PROVIDER_GOOGLE_SHARED:
+                data = await self._update_google_shared()
+            else:
+                raise UpdateFailed(f"Unsupported provider: {self.provider}")
+        except UpdateFailed:
+            cached = await self._load_cached_items()
+            if cached and cached.get("items"):
+                _LOGGER.info(
+                    "Album scraper: refresh failed; serving %d cached items from disk",
+                    len(cached["items"]),
+                )
+                return cached
+            raise
 
-        if self.provider == PROVIDER_GOOGLE_SHARED:
-            return await self._update_google_shared()
+        items = data.get("items") or []
+        if items:
+            # Only persist non-empty results so we never overwrite a good
+            # cache with a transient empty fetch.
+            await self._save_cached_items(data)
+        else:
+            cached = await self._load_cached_items()
+            if cached and cached.get("items"):
+                _LOGGER.info(
+                    "Album scraper: refresh returned 0 items; serving %d cached items from disk",
+                    len(cached["items"]),
+                )
+                return cached
 
-        raise UpdateFailed(f"Unsupported provider: {self.provider}")
+        return data
+
+    async def _load_cached_items(self) -> dict[str, Any] | None:
+        try:
+            payload = await self._items_cache_store.async_load()
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Album cache: failed to load (%s)", err)
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            return None
+
+        items: list[MediaItem] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict) or not raw.get("url"):
+                continue
+            try:
+                items.append(MediaItem(
+                    url=raw["url"],
+                    width=raw.get("width"),
+                    height=raw.get("height"),
+                    mime_type=raw.get("mime_type"),
+                    filename=raw.get("filename"),
+                    captured_at=raw.get("captured_at"),
+                    uploaded_at=raw.get("uploaded_at"),
+                    byte_size=raw.get("byte_size"),
+                ))
+            except Exception:
+                continue
+
+        return {
+            "title": payload.get("title"),
+            "items": items,
+        }
+
+    async def _save_cached_items(self, data: dict[str, Any]) -> None:
+        items = data.get("items") or []
+        # Local-folder URLs are absolute paths on the host; persisting them
+        # is fine but they don't survive a host reformat. Persist anyway,
+        # the URL check at load time will skip any stale entries.
+        payload = {
+            "title": data.get("title"),
+            "items": [
+                {
+                    "url": it.url,
+                    "width": it.width,
+                    "height": it.height,
+                    "mime_type": it.mime_type,
+                    "filename": it.filename,
+                    "captured_at": it.captured_at,
+                    "uploaded_at": it.uploaded_at,
+                    "byte_size": it.byte_size,
+                }
+                for it in items
+            ],
+        }
+        try:
+            await self._items_cache_store.async_save(payload)
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Album cache: failed to save (%s)", err)
 
     async def _update_local_folder(self) -> dict[str, Any]:
         if not self.local_path:
@@ -334,14 +471,98 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
         session = async_get_clientsession(self.hass)
 
-        data = await self._call_publicalbum(session, 500)
+        # Try direct scrape first - paginates via Google's batchexecute RPC
+        # to bypass publicalbum.org's ~300 cap.
+        scraped_items: list[MediaItem] = []
+        scraped_title: str | None = None
+        try:
+            from . import google_scraper
+
+            scraped_title, scraped_items = await google_scraper.fetch_album(
+                session, self.album_url
+            )
+        except Exception as err:  # never let scrape failure break the integration
+            _LOGGER.debug(
+                "Google shared album: scrape raised %s; falling back to publicalbum.org",
+                err,
+            )
+
+        # Run publicalbum.org in parallel-ish: only call it if scrape was thin.
+        # Threshold: if scrape returns >= 250 items we trust it; otherwise we
+        # also call publicalbum.org and use whichever returns more.
+        if len(scraped_items) >= 250:
+            _LOGGER.info(
+                "Album scraper: source=batchexecute items=%d",
+                len(scraped_items),
+            )
+            return {
+                "title": scraped_title or self.entry.title,
+                "items": scraped_items,
+            }
+
+        try:
+            data = await self._call_publicalbum(session, 500)
+        except UpdateFailed:
+            if scraped_items:
+                _LOGGER.info(
+                    "Album scraper: source=batchexecute items=%d (publicalbum.org failed)",
+                    len(scraped_items),
+                )
+                return {
+                    "title": scraped_title or self.entry.title,
+                    "items": scraped_items,
+                }
+            raise
 
         result = data.get("result") if isinstance(data, dict) else {}
         if not isinstance(result, dict):
             result = {}
 
         page_items = _find_largest_item_list(result) or _find_largest_item_list(data)
-        if not page_items:
+        api_items: list[MediaItem] = []
+        if page_items:
+            seen_urls: set[str] = set()
+            for raw in page_items:
+                if _looks_like_video(raw):
+                    continue
+
+                url = _pick_url(raw)
+                if not url:
+                    continue
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                filename = raw.get("filename") or raw.get("name")
+                width = _pick_int(raw, "mediaMetadata", "width") or _pick_int(raw, "width")
+                height = _pick_int(raw, "mediaMetadata", "height") or _pick_int(raw, "height")
+                mime = raw.get("mimeType") if isinstance(raw.get("mimeType"), str) else None
+                captured_at = _pick_timestamp_ms(
+                    raw, "mediaMetadata", "creationTime"
+                ) or _pick_timestamp_ms(raw, "creationTime")
+                byte_size = _pick_int(raw, "fileSize") or _pick_int(raw, "size")
+
+                api_items.append(MediaItem(
+                    url=url, width=width, height=height,
+                    mime_type=mime, filename=filename,
+                    captured_at=captured_at,
+                    uploaded_at=None,
+                    byte_size=byte_size,
+                ))
+
+        # Pick the source with more items; prefer publicalbum.org on a tie
+        # because its URLs come pre-decorated with size hints.
+        if len(scraped_items) > len(api_items):
+            _LOGGER.info(
+                "Album scraper: source=batchexecute items=%d (publicalbum.org=%d)",
+                len(scraped_items), len(api_items),
+            )
+            return {
+                "title": scraped_title or result.get("title") or self.entry.title,
+                "items": scraped_items,
+            }
+
+        if not api_items and not scraped_items:
             try:
                 raw_json = json.dumps(data, default=str)
                 _LOGGER.warning(
@@ -356,37 +577,13 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     list(data.keys()) if isinstance(data, dict) else type(data).__name__,
                     list(result.keys()) if isinstance(result, dict) else type(result).__name__,
                 )
-            raise UpdateFailed("No photos returned from publicalbum.org API")
+            raise UpdateFailed("No photos returned from Google shared album")
 
-        items: list[MediaItem] = []
-        seen_urls: set[str] = set()
-        for raw in page_items:
-            if _looks_like_video(raw):
-                continue
-
-            url = _pick_url(raw)
-            if not url:
-                continue
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-
-            filename = raw.get("filename") or raw.get("name")
-            width = _pick_int(raw, "mediaMetadata", "width") or _pick_int(raw, "width")
-            height = _pick_int(raw, "mediaMetadata", "height") or _pick_int(raw, "height")
-            mime = raw.get("mimeType") if isinstance(raw.get("mimeType"), str) else None
-
-            items.append(MediaItem(
-                url=url, width=width, height=height,
-                mime_type=mime, filename=filename,
-            ))
-
-        _LOGGER.debug(
-            "Google shared album: %d raw items, %d photos returned",
-            len(page_items), len(items),
+        _LOGGER.info(
+            "Album scraper: source=publicalbum items=%d (batchexecute=%d)",
+            len(api_items), len(scraped_items),
         )
-
         return {
             "title": result.get("title") or self.entry.title,
-            "items": items,
+            "items": api_items,
         }

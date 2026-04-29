@@ -7,7 +7,7 @@ from homeassistant.helpers import entity_registry as er
 from .const import DOMAIN, SERVICE_NEXT_SLIDE, SERVICE_REFRESH_ALBUM, ATTR_ENTRY_ID
 from .store import SlideshowStore
 
-PLATFORMS: list[str] = ["camera", "sensor", "button", "number", "select", "text"]
+PLATFORMS: list[str] = ["camera", "sensor", "button", "number", "select", "text", "switch"]
 
 
 async def _async_cleanup_legacy_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
