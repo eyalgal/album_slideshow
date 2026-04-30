@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .const import (
     PUBLICALBUM_ENDPOINT,
@@ -20,7 +21,14 @@ from .const import (
     CONF_ALBUM_URL,
     CONF_LOCAL_PATH,
     CONF_RECURSIVE,
+    CONF_BRIGHTWHEEL_EMAIL,
+    CONF_BRIGHTWHEEL_PASSWORD,
+    CONF_BRIGHTWHEEL_SESSION,
+    CONF_BRIGHTWHEEL_STUDENT_IDS,
+    CONF_BRIGHTWHEEL_LOOKBACK_DAYS,
+    DEFAULT_BRIGHTWHEEL_LOOKBACK_DAYS,
     DOMAIN,
+    PROVIDER_BRIGHTWHEEL,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
 )
@@ -247,8 +255,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_local_folder()
             elif self.provider == PROVIDER_GOOGLE_SHARED:
                 data = await self._update_google_shared()
+            elif self.provider == PROVIDER_BRIGHTWHEEL:
+                data = await self._update_brightwheel()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
+        except ConfigEntryAuthFailed:
+            # Surfaces in HA as a Reauth notification - never fall back to
+            # the cache, the user needs to take action.
+            raise
         except UpdateFailed:
             cached = await self._load_cached_items()
             if cached and cached.get("items"):
@@ -586,4 +600,101 @@ class AlbumCoordinator(DataUpdateCoordinator):
         return {
             "title": result.get("title") or self.entry.title,
             "items": api_items,
+        }
+
+
+    async def _update_brightwheel(self) -> dict[str, Any]:
+        """Fetch photos from the configured Brightwheel guardian account."""
+        from . import brightwheel_scraper as bw
+
+        data = self.entry.data
+        email = data.get(CONF_BRIGHTWHEEL_EMAIL)
+        password = data.get(CONF_BRIGHTWHEEL_PASSWORD)
+        session_dict = data.get(CONF_BRIGHTWHEEL_SESSION)
+        student_ids = data.get(CONF_BRIGHTWHEEL_STUDENT_IDS) or []
+        lookback_days = int(
+            data.get(CONF_BRIGHTWHEEL_LOOKBACK_DAYS, DEFAULT_BRIGHTWHEEL_LOOKBACK_DAYS)
+        )
+
+        if not email or not password:
+            raise ConfigEntryAuthFailed("Brightwheel credentials missing")
+        bw_session = bw.BrightwheelSession.from_dict(session_dict)
+        if not bw_session.csrf_token or not bw_session.cookies:
+            raise ConfigEntryAuthFailed("Brightwheel session not initialised")
+
+        earliest = None
+        if lookback_days > 0:
+            from datetime import datetime, timedelta, timezone
+
+            earliest_dt = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+            earliest = earliest_dt.date().isoformat()
+
+        http_session = async_get_clientsession(self.hass)
+
+        # First attempt: use the cached cookie jar.
+        try:
+            title, raw_items, refreshed = await bw.fetch_album(
+                http_session,
+                bw_session,
+                student_ids=student_ids,
+                earliest_event_date=earliest,
+            )
+        except bw.BrightwheelAuthRequired:
+            # Try a silent re-login with stored credentials before bothering
+            # the user. This handles the common "session cookie expired"
+            # case without a Repair card.
+            _LOGGER.info("Brightwheel: session expired, attempting silent re-login")
+            try:
+                bw_session = await bw.login(http_session, email, password)
+            except bw.BrightwheelTwoFactorRequired:
+                raise ConfigEntryAuthFailed(
+                    "Brightwheel needs a new 2FA code"
+                ) from None
+            except (bw.BrightwheelAuthRequired, bw.BrightwheelError) as err:
+                raise ConfigEntryAuthFailed(str(err)) from err
+
+            try:
+                title, raw_items, refreshed = await bw.fetch_album(
+                    http_session,
+                    bw_session,
+                    student_ids=student_ids,
+                    earliest_event_date=earliest,
+                )
+            except bw.BrightwheelAuthRequired as err:
+                raise ConfigEntryAuthFailed(str(err)) from err
+            except bw.BrightwheelError as err:
+                raise UpdateFailed(f"Brightwheel API error: {err}") from err
+        except bw.BrightwheelError as err:
+            raise UpdateFailed(f"Brightwheel API error: {err}") from err
+
+        # Persist the (possibly rotated) cookie jar back onto the entry.
+        if refreshed.cookies and refreshed.cookies != bw_session.cookies:
+            new_data = dict(self.entry.data)
+            new_data[CONF_BRIGHTWHEEL_SESSION] = refreshed.to_dict()
+            self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+
+        items: list[MediaItem] = [
+            MediaItem(
+                url=raw["url"],
+                width=raw.get("width"),
+                height=raw.get("height"),
+                mime_type=raw.get("mime_type"),
+                filename=raw.get("filename"),
+                captured_at=raw.get("captured_at"),
+                uploaded_at=raw.get("uploaded_at"),
+                byte_size=raw.get("byte_size"),
+            )
+            for raw in raw_items
+            if raw.get("url")
+        ]
+
+        _LOGGER.info(
+            "Album scraper: source=brightwheel items=%d (students=%d)",
+            len(items),
+            len(student_ids) if student_ids else 0,
+        )
+
+        return {
+            "title": title or self.entry.title,
+            "items": items,
         }

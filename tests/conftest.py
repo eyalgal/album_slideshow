@@ -24,6 +24,7 @@ _make_stub(
     "homeassistant.components.camera",
     "homeassistant.config_entries",
     "homeassistant.core",
+    "homeassistant.exceptions",
     "homeassistant.helpers",
     "homeassistant.helpers.aiohttp_client",
     "homeassistant.helpers.entity_platform",
@@ -81,3 +82,32 @@ class _Store:
 
 
 _storage.Store = _Store  # type: ignore[attr-defined]
+
+
+# async_timeout is stubbed above as an empty module; provide a no-op
+# ``timeout`` context manager so coroutines that wrap requests in
+# ``async with async_timeout.timeout(...)`` can run during tests.
+import async_timeout as _async_timeout
+
+
+class _NoopTimeout:
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+_async_timeout.timeout = lambda *a, **kw: _NoopTimeout()  # type: ignore[attr-defined]
+
+import homeassistant.exceptions as _exc
+
+
+class _ConfigEntryAuthFailed(Exception):
+    pass
+
+
+_exc.ConfigEntryAuthFailed = _ConfigEntryAuthFailed  # type: ignore[attr-defined]

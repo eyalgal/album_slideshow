@@ -34,6 +34,7 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 
 ### 🖼 Image Sources
 - Google Photos shared albums
+- **Brightwheel** guardian accounts (photos shared by your child's daycare/preschool)
 - Local folder paths
 - NAS mounted directories
 - Optional recursive scanning
@@ -231,6 +232,16 @@ When transparency is used, the integration outputs PNG to preserve alpha.
 - Internet connection required
 - Relies on Google's public web endpoints; if Google changes them, the integration falls back to a 300-photo limit until the scraper is updated
 - The last successful album fetch is cached to disk; if a refresh fails or returns no photos, the slideshow keeps running with the cached list
+
+### Brightwheel
+
+- Uses Brightwheel's private REST API; **not officially supported** by Brightwheel and may break if they change endpoints
+- Sign in with the same email/password you use in the Brightwheel app; a one-time 6-digit code is emailed to you to complete login
+- Sessions are persisted across Home Assistant restarts but expire after a few weeks; you will be prompted to re-authenticate via a Repair card when that happens
+- Photo URLs are short-lived signed S3 links; setting **Album refresh** lower than 6 hours is recommended (default 24 hours is fine if you only watch the slideshow occasionally)
+- Videos posted to Brightwheel are skipped (photos only)
+- Lookback range is configurable on setup (default: 365 days; set to 0 to fetch the entire history). Brightwheel guardian accounts can hold years of photos, so a tighter window keeps the playlist fast
+- Re-authentication carries the original entity ids and settings forward
 
 ### General
 

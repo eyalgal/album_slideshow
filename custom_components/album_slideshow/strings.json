@@ -24,11 +24,50 @@
           "local_path": "Folder path",
           "recursive": "Include subfolders"
         }
+      },
+      "brightwheel_credentials": {
+        "title": "Brightwheel",
+        "description": "Sign in to your Brightwheel guardian account. The integration uses the same private API as the Brightwheel app; only photos shared with you are accessed. A 2FA code may be emailed to you on the next step.",
+        "data": {
+          "brightwheel_email": "Email",
+          "brightwheel_password": "Password",
+          "album_name": "Album name",
+          "brightwheel_lookback_days": "Lookback (days, 0 = all)"
+        }
+      },
+      "brightwheel_2fa": {
+        "title": "Brightwheel 2FA",
+        "description": "Brightwheel just emailed you a verification code. Enter it below.",
+        "data": {
+          "brightwheel_2fa_code": "6-digit code"
+        }
+      },
+      "brightwheel_students": {
+        "title": "Brightwheel students",
+        "description": "Found {count} student(s). Pick which ones to include in the slideshow (leave all selected for everyone).",
+        "data": {
+          "brightwheel_student_ids": "Students"
+        }
       }
     },
     "error": {
       "invalid_album_url": "That does not look like a Google Photos shared album link.",
-      "invalid_path": "Path is empty or invalid."
+      "invalid_path": "Path is empty or invalid.",
+      "invalid_email": "Enter a valid email address.",
+      "invalid_password": "Password is required.",
+      "invalid_album_name": "Give the album a name.",
+      "invalid_code": "Code must be 4-8 digits.",
+      "invalid_auth": "Brightwheel rejected those credentials.",
+      "two_factor_required": "Brightwheel still expects a 2FA code.",
+      "no_students": "No students found on this Brightwheel account.",
+      "no_students_selected": "Select at least one student.",
+      "cannot_connect": "Could not reach Brightwheel.",
+      "unknown": "Something went wrong. Check the Home Assistant log."
+    },
+    "abort": {
+      "reauth_unknown": "Could not find the Brightwheel entry to re-authenticate.",
+      "reauth_not_supported": "Re-authentication is only supported for the Brightwheel provider.",
+      "reauth_successful": "Brightwheel re-authentication completed."
     }
   }
 }

@@ -7,8 +7,18 @@ CONF_LOCAL_PATH = "local_path"
 CONF_RECURSIVE = "recursive"
 CONF_IMAGE_CACHE_MB = "image_cache_mb"
 
+# Brightwheel
+CONF_BRIGHTWHEEL_EMAIL = "brightwheel_email"
+CONF_BRIGHTWHEEL_PASSWORD = "brightwheel_password"
+CONF_BRIGHTWHEEL_2FA_CODE = "brightwheel_2fa_code"
+CONF_BRIGHTWHEEL_SESSION = "brightwheel_session"
+CONF_BRIGHTWHEEL_STUDENT_IDS = "brightwheel_student_ids"
+CONF_BRIGHTWHEEL_LOOKBACK_DAYS = "brightwheel_lookback_days"
+DEFAULT_BRIGHTWHEEL_LOOKBACK_DAYS = 365
+
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
+PROVIDER_BRIGHTWHEEL = "brightwheel"
 
 FILL_COVER = "cover"
 FILL_CONTAIN = "contain"
@@ -76,6 +86,10 @@ MAX_RESOLUTION_SHORT_EDGE: dict[str, int | None] = {
 }
 
 PUBLICALBUM_ENDPOINT = "https://www.publicalbum.org/api/v2/webapp/embed-player/jsonrpc"
+BRIGHTWHEEL_BASE = "https://schools.mybrightwheel.com"
+BRIGHTWHEEL_CLIENT_NAME = "web"
+BRIGHTWHEEL_CLIENT_VERSION = "234"
+BRIGHTWHEEL_DEFAULT_PAGE_SIZE = 50
 
 SERVICE_NEXT_SLIDE = "next_slide"
 SERVICE_REFRESH_ALBUM = "refresh_album"
