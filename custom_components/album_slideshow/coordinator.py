@@ -23,6 +23,7 @@ from .const import (
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
+    PROVIDER_ICLOUD_SHARED,
 )
 from .store import SlideshowStore
 
@@ -247,6 +248,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_local_folder()
             elif self.provider == PROVIDER_GOOGLE_SHARED:
                 data = await self._update_google_shared()
+            elif self.provider == PROVIDER_ICLOUD_SHARED:
+                data = await self._update_icloud_shared()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -586,4 +589,32 @@ class AlbumCoordinator(DataUpdateCoordinator):
         return {
             "title": result.get("title") or self.entry.title,
             "items": api_items,
+        }
+
+    async def _update_icloud_shared(self) -> dict[str, Any]:
+        if not self.album_url:
+            raise UpdateFailed("Missing album URL")
+
+        session = async_get_clientsession(self.hass)
+
+        from . import icloud_scraper
+
+        try:
+            title, items = await icloud_scraper.fetch_album(session, self.album_url)
+        except icloud_scraper.ICloudInvalidToken as err:
+            raise UpdateFailed(f"iCloud album not found: {err}") from err
+        except icloud_scraper.ICloudError as err:
+            raise UpdateFailed(f"iCloud shared album error: {err}") from err
+        except Exception as err:  # noqa: BLE001 - surface as UpdateFailed
+            raise UpdateFailed(f"iCloud shared album error: {err}") from err
+
+        if not items:
+            raise UpdateFailed("No photos returned from iCloud shared album")
+
+        _LOGGER.info(
+            "Album scraper: source=icloud_sharedstreams items=%d", len(items)
+        )
+        return {
+            "title": title or self.entry.title,
+            "items": items,
         }

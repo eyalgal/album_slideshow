@@ -9,6 +9,7 @@ CONF_IMAGE_CACHE_MB = "image_cache_mb"
 
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
+PROVIDER_ICLOUD_SHARED = "icloud_shared"
 
 FILL_COVER = "cover"
 FILL_CONTAIN = "contain"

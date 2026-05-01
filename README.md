@@ -131,6 +131,19 @@ config/custom_components/
 
 ---
 
+### Apple Photos (iCloud Shared Album)
+
+1. On iPhone / iPad / Mac, open the album in **Photos**
+2. Tap the share / people icon and enable **Public Website**
+3. Copy the iCloud share link (looks like `https://www.icloud.com/sharedalbum/#B0XXXXXXXXXX`)
+4. Add the integration, choose **Apple iCloud Photos**, and paste the link
+
+> **Note:** Only public iCloud shared albums work. Private "Shared Albums"
+> that require an Apple ID to view are not supported. The link must contain
+> the `#` token. Live-photo movies and videos in the album are skipped.
+
+---
+
 ### Local Folder or NAS
 
 Use any folder accessible to Home Assistant.

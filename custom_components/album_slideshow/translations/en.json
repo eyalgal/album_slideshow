@@ -16,6 +16,14 @@
           "album_url": "Shared album link"
         }
       },
+      "icloud_shared": {
+        "title": "Apple iCloud Photos",
+        "description": "Paste a public iCloud shared album link, e.g. https://www.icloud.com/sharedalbum/#B0XXXXXXXXXX. The album owner must enable 'Public Website' for the share so it works without an Apple ID.",
+        "data": {
+          "album_name": "Album name",
+          "album_url": "iCloud shared album link"
+        }
+      },
       "local_folder": {
         "title": "Local Folder",
         "description": "Pick a folder path on your Home Assistant filesystem. Use /local/... (maps to /config/www/...) or /media/local/... for NAS-mounted media folders. See the README for details.",
@@ -28,6 +36,7 @@
     },
     "error": {
       "invalid_album_url": "That does not look like a Google Photos shared album link.",
+      "invalid_icloud_url": "That does not look like a public iCloud shared album link. Expected https://www.icloud.com/sharedalbum/#... .",
       "invalid_path": "Path is empty or invalid."
     }
   }

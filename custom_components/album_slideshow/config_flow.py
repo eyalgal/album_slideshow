@@ -16,6 +16,7 @@ from .const import (
     CONF_RECURSIVE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
+    PROVIDER_ICLOUD_SHARED,
     DEFAULT_RECURSIVE,
 )
 
@@ -42,6 +43,9 @@ def _normalize_local_path(hass, path: str) -> str:
 
 
 ALBUM_URL_RE = re.compile(r"^https?://photos\.app\.goo\.gl/[^/]+/?$")
+ICLOUD_URL_RE = re.compile(
+    r"^https?://(?:www\.)?icloud\.com/sharedalbum/(?:[a-z]{2}-[a-z]{2}/)?#[A-Za-z0-9_-]+/?$"
+)
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -55,12 +59,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._provider = user_input[CONF_PROVIDER]
             if self._provider == PROVIDER_LOCAL_FOLDER:
                 return await self.async_step_local_folder()
+            if self._provider == PROVIDER_ICLOUD_SHARED:
+                return await self.async_step_icloud_shared()
             return await self.async_step_google_shared()
 
         schema = vol.Schema(
             {
                 vol.Required(CONF_PROVIDER, default=PROVIDER_GOOGLE_SHARED): vol.In({
                     PROVIDER_GOOGLE_SHARED: "Google Photos",
+                    PROVIDER_ICLOUD_SHARED: "Apple iCloud Photos",
                     PROVIDER_LOCAL_FOLDER: "Local Folder",
                 })
             }
@@ -95,6 +102,42 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
         return self.async_show_form(step_id="google_shared", data_schema=schema, errors=errors)
+
+    async def async_step_icloud_shared(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step: Apple iCloud public shared album link."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_ALBUM_URL].strip()
+            name = user_input[CONF_ALBUM_NAME].strip()
+
+            if not ICLOUD_URL_RE.match(url):
+                errors[CONF_ALBUM_URL] = "invalid_icloud_url"
+            else:
+                await self.async_set_unique_id(
+                    f"{DOMAIN}:{PROVIDER_ICLOUD_SHARED}:{url}"
+                )
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_PROVIDER: PROVIDER_ICLOUD_SHARED,
+                        CONF_ALBUM_URL: url,
+                        CONF_ALBUM_NAME: name,
+                    },
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_ALBUM_URL): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="icloud_shared", data_schema=schema, errors=errors
+        )
 
     async def async_step_local_folder(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors: dict[str, str] = {}
