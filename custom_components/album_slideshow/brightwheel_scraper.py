@@ -149,36 +149,26 @@ def _restore_cookies(jar: aiohttp.CookieJar, cookies: list[dict[str, str]]) -> N
             _LOGGER.debug("Brightwheel: cookie restore failed for %s: %s", url_str, err)
 
 
-async def _fetch_csrf(session: aiohttp.ClientSession) -> str:
-    """Hit /api/sessions/start to obtain a fresh CSRF token + cookie."""
-    url = f"{BRIGHTWHEEL_BASE}/api/sessions/start"
-    async with async_timeout.timeout(_LOGIN_TIMEOUT):
-        async with session.get(url, headers=_default_headers()) as resp:
-            if resp.status >= 400:
-                raise BrightwheelError(f"CSRF bootstrap failed: HTTP {resp.status}")
-            try:
-                payload = await resp.json(content_type=None)
-            except Exception:
-                payload = {}
+async def _read_text(resp) -> str:
+    """Best-effort body fetch for diagnostics. Trims to 500 chars."""
+    try:
+        text = await resp.text()
+    except Exception:
+        return ""
+    return text[:500]
 
-    token = ""
-    if isinstance(payload, dict):
-        token = (
-            payload.get("csrf")
-            or payload.get("csrf_token")
-            or payload.get("authenticity_token")
-            or ""
-        )
-    if not token:
-        # Fall back to the cookie value Brightwheel sets on the bootstrap.
-        for cookie_name in ("csrf-token", "_brightwheel_csrf"):
-            cookie = session.cookie_jar.filter_cookies(BRIGHTWHEEL_BASE).get(cookie_name)
-            if cookie:
-                token = cookie.value
-                break
-    if not token:
-        raise BrightwheelError("Brightwheel did not return a CSRF token")
-    return token
+
+def _extract_csrf_from_jar(jar) -> str:
+    """Pull a CSRF cookie out of the jar if Brightwheel set one."""
+    try:
+        morsels = jar.filter_cookies(BRIGHTWHEEL_BASE)
+    except Exception:
+        return ""
+    for name in ("csrf-token", "_brightwheel_csrf", "x-csrf-token", "XSRF-TOKEN"):
+        cookie = morsels.get(name)
+        if cookie:
+            return cookie.value
+    return ""
 
 
 async def login(
@@ -190,45 +180,88 @@ async def login(
 ) -> BrightwheelSession:
     """Authenticate against Brightwheel.
 
+    Brightwheel's web app uses device-aware auth: a fresh device must
+    confirm with a 6-digit code emailed to the guardian. Sending the
+    credentials returns a 2FA challenge (HTTP 412 or a JSON flag); the
+    code is then submitted to ``PATCH /api/v1/sessions`` (or POST to the
+    same path on some deployments).
+
     Raises :class:`BrightwheelTwoFactorRequired` after the first call when
     a code is needed; the caller should prompt the user and call again
     with ``code`` set.
     """
-    csrf_token = await _fetch_csrf(session)
+    url = f"{BRIGHTWHEEL_BASE}/api/v1/sessions"
 
     if code:
-        # Final step: include the 2FA code.
-        url = f"{BRIGHTWHEEL_BASE}/api/v1/sessions"
-        body = {
-            "user": {"email": email, "password": password, "2fa_code": code},
-        }
+        method = "PATCH"
+        body = {"session": {"otp_code": code}}
     else:
-        # First step: validate creds, may trigger a 2FA email.
-        url = f"{BRIGHTWHEEL_BASE}/api/v1/sessions/start"
-        body = {"user": {"email": email, "password": password}}
+        method = "POST"
+        body = {
+            "session": {
+                "email": email,
+                "password": password,
+            }
+        }
+
+    csrf_token = _extract_csrf_from_jar(session.cookie_jar)
+    headers = _default_headers(csrf_token)
+
+    _LOGGER.debug(
+        "Brightwheel: %s %s body-keys=%s csrf=%s",
+        method,
+        url,
+        list(body.get("session", {}).keys()),
+        "yes" if csrf_token else "no",
+    )
 
     async with async_timeout.timeout(_LOGIN_TIMEOUT):
-        async with session.post(url, json=body, headers=_default_headers(csrf_token)) as resp:
+        request_ctx = session.request(method, url, json=body, headers=headers)
+        async with request_ctx as resp:
             status = resp.status
+            text = await _read_text(resp)
             try:
                 payload = await resp.json(content_type=None)
             except Exception:
-                payload = {}
+                payload = None
+
+    _LOGGER.debug(
+        "Brightwheel: %s %s -> %d (body[:200]=%r)",
+        method,
+        url,
+        status,
+        text[:200],
+    )
+
+    # 412 Precondition Failed is Brightwheel's signal that 2FA is required.
+    if status == 412 or (
+        isinstance(payload, dict)
+        and (
+            payload.get("2fa_code_required")
+            or payload.get("otp_required")
+            or payload.get("requires_otp")
+            or (payload.get("error") or "").lower() in {"otp_required", "2fa_required"}
+        )
+    ):
+        raise BrightwheelTwoFactorRequired(
+            "Brightwheel emailed a 6-digit verification code"
+        )
 
     if status in (401, 403):
         raise BrightwheelAuthRequired(
             f"Brightwheel rejected credentials (HTTP {status})"
         )
     if status >= 400:
-        raise BrightwheelError(f"Brightwheel login failed: HTTP {status}")
-
-    if isinstance(payload, dict) and payload.get("2fa_code_required"):
-        # No session cookie yet - bubble up so the config flow can prompt.
-        raise BrightwheelTwoFactorRequired(
-            "Brightwheel emailed a 6-digit verification code"
+        # Surface a snippet of the body so unexpected statuses are diagnosable.
+        snippet = text[:200].replace("\n", " ")
+        raise BrightwheelError(
+            f"Brightwheel login failed: HTTP {status} body={snippet!r}"
         )
 
-    # Success: return the cookie jar + csrf for persistence.
+    # Success: refresh the CSRF token from any cookie Brightwheel just set
+    # (the response will have rotated it).
+    csrf_token = _extract_csrf_from_jar(session.cookie_jar) or csrf_token
+
     return BrightwheelSession(
         csrf_token=csrf_token,
         cookies=_serialise_cookies(session.cookie_jar),
@@ -242,15 +275,24 @@ async def _get_json(
 ) -> Any:
     async with async_timeout.timeout(_FETCH_TIMEOUT):
         async with session.get(url, headers=_default_headers(csrf_token)) as resp:
-            if resp.status in (401, 403):
+            status = resp.status
+            text = await _read_text(resp)
+            _LOGGER.debug("Brightwheel: GET %s -> %d (body[:200]=%r)", url, status, text[:200])
+            if status in (401, 403):
                 raise BrightwheelAuthRequired(
-                    f"Brightwheel session expired (HTTP {resp.status})"
+                    f"Brightwheel session expired (HTTP {status})"
                 )
-            if resp.status >= 400:
+            if status >= 400:
+                snippet = text[:200].replace("\n", " ")
                 raise BrightwheelError(
-                    f"Brightwheel API error {resp.status} on {url}"
+                    f"Brightwheel API error {status} on {url} body={snippet!r}"
                 )
-            return await resp.json(content_type=None)
+            try:
+                return await resp.json(content_type=None)
+            except Exception as err:
+                raise BrightwheelError(
+                    f"Brightwheel returned non-JSON body on {url}: {err}"
+                ) from err
 
 
 async def fetch_guardian_id(

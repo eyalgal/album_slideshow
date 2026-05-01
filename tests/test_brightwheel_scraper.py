@@ -36,6 +36,14 @@ class _FakeResponse:
             return json.loads(self._payload)
         return self._payload
 
+    async def text(self):
+        if isinstance(self._payload, str):
+            return self._payload
+        try:
+            return json.dumps(self._payload)
+        except Exception:
+            return ""
+
 
 class _FakeCookieJar:
     def __init__(self) -> None:
@@ -106,6 +114,13 @@ class FakeSession:
             {"method": "POST", "url": url, "headers": headers, "json": json}
         )
         handler = self._resolve("POST", url)
+        return handler(url, {"json": json, **kwargs})
+
+    def request(self, method, url, json=None, headers=None, **kwargs):
+        self.calls.append(
+            {"method": method.upper(), "url": url, "headers": headers, "json": json}
+        )
+        handler = self._resolve(method.upper(), url)
         return handler(url, {"json": json, **kwargs})
 
 
@@ -201,60 +216,57 @@ def event_loop():
 
 def test_login_first_call_raises_two_factor_required(event_loop):
     session = FakeSession()
-    session.on(
-        "GET",
-        "/api/sessions/start",
-        lambda url, kw: _FakeResponse(200, {"csrf": "tok-1"}),
-    )
-    session.on(
-        "POST",
-        "/api/v1/sessions/start",
-        lambda url, kw: _FakeResponse(200, {"2fa_code_required": True}),
-    )
+
+    def _post_session(url, kw):
+        return _FakeResponse(412, {"error": "otp_required"})
+
+    session.on("POST", "/api/v1/sessions", _post_session)
 
     with pytest.raises(bw.BrightwheelTwoFactorRequired):
         event_loop.run_until_complete(
             bw.login(session, "guardian@example.com", "hunter2")
         )
 
-    # Should have hit both endpoints exactly once.
     methods = [(c["method"], c["url"]) for c in session.calls]
-    assert any("/api/sessions/start" in u for _, u in methods)
-    assert any("/api/v1/sessions/start" in u for _, u in methods)
+    assert any(m == "POST" and "/api/v1/sessions" in u for m, u in methods)
+
+
+def test_login_first_call_with_json_flag_raises_two_factor_required(event_loop):
+    session = FakeSession()
+    session.on(
+        "POST",
+        "/api/v1/sessions",
+        lambda url, kw: _FakeResponse(200, {"otp_required": True}),
+    )
+    with pytest.raises(bw.BrightwheelTwoFactorRequired):
+        event_loop.run_until_complete(
+            bw.login(session, "guardian@example.com", "hunter2")
+        )
 
 
 def test_login_with_code_returns_session(event_loop):
     session = FakeSession()
-    session.on(
-        "GET",
-        "/api/sessions/start",
-        lambda url, kw: _FakeResponse(200, {"csrf": "tok-2"}),
-    )
 
-    def _post_session(url, kw):
-        # The handler also seeds the session cookie like the real API does.
-        session.cookie_jar.update_cookies({"_brightwheel_v2": "session-cookie"})
+    def _patch_session(url, kw):
+        session.cookie_jar.update_cookies(
+            {"_brightwheel_v2": "session-cookie", "csrf-token": "rotated-csrf"}
+        )
         return _FakeResponse(200, {"user": {"object_id": "guard-1"}})
 
-    session.on("POST", "/api/v1/sessions", _post_session)
+    session.on("PATCH", "/api/v1/sessions", _patch_session)
 
     bw_session = event_loop.run_until_complete(
         bw.login(session, "guardian@example.com", "hunter2", code="123456")
     )
-    assert bw_session.csrf_token == "tok-2"
+    assert bw_session.csrf_token == "rotated-csrf"
     assert any(c["name"] == "_brightwheel_v2" for c in bw_session.cookies)
 
 
 def test_login_invalid_credentials_raises_auth_required(event_loop):
     session = FakeSession()
     session.on(
-        "GET",
-        "/api/sessions/start",
-        lambda url, kw: _FakeResponse(200, {"csrf": "tok"}),
-    )
-    session.on(
         "POST",
-        "/api/v1/sessions/start",
+        "/api/v1/sessions",
         lambda url, kw: _FakeResponse(401, {"error": "bad credentials"}),
     )
     with pytest.raises(bw.BrightwheelAuthRequired):
