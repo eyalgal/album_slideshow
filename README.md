@@ -149,6 +149,25 @@ For NAS:
 
 ---
 
+### Brightwheel (manual sync)
+
+Brightwheel cannot be scraped live from Home Assistant: their site is protected by bot detection that rejects plain HTTP clients (which is why every public Brightwheel scraper drives a real browser via undetected-chromedriver).
+
+Workaround: export photos with one of these tools and point the slideshow at the resulting folder.
+
+- Desktop scraper: [`remotephone/brightwheel-crawler`](https://github.com/remotephone/brightwheel-crawler) or its lighter fork [`elitwilliams/brightwheel-image-scraper`](https://github.com/elitwilliams/brightwheel-image-scraper) - run on your PC on a schedule (Windows Task Scheduler / cron).
+- Browser extension: [Picture/Video Downloader](https://chromewebstore.google.com/detail/picture-video-downloader/gljbmiilfgabbipapcmfenedegaklnjb) - log into Brightwheel manually, scroll the feed, download photos in bulk.
+
+Then in Home Assistant:
+
+1. Add the integration and pick **Brightwheel (manual sync)**.
+2. Accept the default folder (`/media/brightwheel`) or change it.
+3. Sync your exported photos into that folder.
+
+The entry is stored as a regular Local Folder source, so any folder-mode features (recursive, ordering, date filters) apply.
+
+---
+
 ## 🧩 Entities Created
 
 Each album you configure creates the following entities in Home Assistant.

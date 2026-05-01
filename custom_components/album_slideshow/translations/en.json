@@ -24,6 +24,15 @@
           "local_path": "Folder path",
           "recursive": "Include subfolders"
         }
+      },
+      "brightwheel_manual": {
+        "title": "Brightwheel (manual sync)",
+        "description": "Brightwheel cannot be scraped live from Home Assistant. Use a desktop tool (e.g. remotephone/brightwheel-crawler) or a browser extension (e.g. Picture/Video Downloader) to export photos, drop them into the folder below, and this slideshow will pick them up. Default /media/brightwheel works on Home Assistant OS / Supervised; change it if you store media elsewhere.",
+        "data": {
+          "album_name": "Album name",
+          "local_path": "Folder path",
+          "recursive": "Include subfolders"
+        }
       }
     },
     "error": {

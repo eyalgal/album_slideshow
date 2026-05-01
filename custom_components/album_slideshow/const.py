@@ -10,6 +10,15 @@ CONF_IMAGE_CACHE_MB = "image_cache_mb"
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
 
+# Config-flow-only preset that stores a local_folder entry under the hood.
+# Brightwheel sits behind bot detection that rejects non-browser HTTP clients,
+# so live scraping inside Home Assistant is not viable. Users instead run a
+# desktop tool (e.g. https://github.com/remotephone/brightwheel-crawler) or a
+# browser extension (e.g. "Picture/Video Downloader") and drop photos into a
+# folder that Home Assistant watches.
+PRESET_BRIGHTWHEEL_MANUAL = "brightwheel_manual"
+DEFAULT_BRIGHTWHEEL_PATH = "/media/brightwheel"
+
 FILL_COVER = "cover"
 FILL_CONTAIN = "contain"
 FILL_BLUR = "blur"
