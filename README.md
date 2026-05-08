@@ -48,6 +48,13 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - Manual "Next slide" button still works while paused
 - Survives Home Assistant restarts
 
+### ✨ Transitions
+- Smooth slide transitions rendered in the browser, so they stay buttery even on lower-end hardware
+- Effects: `random`, `none`, `fade`, `slide-left`, `slide-right`, `slide-up`, `slide-down`, `wipe-left`, `wipe-right`, `zoom`
+- `random` picks a different effect per slide (and avoids repeating the previous one)
+- Configurable duration and CSS easing
+- Aspect ratio + fill mode inheritance from the camera entity (cover / contain / blur backdrop)
+
 ### 🎨 Smart Rendering Engine
 
 #### Orientation Mismatch Handling
@@ -82,7 +89,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Slide interval | 60 | Any positive integer (seconds) | Time between slides |
 | Number | Album refresh | 24 | Any positive integer (hours) | How often album contents refresh |
 | Number | Pair divider size | 8 | 0-64 (px) | Width of divider between paired images |
-| Number | Image cache size | 150 | 50–1000 (MB) | Memory budget for downloaded image data |
+| Number | Image cache size | 75 | 50-1000 (MB) | Memory budget for downloaded image data (per album) |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
 | Select | Order mode | random | random, album_order, newest_taken, oldest_taken, newest_added, oldest_added | Slide ordering behavior |
@@ -201,6 +208,48 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `byte_size` | int \| null | Original file size in bytes (Google Photos only) |
 | `paused` | bool | Whether the slideshow is paused |
 | `date_filter` | string | Active date filter mode |
+| `frame_id` | int | Monotonic counter incremented on every committed slide. Used by the [card](#-album-slideshow-card) to detect new frames |
+
+---
+
+## 🎞 Album Slideshow Card
+
+The integration ships with a custom Lovelace card that does the slide-to-slide transition entirely in the browser. The server only renders one still per slide change; the card cross-fades in CSS, which the browser composites on the GPU. Result: a smooth dissolve on a Pi 4, even with several albums on screen.
+
+The card is registered automatically when the integration loads; you do **not** need to add it as a HACS frontend repository or configure a Lovelace resource manually. After installing or upgrading, hard-refresh the dashboard once (Ctrl+Shift+R) so the browser picks up the script.
+
+A visual editor is available - pick **Album Slideshow** from the card picker in Lovelace and the form will appear automatically.
+
+### Minimal example
+
+```yaml
+type: custom:album-slideshow-card
+entity: camera.album_slideshow_living_room
+```
+
+### Full options
+
+```yaml
+type: custom:album-slideshow-card
+entity: camera.album_slideshow_living_room
+transition: random          # random | none | fade | slide-left
+                            #   | slide-right | slide-up | slide-down
+                            #   | wipe-left | wipe-right | zoom
+duration: 800               # ms; CSS transition length
+easing: ease-in-out         # any CSS timing function (ease, linear, cubic-bezier(...))
+aspect_ratio: 16/9          # CSS aspect-ratio value (16/9, 4/3, 1/1, auto)
+fit: auto                   # auto | cover | contain
+                            # auto inherits the camera's fill_mode (cover / contain / blur)
+background: '#000'          # color shown behind contained images
+tap_action: none            # none | more-info
+```
+
+### Notes
+
+- `transition: random` picks a different effect per slide and avoids repeating the previous one.
+- `fit: auto` reads the camera's `fill_mode` attribute. `blur` renders the slide as `contain` plus a blurred backdrop layer behind it.
+- Every slide commit increments the camera's `frame_id` attribute. The card cache-busts the camera proxy URL with that value, so the browser refetches a fresh JPEG on every change instead of serving a stale cached image.
+- If the entity is unavailable, the card shows a "Camera not ready" placeholder.
 
 ---
 

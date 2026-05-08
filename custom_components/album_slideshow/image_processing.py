@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import logging
@@ -274,3 +274,4 @@ def _blur_fill(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
         safe_close(rgb_fg)
     safe_close(fg)
     return bg
+

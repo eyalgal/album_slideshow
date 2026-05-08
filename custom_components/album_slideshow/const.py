@@ -62,7 +62,12 @@ DEFAULT_ASPECT_RATIO = "16:9"
 DEFAULT_PAIR_DIVIDER_PX = 8
 DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"
 DEFAULT_RECURSIVE = True
-DEFAULT_IMAGE_CACHE_MB = 150
+# Per-album download cache. Multiple albums add up: 4 × 150 MB = 600 MB
+# of just-in-case downloaded JPEGs. 75 MB caches roughly 10-20 photos
+# at typical Google Photos resolutions, which is enough for the preload
+# path. Users with one album and lots of RAM can bump this via the
+# Image cache size number entity.
+DEFAULT_IMAGE_CACHE_MB = 75
 
 MAX_RESOLUTION_OPTIONS = ["480p", "720p", "1080p", "1440p", "4K (2160p)", "original"]
 DEFAULT_MAX_RESOLUTION = "1080p"

@@ -139,6 +139,19 @@ class AlbumSlideshowCamera(Camera):
         self._effective_cache: tuple[int, list[MediaItem]] | None = None
 
         self._framebuffer: bytes | None = None
+
+        # MJPEG subscribers. Each open stream owns an asyncio.Queue of JPEG
+        # byte payloads. The render loop pushes the latest still as soon
+        # as it's encoded; if a subscriber falls behind we drop frames
+        # for that subscriber rather than block the whole loop.
+        self._mjpeg_subscribers: set[asyncio.Queue[bytes]] = set()
+
+        # Monotonic counter incremented every time a new still is committed.
+        # Exposed as the ``frame_id`` state attribute so the Lovelace card
+        # has an unambiguous "new frame ready" signal even when other
+        # attributes happen not to change between slides.
+        self._frame_id: int = 0
+
         self._interrupt_event: asyncio.Event = asyncio.Event()
         self._force_next: bool = False
         self._consecutive_failures: int = 0
@@ -167,8 +180,14 @@ class AlbumSlideshowCamera(Camera):
         restored = getattr(self.store, "last_frame", None)
         if isinstance(restored, (bytes, bytearray)) and restored:
             self._framebuffer = bytes(restored)
+        # Stagger the first render across multiple albums so they don't all
+        # decode + encode at the same instant on HA startup. Deterministic
+        # offset based on entry_id keeps the pattern stable across
+        # restarts. Up to ~3 s spread across albums.
+        startup_delay = (hash(self.entry.entry_id) % 3000) / 1000.0
         self._render_task = self.hass.async_create_background_task(
-            self._render_loop(), name="album_slideshow_render_loop"
+            self._render_loop(initial_delay=startup_delay),
+            name="album_slideshow_render_loop",
         )
 
     async def async_will_remove_from_hass(self) -> None:
@@ -222,8 +241,27 @@ class AlbumSlideshowCamera(Camera):
             "aspect_ratio": self.store.aspect_ratio,
             "pair_divider_px": int(self.store.pair_divider_px),
             "pair_divider_color": self.store.pair_divider_color,
+            "frame_id": self._frame_id,
             "pagination_debug": data.get("pagination_debug"),
         }
+
+    @property
+    def entity_picture(self) -> str | None:
+        """Return the camera proxy URL with a per-frame cache-buster.
+
+        HA core's default ``entity_picture`` only changes when the access
+        token rotates (about every five minutes). Browsers happily serve
+        the cached image to the more-info dialog and other surfaces in
+        between rotations, so they end up showing the previous slide
+        while a fresh slide is already in the framebuffer. Appending the
+        ``frame_id`` invalidates that cache as soon as a new slide is
+        committed, no matter where in HA the picture is rendered.
+        """
+        base = super().entity_picture
+        if not base:
+            return base
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}frame={self._frame_id}"
 
     @property
     def cache_usage_mb(self) -> float:
@@ -264,6 +302,73 @@ class AlbumSlideshowCamera(Camera):
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         return self._framebuffer
 
+    async def handle_async_mjpeg_stream(self, request):
+        """Stream the slideshow as multipart MJPEG.
+
+        Each open client gets a bounded asyncio.Queue that the render loop
+        pushes JPEG payloads into when a new still is committed. Visible
+        transitions are now handled by the Lovelace card on the client
+        side, so this stream just emits the latest still per slide change.
+        """
+        # Imported lazily so the module still loads in test environments
+        # that stub out homeassistant without installing aiohttp.
+        from aiohttp import web
+
+        boundary = "frame"
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": f"multipart/x-mixed-replace;boundary={boundary}",
+                "Cache-Control": "no-cache, private",
+                "Pragma": "no-cache",
+            },
+        )
+        await response.prepare(request)
+
+        # Bounded queue: a slow client should fall behind on slide commits
+        # rather than balloon memory.
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=4)
+        self._mjpeg_subscribers.add(queue)
+
+        # Push the held still immediately so the client renders something
+        # before the next slide change.
+        if self._framebuffer is not None:
+            try:
+                queue.put_nowait(self._framebuffer)
+            except asyncio.QueueFull:
+                pass
+
+        try:
+            while True:
+                payload = await queue.get()
+                try:
+                    await response.write(
+                        b"--" + boundary.encode() + b"\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(payload)).encode() + b"\r\n\r\n"
+                        + payload + b"\r\n"
+                    )
+                except (ConnectionResetError, asyncio.CancelledError):
+                    raise
+                except Exception as err:
+                    _LOGGER.debug("Album Slideshow: mjpeg client write failed: %s", err)
+                    break
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        finally:
+            self._mjpeg_subscribers.discard(queue)
+            try:
+                await response.write_eof()
+            except Exception:
+                pass
+
+        return response
+
+    # Older HA cores may dispatch via the alt name; alias for compatibility.
+    async def async_handle_async_mjpeg_stream(self, request):
+        return await self.handle_async_mjpeg_stream(request)
+
     async def _wait_or_interrupt(self, timeout: float) -> bool:
         """Wait up to ``timeout`` seconds, returning True if interrupted.
 
@@ -279,8 +384,13 @@ class AlbumSlideshowCamera(Camera):
         except asyncio.TimeoutError:
             return False
 
-    async def _render_loop(self) -> None:
+    async def _render_loop(self, initial_delay: float = 0.0) -> None:
         """Background task: render slides into _framebuffer, advance on timer or interrupt."""
+        if initial_delay > 0:
+            try:
+                await asyncio.sleep(initial_delay)
+            except asyncio.CancelledError:
+                raise
         should_advance = False  # Don't advance on the very first render
         while True:
             try:
@@ -312,7 +422,16 @@ class AlbumSlideshowCamera(Camera):
                 should_advance = not bool(self.store.paused)
 
     async def _render_cycle(self, advance: bool) -> None:
-        """Fetch, render, and store one frame into _framebuffer."""
+        """Render one frame.
+
+        The slideshow is just "advance index, compose, encode, broadcast".
+        Visible transitions are handled by the Lovelace card client-side,
+        so this path stays minimal: at most one PIL decode + encode per
+        slide change.
+
+        Compose work is serialised across all albums via a domain-wide
+        semaphore so 4 cameras don't all decode + encode at once.
+        """
         items: list[MediaItem] = self._effective_items()
         if not items:
             return
@@ -321,13 +440,72 @@ class AlbumSlideshowCamera(Camera):
         if advance:
             self._do_advance(count, items)
 
-        out = await self._render_current(items)
-        if out is not None:
-            self._framebuffer = out
-            # Cached on the store so a camera reload (without full HA restart)
-            # can rehydrate the framebuffer instantly.
-            self.store.last_frame = out
-            self.async_write_ha_state()
+        async with self._compose_semaphore:
+            composed, meta = await self._compose_for_index(items)
+            if composed is None:
+                return
+            try:
+                await self._commit_composed(composed, meta)
+            finally:
+                ip.safe_close(composed)
+
+    async def _commit_composed(self, composed: Image.Image, meta: dict) -> None:
+        """Encode the composed slide into the framebuffer and broadcast.
+
+        Encodes off the loop so the JPEG encode (30-80 ms at 1080p, more
+        at 4K) doesn't block HA.
+        """
+        encoded = await self.hass.async_add_executor_job(
+            ip.encode_image, composed
+        )
+
+        self._framebuffer = encoded
+        self.store.last_frame = encoded
+        self._frame_id += 1
+        if meta:
+            self._last_is_portrait = meta.get("is_portrait")
+        else:
+            self._last_is_portrait = None
+        self._last_captured_at_pair = meta.get("captured_at_pair") if meta else None
+
+        self._broadcast_frame(encoded)
+        self.async_write_ha_state()
+
+    @property
+    def _compose_semaphore(self) -> asyncio.Semaphore:
+        """Return the domain-wide compose semaphore, creating it on demand.
+
+        ``__init__.py`` populates it during setup, but defensive
+        initialisation here means a partially-loaded integration can
+        still render without crashing.
+        """
+        domain_data = self.hass.data.setdefault(DOMAIN, {})
+        sem = domain_data.get("compose_semaphore")
+        if sem is None:
+            sem = asyncio.Semaphore(1)
+            domain_data["compose_semaphore"] = sem
+        return sem
+
+    def _broadcast_frame(self, payload: bytes) -> None:
+        """Push a frame to every active MJPEG subscriber.
+
+        Slow subscribers get their frame dropped rather than backing up the
+        queue; the next still emission will catch them up.
+        """
+        for queue in list(self._mjpeg_subscribers):
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Drain one and retry once so a wedged client still sees
+                # the latest frame eventually instead of forever stale.
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    pass
 
     def _do_advance(self, count: int, items: list) -> None:
         """Advance _index to the next slide and commit random-order position."""
@@ -363,8 +541,18 @@ class AlbumSlideshowCamera(Camera):
             return
         self._index = (self._index + 1) % count
 
-    async def _render_current(self, items: list[MediaItem]) -> bytes | None:
-        """Render the image at self._index and return encoded bytes."""
+    async def _compose_for_index(
+        self, items: list[MediaItem]
+    ) -> tuple[Image.Image | None, dict | None]:
+        """Compose the slide at ``self._index`` into a PIL image.
+
+        Returns ``(composed, meta)`` where ``meta`` carries the orientation
+        and paired-capture metadata that ``_commit_composed`` will publish
+        as state attributes. Returns ``(None, None)`` if compose failed.
+
+        Pure compose - does NOT mutate ``self._framebuffer`` or
+        ``self._last_*`` state. The caller commits via ``_commit_composed``.
+        """
         fill_mode = self.store.fill_mode
         portrait_mode = self.store.portrait_mode
         divider = max(0, int(self.store.pair_divider_px))
@@ -383,7 +571,7 @@ class AlbumSlideshowCamera(Camera):
             and meta_portrait != is_portrait_canvas
             and portrait_mode == ORIENTATION_MISMATCH_AVOID
         ):
-            return await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
+            return await self._compose_skip_mismatch(items, width, height, fill_mode, is_portrait_canvas)
 
         cur_bytes = await self._fetch_bytes(cur.url)
         if not cur_bytes:
@@ -394,14 +582,12 @@ class AlbumSlideshowCamera(Camera):
         )
         try:
             cur_is_portrait = ip.is_portrait_item(cur, img)
-            self._last_is_portrait = cur_is_portrait
-            self._last_captured_at_pair = None
             orientation_mismatch = cur_is_portrait != is_portrait_canvas
 
             if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_AVOID:
                 ip.safe_close(img)
                 img = None
-                return await self._skip_mismatch_and_render(items, width, height, fill_mode, is_portrait_canvas)
+                return await self._compose_skip_mismatch(items, width, height, fill_mode, is_portrait_canvas)
 
             if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_PAIR:
                 pair = await self._find_next_mismatch_image(
@@ -409,15 +595,14 @@ class AlbumSlideshowCamera(Camera):
                 )
                 other_img = pair[0] if pair else None
                 other_item = pair[1] if pair else None
+                pair_meta: list[str | None] | None = None
                 try:
                     if other_img is not None:
                         composed = await self.hass.async_add_executor_job(
                             ip.pair_images, img, other_img, width, height, fill_mode,
                             is_portrait_canvas, divider, divider_fill, transparent_divider,
                         )
-                        # Top/left first matches the renderer's pair layout
-                        # (landscape canvas: cur on left; portrait canvas: cur on top).
-                        self._last_captured_at_pair = [
+                        pair_meta = [
                             _ts_to_iso(getattr(cur, "captured_at", None)),
                             _ts_to_iso(getattr(other_item, "captured_at", None)),
                         ]
@@ -427,53 +612,53 @@ class AlbumSlideshowCamera(Camera):
                         )
                 finally:
                     ip.safe_close(other_img)
-                try:
-                    return await self.hass.async_add_executor_job(ip.encode_image, composed)
-                finally:
-                    ip.safe_close(composed)
+                meta = {
+                    "is_portrait": cur_is_portrait,
+                    "captured_at_pair": pair_meta,
+                }
+                return composed, meta
 
-            composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
-            try:
-                return await self.hass.async_add_executor_job(ip.encode_image, composed)
-            finally:
-                ip.safe_close(composed)
+            composed = await self.hass.async_add_executor_job(
+                ip.render_image, img, fill_mode, width, height
+            )
+            return composed, {
+                "is_portrait": cur_is_portrait,
+                "captured_at_pair": None,
+            }
         finally:
             ip.safe_close(img)
 
-    async def _skip_mismatch_and_render(
+    async def _compose_skip_mismatch(
         self,
         items: list[MediaItem],
         width: int,
         height: int,
         fill_mode: str,
         is_portrait_canvas: bool,
-    ) -> bytes | None:
-        """Skip mismatched images (peeking through candidates) and render the first match.
+    ) -> tuple[Image.Image | None, dict | None]:
+        """Skip-mismatch variant of ``_compose_for_index``.
 
-        Peek-advances _index without touching the random cycle for rejected
-        candidates, so the random order stays long.
+        Walks forward (peek-advancing for non-matches) until it finds an
+        image whose orientation matches the canvas, then composes it.
         """
         count = len(items)
         if count <= 0:
-            return None
+            return None, None
 
         start = self._index
 
         for _ in range(min(count, _SKIP_SEARCH_LIMIT)):
             cur = items[self._index]
 
-            # Metadata fast path: reject without ever downloading.
             meta_portrait = ip.is_portrait_item_by_metadata(cur)
             if meta_portrait is not None:
                 if meta_portrait != is_portrait_canvas:
                     self._peek_advance(count, items)
                     continue
-                # Metadata says it matches - commit and render.
                 if self._index != start:
                     self._do_advance(count, items)
-                return await self._render_single(cur, width, height, fill_mode, is_portrait_canvas)
+                return await self._compose_single(cur, width, height, fill_mode)
 
-            # No metadata; must download + decode to decide.
             b = await self._fetch_bytes(cur.url)
             if not b:
                 self._peek_advance(count, items)
@@ -485,40 +670,55 @@ class AlbumSlideshowCamera(Camera):
                     continue
                 if self._index != start:
                     self._do_advance(count, items)
-                self._last_is_portrait = is_portrait_canvas
-                composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
-                try:
-                    return await self.hass.async_add_executor_job(ip.encode_image, composed)
-                finally:
-                    ip.safe_close(composed)
+                composed = await self.hass.async_add_executor_job(
+                    ip.render_image, img, fill_mode, width, height
+                )
+                return composed, {
+                    "is_portrait": is_portrait_canvas,
+                    "captured_at_pair": None,
+                }
             finally:
                 ip.safe_close(img)
 
-        # Nothing matched within the limit; fall back to rendering the original.
         self._index = start
-        return await self._render_single(items[self._index], width, height, fill_mode, is_portrait_canvas)
+        return await self._compose_single(items[self._index], width, height, fill_mode)
 
-    async def _render_single(
+    async def _compose_single(
         self,
         item: MediaItem,
         width: int,
         height: int,
         fill_mode: str,
-        is_portrait_canvas: bool,
-    ) -> bytes | None:
+    ) -> tuple[Image.Image | None, dict | None]:
         b = await self._fetch_bytes(item.url)
         if not b:
-            return None
+            return None, None
         img = await self.hass.async_add_executor_job(ip.open_image, b, (width, height))
         try:
-            self._last_is_portrait = ip.is_portrait_item(item, img)
-            composed = await self.hass.async_add_executor_job(ip.render_image, img, fill_mode, width, height)
-            try:
-                return await self.hass.async_add_executor_job(ip.encode_image, composed)
-            finally:
-                ip.safe_close(composed)
+            cur_is_portrait = ip.is_portrait_item(item, img)
+            composed = await self.hass.async_add_executor_job(
+                ip.render_image, img, fill_mode, width, height
+            )
+            return composed, {
+                "is_portrait": cur_is_portrait,
+                "captured_at_pair": None,
+            }
         finally:
             ip.safe_close(img)
+
+    async def _render_current(self, items: list[MediaItem]) -> bytes | None:
+        """Compatibility wrapper: compose + encode the current slide.
+
+        Kept as a thin wrapper because external code paths (e.g., tests)
+        may still call it. ``_render_cycle`` no longer does.
+        """
+        composed, _ = await self._compose_for_index(items)
+        if composed is None:
+            return None
+        try:
+            return await self.hass.async_add_executor_job(ip.encode_image, composed)
+        finally:
+            ip.safe_close(composed)
 
     async def _find_next_mismatch_image(
         self,
