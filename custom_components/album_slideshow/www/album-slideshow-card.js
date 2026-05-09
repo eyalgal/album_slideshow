@@ -27,7 +27,7 @@
  *   swipe_navigation: true  # touch/swipe between slides
  */
 
-const VERSION = "0.7.1-rc1";
+const VERSION = "0.7.1-rc2";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
@@ -209,6 +209,14 @@ class AlbumSlideshowCard extends HTMLElement {
           background: ${stageBg};
           border-radius: inherit;
           overflow: hidden;
+          /* Allow vertical scroll of the dashboard but reserve
+             horizontal gestures for our swipe handler. Without this
+             the browser's native pan/drag gestures intercept fast
+             horizontal swipes on touch screens before pointermove
+             can fire and we never see them. */
+          touch-action: ${c.swipe_navigation ? "pan-y" : "auto"};
+          -webkit-user-select: none;
+          user-select: none;
         }
         .blur-bg {
           position: absolute;
@@ -278,7 +286,8 @@ class AlbumSlideshowCard extends HTMLElement {
       card.style.cursor = "pointer";
     }
     if (this._config.swipe_navigation) {
-      this._installSwipeHandlers(card);
+      const stage = this.shadowRoot.querySelector(".stage");
+      this._installSwipeHandlers(stage || card);
     }
   }
 
@@ -510,9 +519,9 @@ class AlbumSlideshowCard extends HTMLElement {
     this.dispatchEvent(event);
   }
 
-  /** Install pointer-based swipe handlers on the card root.
+  /** Install pointer-based swipe handlers on the given target.
    *
-   * Threshold is 50px horizontal travel within 700ms with horizontal
+   * Threshold is 40px horizontal travel within 700ms with horizontal
    * dominance over vertical (so the user can still vertically scroll
    * the dashboard past the card). On a successful swipe we call the
    * camera's ``next_slide`` / ``previous_slide`` service via the
@@ -522,31 +531,39 @@ class AlbumSlideshowCard extends HTMLElement {
    *
    * Suppresses the click that pointerup would otherwise synthesise so
    * a swipe doesn't also fire ``tap_action: more-info``.
+   *
+   * Listeners are installed on the ``.stage`` div directly because the
+   * inner ``<img>`` layers have ``pointer-events: none`` and the stage
+   * is the first hit-tested element. Using setPointerCapture means a
+   * fast swipe that exits the element bounds still finishes cleanly.
    */
-  _installSwipeHandlers(card) {
-    const SWIPE_MIN_PX = 50;
+  _installSwipeHandlers(target) {
+    const SWIPE_MIN_PX = 40;
     const SWIPE_MAX_MS = 700;
-    const DRAG_LOCK_PX = 8;
+    const DRAG_LOCK_PX = 6;
     let startX = 0;
     let startY = 0;
     let startT = 0;
     let pointerId = null;
     let isSwiping = false;
 
-    // Tell the browser we want to handle horizontal drags ourselves but
-    // still allow vertical scrolling of the parent dashboard.
-    card.style.touchAction = "pan-y";
-
-    card.addEventListener("pointerdown", (ev) => {
+    target.addEventListener("pointerdown", (ev) => {
       if (ev.pointerType === "mouse" && ev.button !== 0) return;
       pointerId = ev.pointerId;
       startX = ev.clientX;
       startY = ev.clientY;
       startT = ev.timeStamp;
       isSwiping = false;
+      // Capture so we still receive pointermove/up if the pointer
+      // travels outside the stage during a fast swipe.
+      try {
+        target.setPointerCapture(ev.pointerId);
+      } catch (_e) {
+        /* setPointerCapture can throw on some old browsers; safe to ignore */
+      }
     });
 
-    card.addEventListener("pointermove", (ev) => {
+    target.addEventListener("pointermove", (ev) => {
       if (ev.pointerId !== pointerId) return;
       if (isSwiping) return;
       const dx = ev.clientX - startX;
@@ -559,12 +576,20 @@ class AlbumSlideshowCard extends HTMLElement {
     const finish = (ev) => {
       if (ev.pointerId !== pointerId) return;
       const wasSwiping = isSwiping;
+      const startedAt = startT;
+      const sx = startX;
+      const sy = startY;
       pointerId = null;
       isSwiping = false;
+      try {
+        target.releasePointerCapture(ev.pointerId);
+      } catch (_e) {
+        /* ignore */
+      }
       if (!wasSwiping) return;
-      const dx = ev.clientX - startX;
-      const dy = ev.clientY - startY;
-      const dt = ev.timeStamp - startT;
+      const dx = ev.clientX - sx;
+      const dy = ev.clientY - sy;
+      const dt = ev.timeStamp - startedAt;
       if (dt > SWIPE_MAX_MS) return;
       if (Math.abs(dx) < SWIPE_MIN_PX) return;
       if (Math.abs(dy) > Math.abs(dx)) return;
@@ -580,11 +605,16 @@ class AlbumSlideshowCard extends HTMLElement {
       }
     };
 
-    card.addEventListener("pointerup", finish);
-    card.addEventListener("pointercancel", (ev) => {
+    target.addEventListener("pointerup", finish);
+    target.addEventListener("pointercancel", (ev) => {
       if (ev.pointerId === pointerId) {
         pointerId = null;
         isSwiping = false;
+        try {
+          target.releasePointerCapture(ev.pointerId);
+        } catch (_e) {
+          /* ignore */
+        }
       }
     });
   }
@@ -601,11 +631,18 @@ class AlbumSlideshowCard extends HTMLElement {
     const entryId = state && state.attributes && state.attributes.entry_id;
     if (!entryId) {
       console.warn(
-        "album-slideshow-card: camera state has no 'entry_id' attribute; " +
-          "swipe navigation requires Album Slideshow integration v0.7.1+",
+        "album-slideshow-card: camera %s has no 'entry_id' attribute;" +
+          " swipe navigation requires Album Slideshow integration v0.7.1+." +
+          " Update the integration in HACS and restart Home Assistant.",
+        this._config.entity,
       );
       return;
     }
+    console.debug(
+      "album-slideshow-card: calling %s for entry_id=%s",
+      service,
+      entryId,
+    );
     this._hass.callService("album_slideshow", service, {
       entry_id: entryId,
     });
