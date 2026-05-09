@@ -9,6 +9,17 @@ next_slide:
       selector:
         text:
 
+previous_slide:
+  name: Previous slide
+  description: Step the slideshow back to the previous image for a specific config entry.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: The config entry id for the album slideshow instance.
+      required: true
+      selector:
+        text:
+
 refresh_album:
   name: Refresh album
   description: Refresh the album list for a specific config entry.

@@ -154,6 +154,12 @@ class AlbumSlideshowCamera(Camera):
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
         self._force_next: bool = False
+        self._force_previous: bool = False
+        # Stack of recently visited indices, used by ``previous_slide`` to
+        # walk back through both random and sequential orderings. Bounded
+        # so it can't grow without limit on long-running slideshows.
+        self._history: list[int] = []
+        self._history_max: int = 50
         self._consecutive_failures: int = 0
         self._render_task: asyncio.Task | None = None
 
@@ -242,6 +248,7 @@ class AlbumSlideshowCamera(Camera):
             "pair_divider_px": int(self.store.pair_divider_px),
             "pair_divider_color": self.store.pair_divider_color,
             "frame_id": self._frame_id,
+            "entry_id": self.entry.entry_id,
             "pagination_debug": data.get("pagination_debug"),
         }
 
@@ -293,6 +300,13 @@ class AlbumSlideshowCamera(Camera):
 
     async def async_force_next(self) -> None:
         self._force_next = True
+        self._force_previous = False
+        self._interrupt_event.set()
+        self.async_write_ha_state()
+
+    async def async_force_previous(self) -> None:
+        self._force_previous = True
+        self._force_next = False
         self._interrupt_event.set()
         self.async_write_ha_state()
 
@@ -392,9 +406,10 @@ class AlbumSlideshowCamera(Camera):
             except asyncio.CancelledError:
                 raise
         should_advance = False  # Don't advance on the very first render
+        should_retreat = False
         while True:
             try:
-                await self._render_cycle(advance=should_advance)
+                await self._render_cycle(advance=should_advance, retreat=should_retreat)
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
@@ -410,18 +425,26 @@ class AlbumSlideshowCamera(Camera):
                 except asyncio.CancelledError:
                     raise
                 should_advance = True  # Skip the broken image on retry
+                should_retreat = False
                 continue
 
             interrupted = await self._wait_or_interrupt(float(int(self.store.slide_interval)))
             if interrupted:
-                should_advance = self._force_next
+                if self._force_previous:
+                    should_advance = False
+                    should_retreat = True
+                else:
+                    should_advance = self._force_next
+                    should_retreat = False
                 self._force_next = False
+                self._force_previous = False
             else:
                 # Paused slideshows hold the current frame until the user
                 # un-pauses or hits "next slide" explicitly.
                 should_advance = not bool(self.store.paused)
+                should_retreat = False
 
-    async def _render_cycle(self, advance: bool) -> None:
+    async def _render_cycle(self, advance: bool, retreat: bool = False) -> None:
         """Render one frame.
 
         The slideshow is just "advance index, compose, encode, broadcast".
@@ -437,7 +460,9 @@ class AlbumSlideshowCamera(Camera):
             return
 
         count = len(items)
-        if advance:
+        if retreat:
+            self._do_retreat(count, items)
+        elif advance:
             self._do_advance(count, items)
 
         async with self._compose_semaphore:
@@ -514,6 +539,11 @@ class AlbumSlideshowCamera(Camera):
             return
 
         self._index %= count
+        # Record the slide we're about to leave so ``previous_slide`` can
+        # walk back through random and sequential orderings uniformly.
+        self._history.append(self._index)
+        if len(self._history) > self._history_max:
+            self._history = self._history[-self._history_max:]
         order_mode = self.store.order_mode
 
         # Sequential modes (album order + sorted-by-time orderings) walk in
@@ -529,6 +559,28 @@ class AlbumSlideshowCamera(Camera):
         keep = min(20, max(1, count - 1))
         if len(self._recent_urls) > keep:
             self._recent_urls = self._recent_urls[-keep:]
+
+    def _do_retreat(self, count: int, items: list) -> None:
+        """Step _index back to the previously-shown slide.
+
+        Pops from the visited-history stack so we don't need separate
+        bookkeeping for sequential vs random orderings; the stack already
+        records which slide was shown before the current one regardless
+        of mode. Falls back to ``(_index - 1) % count`` for sequential
+        orderings when the stack is empty (e.g. fresh restart, user hits
+        previous before any forward navigation), and to a no-op for
+        random mode in the same situation since "previous" has no
+        canonical answer there.
+        """
+        if count <= 0:
+            self._index = 0
+            return
+        self._index %= count
+        if self._history:
+            self._index = self._history.pop() % count
+            return
+        if self.store.order_mode != ORDER_RANDOM:
+            self._index = (self._index - 1) % count
 
     def _peek_advance(self, count: int, items: list) -> None:
         """Advance _index without committing to random-order bookkeeping.

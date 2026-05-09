@@ -83,5 +83,6 @@ MAX_RESOLUTION_SHORT_EDGE: dict[str, int | None] = {
 PUBLICALBUM_ENDPOINT = "https://www.publicalbum.org/api/v2/webapp/embed-player/jsonrpc"
 
 SERVICE_NEXT_SLIDE = "next_slide"
+SERVICE_PREVIOUS_SLIDE = "previous_slide"
 SERVICE_REFRESH_ALBUM = "refresh_album"
 ATTR_ENTRY_ID = "entry_id"

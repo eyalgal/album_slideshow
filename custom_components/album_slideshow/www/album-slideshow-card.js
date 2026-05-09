@@ -24,9 +24,10 @@
  *   background: ''          # CSS color shown behind contained images.
  *                           # Empty inherits theme card background.
  *   tap_action: none        # none | more-info
+ *   swipe_navigation: true  # touch/swipe between slides
  */
 
-const VERSION = "0.7.0";
+const VERSION = "0.7.1-dev";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
@@ -132,6 +133,12 @@ class AlbumSlideshowCard extends HTMLElement {
         config.tap_pause_seconds === 0
           ? 0
           : Number(config.tap_pause_seconds ?? 8),
+      // Touch/mouse swipe to navigate. Left/up swipe -> next slide,
+      // right/down swipe -> previous. Disable to make the card a pure
+      // display surface (e.g. wall-mounted dashboards where stray taps
+      // shouldn't change the playback).
+      swipe_navigation:
+        config.swipe_navigation === false ? false : true,
     };
     if (this._rendered) {
       // Config edited live; rebuild styles + reset state.
@@ -259,8 +266,19 @@ class AlbumSlideshowCard extends HTMLElement {
     `;
     const card = this.shadowRoot.querySelector("ha-card");
     if (this._config.tap_action === "more-info") {
-      card.addEventListener("click", () => this._fireMoreInfo());
+      card.addEventListener("click", () => {
+        // Swipe handlers set this when they have just consumed a
+        // gesture so the synthesised click doesn't also fire more-info.
+        if (this._suppressNextClick) {
+          this._suppressNextClick = false;
+          return;
+        }
+        this._fireMoreInfo();
+      });
       card.style.cursor = "pointer";
+    }
+    if (this._config.swipe_navigation) {
+      this._installSwipeHandlers(card);
     }
   }
 
@@ -491,6 +509,107 @@ class AlbumSlideshowCard extends HTMLElement {
     event.detail = { entityId: this._config.entity };
     this.dispatchEvent(event);
   }
+
+  /** Install pointer-based swipe handlers on the card root.
+   *
+   * Threshold is 50px horizontal travel within 700ms with horizontal
+   * dominance over vertical (so the user can still vertically scroll
+   * the dashboard past the card). On a successful swipe we call the
+   * camera's ``next_slide`` / ``previous_slide`` service via the
+   * camera's ``entry_id`` state attribute, then freeze the visible
+   * slide for ``tap_pause_seconds`` so the user actually gets to look
+   * at the photo they swiped to before the slideshow auto-advances.
+   *
+   * Suppresses the click that pointerup would otherwise synthesise so
+   * a swipe doesn't also fire ``tap_action: more-info``.
+   */
+  _installSwipeHandlers(card) {
+    const SWIPE_MIN_PX = 50;
+    const SWIPE_MAX_MS = 700;
+    const DRAG_LOCK_PX = 8;
+    let startX = 0;
+    let startY = 0;
+    let startT = 0;
+    let pointerId = null;
+    let isSwiping = false;
+
+    // Tell the browser we want to handle horizontal drags ourselves but
+    // still allow vertical scrolling of the parent dashboard.
+    card.style.touchAction = "pan-y";
+
+    card.addEventListener("pointerdown", (ev) => {
+      if (ev.pointerType === "mouse" && ev.button !== 0) return;
+      pointerId = ev.pointerId;
+      startX = ev.clientX;
+      startY = ev.clientY;
+      startT = ev.timeStamp;
+      isSwiping = false;
+    });
+
+    card.addEventListener("pointermove", (ev) => {
+      if (ev.pointerId !== pointerId) return;
+      if (isSwiping) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (Math.abs(dx) > DRAG_LOCK_PX && Math.abs(dx) > Math.abs(dy)) {
+        isSwiping = true;
+      }
+    });
+
+    const finish = (ev) => {
+      if (ev.pointerId !== pointerId) return;
+      const wasSwiping = isSwiping;
+      pointerId = null;
+      isSwiping = false;
+      if (!wasSwiping) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      const dt = ev.timeStamp - startT;
+      if (dt > SWIPE_MAX_MS) return;
+      if (Math.abs(dx) < SWIPE_MIN_PX) return;
+      if (Math.abs(dy) > Math.abs(dx)) return;
+      this._suppressNextClick = true;
+      const pauseSec = this._config.tap_pause_seconds;
+      if (pauseSec > 0) {
+        this._holdSwapsUntil = Date.now() + pauseSec * 1000;
+      }
+      if (dx < 0) {
+        this._callSlideshowService("next_slide");
+      } else {
+        this._callSlideshowService("previous_slide");
+      }
+    };
+
+    card.addEventListener("pointerup", finish);
+    card.addEventListener("pointercancel", (ev) => {
+      if (ev.pointerId === pointerId) {
+        pointerId = null;
+        isSwiping = false;
+      }
+    });
+  }
+
+  /** Call an album_slideshow service for the camera this card targets.
+   *
+   * Pulls ``entry_id`` from the camera's state attributes (added in
+   * v0.7.1+). Older integrations don't expose it; we log a warning
+   * and bail rather than guess.
+   */
+  _callSlideshowService(service) {
+    if (!this._hass || !this._config) return;
+    const state = this._hass.states[this._config.entity];
+    const entryId = state && state.attributes && state.attributes.entry_id;
+    if (!entryId) {
+      console.warn(
+        "album-slideshow-card: camera state has no 'entry_id' attribute; " +
+          "swipe navigation requires Album Slideshow integration v0.7.1+",
+      );
+      return;
+    }
+    this._hass.callService("album_slideshow", service, {
+      entry_id: entryId,
+    });
+  }
 }
 
 if (!customElements.get("album-slideshow-card")) {
@@ -548,6 +667,7 @@ const DEFAULTS = {
   fit: "auto",
   background: "",
   tap_action: "none",
+  swipe_navigation: true,
 };
 
 class AlbumSlideshowCardEditor extends HTMLElement {
@@ -651,6 +771,7 @@ class AlbumSlideshowCardEditor extends HTMLElement {
         name: "tap_action",
         selector: { select: { mode: "dropdown", options: TAP_OPTIONS } },
       },
+      { name: "swipe_navigation", selector: { boolean: {} } },
     ];
   }
 
@@ -666,6 +787,8 @@ class AlbumSlideshowCardEditor extends HTMLElement {
       fit: c.fit || DEFAULTS.fit,
       background: c.background || "",
       tap_action: c.tap_action || DEFAULTS.tap_action,
+      swipe_navigation:
+        c.swipe_navigation === false ? false : DEFAULTS.swipe_navigation,
     };
   }
 
@@ -679,6 +802,7 @@ class AlbumSlideshowCardEditor extends HTMLElement {
       fit: "Fit",
       background: "Background (optional)",
       tap_action: "Tap action",
+      swipe_navigation: "Swipe navigation",
     };
     return labels[s.name] || s.name;
   };
@@ -687,6 +811,8 @@ class AlbumSlideshowCardEditor extends HTMLElement {
     const helpers = {
       background: "Leave blank to inherit the dashboard theme.",
       transition: "Random picks a different effect each slide.",
+      swipe_navigation:
+        "Swipe left for next slide, right for previous. Disable for kiosk-style displays.",
     };
     return helpers[s.name] || "";
   };
@@ -774,6 +900,11 @@ class AlbumSlideshowCardEditor extends HTMLElement {
 
     const ta = data.tap_action || DEFAULTS.tap_action;
     if (ta !== DEFAULTS.tap_action) n.tap_action = ta;
+
+    // ``swipe_navigation`` defaults to true; only persist the override
+    // when the user explicitly turns it off. Keeps the saved YAML
+    // minimal so the default tracks future changes if we ever flip it.
+    if (data.swipe_navigation === false) n.swipe_navigation = false;
 
     this._config = n;
     this.dispatchEvent(
