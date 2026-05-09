@@ -80,6 +80,24 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     if version:
         card_url = f"{card_url}?v={version}"
 
+    # Prefer registering the card as a Lovelace resource for storage-mode
+    # dashboards. Resources are loaded as part of the Lovelace bootstrap,
+    # before any dashboard renders custom cards, which removes the race
+    # where the dashboard can hit "Custom element doesn't exist" if the
+    # browser hasn't finished loading the module yet (a real risk after
+    # HA restarts and integration upgrades that bust the cache).
+    #
+    # Falls back to ``add_extra_js_url`` for YAML-mode dashboards or any
+    # unexpected failure - that path also works but is racier on cold
+    # cache loads.
+    if await _try_register_lovelace_resource(hass, card_url):
+        hass.data.setdefault(DOMAIN, {})["card_registered"] = True
+        _LOGGER.info(
+            "Album Slideshow card registered as Lovelace resource at %s",
+            card_url,
+        )
+        return
+
     try:
         from homeassistant.components.frontend import add_extra_js_url
 
@@ -93,7 +111,114 @@ async def _async_register_card(hass: HomeAssistant) -> None:
         return
 
     hass.data.setdefault(DOMAIN, {})["card_registered"] = True
-    _LOGGER.info("Album Slideshow card registered at %s", card_url)
+    _LOGGER.info(
+        "Album Slideshow card registered via add_extra_js_url at %s."
+        " For YAML-mode dashboards this is the right path; for"
+        " storage-mode dashboards a Lovelace resource is preferred but"
+        " the resources collection wasn't available when we set up.",
+        card_url,
+    )
+
+
+async def _try_register_lovelace_resource(
+    hass: HomeAssistant, card_url: str
+) -> bool:
+    """Register the card as a Lovelace resource for storage-mode dashboards.
+
+    Returns ``True`` if the resource was added (or already present at the
+    requested version); ``False`` if Lovelace isn't loaded, the dashboard
+    is in YAML mode, or anything else went wrong - in which case the
+    caller is expected to fall back to ``add_extra_js_url``.
+
+    The resource collection API is internal to HA and has changed shape
+    between versions, so we feel our way through it with ``getattr`` and
+    swallow any unexpected exception. The downside of getting this wrong
+    is one extra script tag in the dashboard, not a crash.
+    """
+    try:
+        lovelace_data = hass.data.get("lovelace")
+        if lovelace_data is None:
+            _LOGGER.debug(
+                "Lovelace data not yet present; cannot register resource"
+            )
+            return False
+
+        # In recent HA the lovelace key is a LovelaceData object exposing
+        # ``resources``; in older versions it was a dict with the same key.
+        if isinstance(lovelace_data, dict):
+            resources = lovelace_data.get("resources")
+        else:
+            resources = getattr(lovelace_data, "resources", None)
+
+        if resources is None or not hasattr(resources, "async_create_item"):
+            # YAML-mode dashboards expose a ResourceYAMLCollection that is
+            # read-only; users edit ``configuration.yaml`` themselves.
+            _LOGGER.debug(
+                "Lovelace resources unavailable or read-only;"
+                " falling back to add_extra_js_url"
+            )
+            return False
+
+        # Make sure the storage collection has loaded its file. Some HA
+        # versions lazy-load on first ``async_items()`` access; calling
+        # ``async_load`` explicitly is safe either way.
+        if hasattr(resources, "async_load"):
+            try:
+                await resources.async_load()
+            except Exception:  # noqa: BLE001
+                # Storage collection may be in an unloaded state with no
+                # file yet - treated the same as "no items".
+                pass
+
+        items = []
+        if hasattr(resources, "async_items"):
+            try:
+                items = list(resources.async_items())
+            except Exception:  # noqa: BLE001
+                items = []
+
+        base = card_url.split("?", 1)[0]
+        same_version_present = False
+        stale_ids: list[str] = []
+        for item in items:
+            if isinstance(item, dict):
+                url = item.get("url", "") or ""
+                item_id = item.get("id")
+            else:
+                url = getattr(item, "url", "") or ""
+                item_id = getattr(item, "id", None)
+            if url.split("?", 1)[0] != base:
+                continue
+            if url == card_url:
+                same_version_present = True
+            elif item_id:
+                stale_ids.append(item_id)
+
+        # Strip stale registrations (older versions of the card pinned via
+        # an out-of-date ``?v=...`` query) so the dashboard doesn't pull
+        # both the new and the old script.
+        for item_id in stale_ids:
+            try:
+                await resources.async_delete_item(item_id)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Could not delete stale Lovelace resource id=%s",
+                    item_id,
+                    exc_info=True,
+                )
+
+        if not same_version_present:
+            await resources.async_create_item(
+                {"url": card_url, "res_type": "module"}
+            )
+        return True
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug(
+            "Lovelace resource registration failed; will fall back to"
+            " add_extra_js_url",
+            exc_info=True,
+        )
+        return False
 
 
 def _read_manifest_version(integration_dir: str) -> str | None:

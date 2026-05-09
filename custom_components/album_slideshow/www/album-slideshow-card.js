@@ -27,7 +27,7 @@
  *   swipe_navigation: true  # touch/swipe between slides
  */
 
-const VERSION = "0.7.1-dev";
+const VERSION = "0.7.1-rc1";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
