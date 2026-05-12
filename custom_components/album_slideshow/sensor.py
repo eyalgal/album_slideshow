@@ -118,6 +118,13 @@ class GeocodingProgressSensor(_BaseAlbumSensor):
 
     @property
     def extra_state_attributes(self):
+        from .const import CONF_REVERSE_GEOCODE
+        geocoding_enabled = self.coordinator.entry.options.get(CONF_REVERSE_GEOCODE, True)
+        if not geocoding_enabled:
+            return {
+                "phase": "geocoding",
+                "status": "disabled",
+            }
         if self.coordinator.geocode_total > 0 or self.coordinator.geocode_complete:
             status = "complete" if self.coordinator.geocode_complete else "running"
             return {

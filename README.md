@@ -162,7 +162,9 @@ For NAS:
 - Mount it first
 - Use the mounted path
 
-**EXIF metadata**: JPEG files are scanned for EXIF data at startup. `captured_at` is populated from `DateTimeOriginal`. If GPS coordinates are present, `latitude` and `longitude` are also set, and the integration reverse-geocodes them to a human-readable `location` string (e.g. `"Sydney, New South Wales, Australia"`) via Nominatim (OpenStreetMap). Geocoding runs in the background so startup is never delayed — a **Geocoding progress** diagnostic sensor shows how far along it is. Results are cached to disk so repeated restarts do not re-query the API.
+**EXIF metadata**: JPEG files are scanned for EXIF data at startup. `captured_at` is populated from `DateTimeOriginal` using the `OffsetTimeOriginal` timezone tag when present, otherwise the host's local timezone. If GPS coordinates are present, `latitude` and `longitude` are also set, and the integration optionally reverse-geocodes them to a human-readable `location` string (e.g. `"Sydney, New South Wales, Australia"`) via [Nominatim (OpenStreetMap)](https://nominatim.org/release-docs/latest/api/Reverse/). Geocoding runs in the background so startup is never delayed — a **Geocoding progress** diagnostic sensor shows how far along it is. Results are cached to disk so repeated restarts do not re-query the API.
+
+> **Privacy note**: When reverse geocoding is enabled, each unique GPS coordinate (rounded to ~100 m) is sent to `nominatim.openstreetmap.org` once. No account or API key is required, but requests do leave your network. To disable this, go to **Settings → Devices & Services → Album Slideshow → Configure** and turn off **Reverse geocoding**. See [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/) for details.
 
 ---
 

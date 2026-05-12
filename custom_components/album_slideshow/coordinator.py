@@ -21,6 +21,7 @@ from .const import (
     CONF_ALBUM_URL,
     CONF_LOCAL_PATH,
     CONF_RECURSIVE,
+    CONF_REVERSE_GEOCODE,
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
@@ -48,6 +49,9 @@ class MediaItem:
     longitude: float | None = None
     # Human-readable location from reverse geocoding, when available.
     location: str | None = None
+    # True once _read_local_exif has been called for this item, so subsequent
+    # coordinator refreshes can skip the executor hop for unchanged files.
+    exif_scanned: bool = False
 
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -133,11 +137,24 @@ def _read_local_exif(path: Path) -> tuple[int | None, float | None, float | None
         with Image.open(path) as img:
             exif = img.getexif()
         date_str = exif.get(36867) or exif.get(306)  # DateTimeOriginal, DateTime
+        offset_str = exif.get(36881)  # OffsetTimeOriginal, e.g. "+02:00"
         captured_at: int | None = None
         if date_str:
             try:
-                dt = datetime.strptime(str(date_str).strip(), "%Y:%m:%d %H:%M:%S")
-                captured_at = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+                # EXIF DateTimeOriginal is local time. Prefer the paired
+                # OffsetTimeOriginal tag when present; otherwise fall back to
+                # the host's local timezone so the value is consistent with
+                # what photo viewers display.
+                if offset_str:
+                    dt = datetime.strptime(
+                        f"{str(date_str).strip()} {str(offset_str).strip()}",
+                        "%Y:%m:%d %H:%M:%S %z",
+                    )
+                else:
+                    dt = datetime.strptime(
+                        str(date_str).strip(), "%Y:%m:%d %H:%M:%S"
+                    ).astimezone()
+                captured_at = int(dt.timestamp() * 1000)
             except ValueError:
                 pass
         gps_ifd = exif.get_ifd(34853)
@@ -337,13 +354,17 @@ class AlbumCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             if self.provider == PROVIDER_LOCAL_FOLDER:
+                # Capture previous data NOW — self.data is overwritten once
+                # _async_update_data returns, so the background task would
+                # see fresh (un-enriched) items if it read self.data instead.
+                prior_data = self.data
                 data = await self._update_local_folder()
                 # Cancel any in-flight geocode task from a previous refresh, then
                 # start a new one for the current item list.
                 if self._geocode_task and not self._geocode_task.done():
                     self._geocode_task.cancel()
                 self._geocode_task = self.hass.async_create_background_task(
-                    self._enrich_items_background(data.get("items") or []),
+                    self._enrich_items_background(data.get("items") or [], prior_data),
                     name="album_slideshow_enrich",
                 )
             elif self.provider == PROVIDER_GOOGLE_SHARED:
@@ -406,6 +427,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     latitude=raw.get("latitude"),
                     longitude=raw.get("longitude"),
                     location=raw.get("location"),
+                    exif_scanned=bool(raw.get("exif_scanned", False)),
                 ))
             except Exception:
                 continue
@@ -435,6 +457,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "latitude": it.latitude,
                     "longitude": it.longitude,
                     "location": it.location,
+                    "exif_scanned": it.exif_scanned,
                 }
                 for it in items
             ],
@@ -444,19 +467,46 @@ class AlbumCoordinator(DataUpdateCoordinator):
         except Exception as err:  # pragma: no cover - storage layer
             _LOGGER.debug("Album cache: failed to save (%s)", err)
 
-    async def _enrich_items_background(self, items: list[MediaItem]) -> None:
+    async def _enrich_items_background(
+        self,
+        items: list[MediaItem],
+        prior_data: dict[str, Any] | None = None,
+    ) -> None:
         """Read EXIF for each local file in the background, then geocode GPS coordinates.
 
         Runs one file at a time via the executor so the thread pool is never
         saturated, which is important for large NAS folders over a network.
         Pushes a state update every 100 files so attributes appear incrementally.
+
+        ``prior_data`` must be the coordinator's data dict from the *previous*
+        refresh tick, captured before self.data is overwritten. On restart it
+        will be None, so we fall back to the on-disk items cache.
         """
         local_items = [it for it in items if it.url.startswith("file://")]
         self.exif_done = 0
         self.exif_total = len(local_items)
 
-        _BATCH_SIZE = 100
+        # Build a URL-keyed index of previously enriched items. On an hourly
+        # refresh, prior_data is the last coordinator tick (in memory). On a
+        # cold restart, prior_data is None so we load from the disk cache.
+        prior_items: list[MediaItem] = list((prior_data or {}).get("items") or [])
+        if not prior_items:
+            cached = await self._load_cached_items()
+            prior_items = list((cached or {}).get("items") or [])
+        prior: dict[str, MediaItem] = {it.url: it for it in prior_items}
+
+        _STATE_BATCH = 100   # push HA state update every N files
+        _SAVE_BATCH  = 1000  # write items cache to disk every N files
         for i, item in enumerate(local_items, start=1):
+            cached = prior.get(item.url)
+            if cached is not None and cached.exif_scanned:
+                item.captured_at = cached.captured_at
+                item.latitude = cached.latitude
+                item.longitude = cached.longitude
+                item.location = cached.location
+                item.exif_scanned = True
+                self.exif_done = i
+                continue
             path = Path(item.url[len("file://"):])
             captured_at, lat, lon = await self.hass.async_add_executor_job(
                 _read_local_exif, path
@@ -464,15 +514,29 @@ class AlbumCoordinator(DataUpdateCoordinator):
             item.captured_at = captured_at
             item.latitude = lat
             item.longitude = lon
+            item.exif_scanned = True
             self.exif_done = i
-            if i % _BATCH_SIZE == 0 and self.data is not None:
+            if i % _STATE_BATCH == 0 and self.data is not None:
                 self.async_set_updated_data(self.data)
+            if i % _SAVE_BATCH == 0 and self.data is not None:
+                # Persist progress so exif_scanned=True survives a mid-scan restart.
+                try:
+                    await self._save_cached_items(self.data)
+                except Exception as err:
+                    _LOGGER.debug("EXIF cache: failed to save (%s)", err)
 
-        # Final push after all EXIF is read before starting geocoding.
+        # Final push and persist after all EXIF is read.
         if self.data is not None:
             self.async_set_updated_data(self.data)
+            try:
+                await self._save_cached_items(self.data)
+            except Exception as err:
+                _LOGGER.debug("EXIF cache: failed to save (%s)", err)
 
-        await self._geocode_items_background(items)
+        if self.entry.options.get(CONF_REVERSE_GEOCODE, True):
+            await self._geocode_items_background(items)
+        else:
+            self.geocode_complete = False  # signal sensor to show "disabled"
 
     async def _geocode_items_background(self, items: list[MediaItem]) -> None:
         """Reverse-geocode local items that have GPS but no location. Background task."""
@@ -513,8 +577,12 @@ class AlbumCoordinator(DataUpdateCoordinator):
         for item in needs_lookup:
             key = f"{round(item.latitude, 3)},{round(item.longitude, 3)}"
             location = await _nominatim_lookup(session, item.latitude, item.longitude)
-            self._geocode_cache[key] = location
             item.location = location
+            # Only cache successful lookups. Caching None would poison the key
+            # forever and prevent retry for what is almost always a transient
+            # failure (timeout / 5xx / 429).
+            if location is not None:
+                self._geocode_cache[key] = location
             _LOGGER.debug("Geocoded %s -> %s", item.filename, location)
             batch_count += 1
             self.geocode_done += 1
@@ -527,13 +595,21 @@ class AlbumCoordinator(DataUpdateCoordinator):
             # Nominatim rate limit: max 1 request per second.
             await asyncio.sleep(1.1)
 
-        if batch_count and self.data is not None:
-            self.geocode_complete = True
+        self.geocode_complete = True
+        if self.data is not None:
             self.async_set_updated_data(self.data)
+
+        # Persist both caches so the next restart has location pre-populated
+        # on every item — no geocoding or Nominatim calls needed at all.
+        try:
+            await self._geocode_cache_store.async_save(dict(self._geocode_cache))
+        except Exception as err:
+            _LOGGER.debug("Geocode cache: failed to save (%s)", err)
+        if self.data is not None:
             try:
-                await self._geocode_cache_store.async_save(dict(self._geocode_cache))
+                await self._save_cached_items(self.data)
             except Exception as err:
-                _LOGGER.debug("Geocode cache: failed to save (%s)", err)
+                _LOGGER.debug("Items cache: failed to save after geocoding (%s)", err)
 
     async def _update_local_folder(self) -> dict[str, Any]:
         if not self.local_path:

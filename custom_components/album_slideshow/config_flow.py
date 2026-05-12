@@ -14,6 +14,7 @@ from .const import (
     CONF_ALBUM_URL,
     CONF_LOCAL_PATH,
     CONF_RECURSIVE,
+    CONF_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
     DEFAULT_RECURSIVE,
@@ -44,8 +45,29 @@ def _normalize_local_path(hass, path: str) -> str:
 ALBUM_URL_RE = re.compile(r"^https?://photos\.app\.goo\.gl/[^/]+/?$")
 
 
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    """Options flow for local-folder entries (reverse geocoding toggle)."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self._entry = config_entry
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self._entry.options.get(CONF_REVERSE_GEOCODE, True)
+        schema = vol.Schema({
+            vol.Optional(CONF_REVERSE_GEOCODE, default=current): bool,
+        })
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
+
+    @staticmethod
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> OptionsFlowHandler:
+        return OptionsFlowHandler(config_entry)
 
     def __init__(self) -> None:
         self._provider: str | None = None

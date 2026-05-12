@@ -6,6 +6,7 @@ CONF_ALBUM_NAME = "album_name"
 CONF_LOCAL_PATH = "local_path"
 CONF_RECURSIVE = "recursive"
 CONF_IMAGE_CACHE_MB = "image_cache_mb"
+CONF_REVERSE_GEOCODE = "reverse_geocode"
 
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
