@@ -118,6 +118,10 @@ class GeocodingProgressSensor(_BaseAlbumSensor):
 
     @property
     def extra_state_attributes(self):
+        # Edge case: when EXIF finished and zero photos had GPS, ``geocode_total``
+        # is 0 but ``geocode_complete`` is True. The branch below still reports
+        # ``phase=geocoding`` / ``status=complete`` / ``total=0``, which is the
+        # most honest summary for the user ("no work to do, done").
         if self.coordinator.geocode_total > 0 or self.coordinator.geocode_complete:
             status = "complete" if self.coordinator.geocode_complete else "running"
             return {

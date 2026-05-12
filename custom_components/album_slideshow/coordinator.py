@@ -56,6 +56,32 @@ _VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", 
 _SKIP_DIR_PREFIXES = (".", "@", "#")
 
 
+def _load_integration_version() -> str:
+    """Read this integration's version from manifest.json.
+
+    Used to stamp the Nominatim User-Agent so requests can be attributed
+    correctly without keeping a second copy of the version string in sync.
+    """
+    try:
+        manifest = Path(__file__).parent / "manifest.json"
+        return json.loads(manifest.read_text(encoding="utf-8")).get("version", "0.0.0")
+    except Exception:
+        return "0.0.0"
+
+
+_INTEGRATION_VERSION = _load_integration_version()
+
+
+def _geocode_cache_key(lat: float, lon: float) -> str:
+    """Build a stable geocode cache key for a coordinate pair.
+
+    Coordinates are rounded to 3 decimal places (~100 m) so photos taken in
+    the same neighbourhood share one Nominatim lookup. ``+ 0.0`` normalises
+    ``-0.0`` to ``0.0`` so the equator and prime meridian don't get two keys.
+    """
+    return f"{round(lat, 3) + 0.0},{round(lon, 3) + 0.0}"
+
+
 def _pick_url(item: dict[str, Any]) -> str | None:
     for key in ("baseUrl", "url", "downloadUrl", "productUrl"):
         v = item.get(key)
@@ -119,13 +145,15 @@ def _gps_to_decimal(dms: Any, ref: Any) -> float | None:
 
 
 def _read_local_exif(path: Path) -> tuple[int | None, float | None, float | None]:
-    """Return (captured_at_ms, latitude, longitude) from JPEG EXIF data.
+    """Return (captured_at_ms, latitude, longitude) from image EXIF data.
 
     EXIF DateTimeOriginal has no timezone; we treat it as UTC, consistent with
     how the rest of the codebase stores timestamps. Returns (None, None, None)
-    for non-JPEG files or any parse failure.
+    for unsupported files or any parse failure. PIL is forgiving about formats
+    without EXIF (PNG screenshots, GIFs, BMPs), so the extension guard mostly
+    avoids the cost of opening files we know won't carry EXIF.
     """
-    if path.suffix.lower() not in {".jpg", ".jpeg"}:
+    if path.suffix.lower() not in _IMAGE_EXTS:
         return None, None, None
     try:
         from datetime import datetime, timezone
@@ -155,7 +183,10 @@ async def _nominatim_lookup(session: Any, lat: float, lon: float) -> str | None:
         f"?lat={lat}&lon={lon}&format=json&zoom=10&addressdetails=1"
     )
     headers = {
-        "User-Agent": "AlbumSlideshow/1.0 (https://github.com/eyalgal/album_slideshow)",
+        "User-Agent": (
+            f"AlbumSlideshow/{_INTEGRATION_VERSION} "
+            "(https://github.com/eyalgal/album_slideshow)"
+        ),
         "Accept-Language": "en",
     }
     try:
@@ -455,7 +486,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self.exif_done = 0
         self.exif_total = len(local_items)
 
-        _BATCH_SIZE = 100
+        _EXIF_BATCH = 100
         for i, item in enumerate(local_items, start=1):
             path = Path(item.url[len("file://"):])
             captured_at, lat, lon = await self.hass.async_add_executor_job(
@@ -465,7 +496,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             item.latitude = lat
             item.longitude = lon
             self.exif_done = i
-            if i % _BATCH_SIZE == 0 and self.data is not None:
+            if i % _EXIF_BATCH == 0 and self.data is not None:
                 self.async_set_updated_data(self.data)
 
         # Final push after all EXIF is read before starting geocoding.
@@ -491,7 +522,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         for item in items:
             if item.latitude is None or item.longitude is None:
                 continue
-            key = f"{round(item.latitude, 3)},{round(item.longitude, 3)}"
+            key = _geocode_cache_key(item.latitude, item.longitude)
             if key in self._geocode_cache:
                 item.location = self._geocode_cache[key]
                 cache_hits += 1
@@ -508,17 +539,21 @@ class AlbumCoordinator(DataUpdateCoordinator):
         if cache_hits and self.data is not None:
             self.async_set_updated_data(self.data)
 
-        _BATCH_SIZE = 10  # push a state update every N new geocode results
+        _GEOCODE_BATCH = 10  # push a state update every N new geocode results
         batch_count = 0
         for item in needs_lookup:
-            key = f"{round(item.latitude, 3)},{round(item.longitude, 3)}"
+            key = _geocode_cache_key(item.latitude, item.longitude)
             location = await _nominatim_lookup(session, item.latitude, item.longitude)
-            self._geocode_cache[key] = location
             item.location = location
+            # Only cache successful lookups - caching ``None`` would poison the
+            # key forever and prevent retry on the next restart for what is
+            # almost always a transient failure (timeout / 5xx / 429).
+            if location is not None:
+                self._geocode_cache[key] = location
             _LOGGER.debug("Geocoded %s -> %s", item.filename, location)
             batch_count += 1
             self.geocode_done += 1
-            if batch_count % _BATCH_SIZE == 0 and self.data is not None:
+            if batch_count % _GEOCODE_BATCH == 0 and self.data is not None:
                 self.async_set_updated_data(self.data)
                 try:
                     await self._geocode_cache_store.async_save(dict(self._geocode_cache))
@@ -527,9 +562,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
             # Nominatim rate limit: max 1 request per second.
             await asyncio.sleep(1.1)
 
-        if batch_count and self.data is not None:
+        if batch_count:
             self.geocode_complete = True
-            self.async_set_updated_data(self.data)
+            if self.data is not None:
+                self.async_set_updated_data(self.data)
             try:
                 await self._geocode_cache_store.async_save(dict(self._geocode_cache))
             except Exception as err:
