@@ -6,17 +6,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, PROVIDER_GOOGLE_SHARED
+from .const import DOMAIN, PROVIDER_LOCAL_FOLDER, PROVIDER_GOOGLE_SHARED
 from .coordinator import AlbumCoordinator
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: AlbumCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([
+    entities = [
         AlbumCountSensor(entry, coordinator),
         AlbumTitleSensor(entry, coordinator),
         CacheUsageSensor(entry, coordinator),
-    ])
+    ]
+    if coordinator.provider == PROVIDER_LOCAL_FOLDER:
+        entities.append(GeocodingProgressSensor(entry, coordinator))
+    async_add_entities(entities)
 
 
 class _BaseAlbumSensor(SensorEntity):
@@ -92,3 +95,40 @@ class CacheUsageSensor(_BaseAlbumSensor):
         if cam is None:
             return None
         return cam.cache_usage_mb
+
+
+class GeocodingProgressSensor(_BaseAlbumSensor):
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:map-marker-check"
+
+    def __init__(self, entry: ConfigEntry, coordinator: AlbumCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_geocoding_progress"
+        self._attr_name = "Geocoding progress"
+
+    @property
+    def native_value(self) -> int | None:
+        if self.coordinator.geocode_total > 0:
+            return round(self.coordinator.geocode_done / self.coordinator.geocode_total * 100)
+        if self.coordinator.exif_total > 0:
+            return round(self.coordinator.exif_done / self.coordinator.exif_total * 100)
+        return None
+
+    @property
+    def extra_state_attributes(self):
+        if self.coordinator.geocode_total > 0 or self.coordinator.geocode_complete:
+            status = "complete" if self.coordinator.geocode_complete else "running"
+            return {
+                "phase": "geocoding",
+                "geocoded": self.coordinator.geocode_done,
+                "total": self.coordinator.geocode_total,
+                "status": status,
+            }
+        return {
+            "phase": "reading EXIF",
+            "scanned": self.coordinator.exif_done,
+            "total": self.coordinator.exif_total,
+            "status": "running" if self.coordinator.exif_total > 0 else "pending",
+        }

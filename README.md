@@ -44,6 +44,13 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - Order modes: random, album order, **newest taken**, **oldest taken**, **newest added**, **oldest added**
 - Capture date and upload date exposed as camera attributes (with paired-photo support)
 
+### 📍 EXIF & Location (Local / NAS)
+- Capture date populated automatically from EXIF `DateTimeOriginal`
+- GPS coordinates (`latitude`, `longitude`) extracted from EXIF
+- Reverse-geocoded to a human-readable `location` attribute (e.g. `"Portland, Oregon, United States"`) via Nominatim
+- Geocoding runs in the background — startup is never delayed
+- Results cached to disk; subsequent restarts are instant
+
 ### ⏯ Pause / Resume
 - Pause switch holds the current slide indefinitely
 - Manual "Next slide" button still works while paused
@@ -155,6 +162,8 @@ For NAS:
 - Mount it first
 - Use the mounted path
 
+**EXIF metadata**: JPEG files are scanned for EXIF data at startup. `captured_at` is populated from `DateTimeOriginal`. If GPS coordinates are present, `latitude` and `longitude` are also set, and the integration reverse-geocodes them to a human-readable `location` string (e.g. `"Sydney, New South Wales, Australia"`) via Nominatim (OpenStreetMap). Geocoding runs in the background so startup is never delayed — a **Geocoding progress** diagnostic sensor shows how far along it is. Results are cached to disk so repeated restarts do not re-query the API.
+
 ---
 
 ## 🧩 Entities Created
@@ -182,11 +191,12 @@ Each album you configure creates the following entities in Home Assistant.
 
 ### 📊 Sensors
 
-| Entity | Description |
-|--------|------------|
-| Album title | Title of the source album |
-| Media count | Number of images currently available |
-| Image cache usage *(diagnostic)* | Current download cache size in MB |
+| Entity | Source | Description |
+|--------|--------|------------|
+| Album title | All | Title of the source album |
+| Media count | All | Number of images currently available |
+| Image cache usage *(diagnostic)* | All | Current download cache size in MB |
+| Geocoding progress *(diagnostic)* | Local only | Percentage of GPS-tagged photos that have been reverse-geocoded to a location name. Shows `geocoded`, `total`, and `status` (`pending` / `running` / `complete`) as attributes. Reaches 100 % once and stays there on subsequent restarts thanks to the on-disk cache |
 
 ---
 
@@ -203,10 +213,13 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `current_filename` | string \| null | Source filename when known |
 | `current_url` | string \| null | URL of the current slide |
 | `current_is_portrait` | bool \| null | Orientation of the current slide |
-| `captured_at` | string \| list \| null | ISO-8601 capture date. List of `[primary, partner]` when paired (top/left first) |
+| `captured_at` | string \| list \| null | ISO-8601 capture date. Sourced from EXIF `DateTimeOriginal` for local files; from the album API for Google Photos. List of `[primary, partner]` when paired (top/left first) |
 | `captured_at_primary` | string \| null | Capture date of the primary image only |
 | `uploaded_at` | string \| null | ISO-8601 date when added to the album (Google Photos only) |
 | `byte_size` | int \| null | Original file size in bytes (Google Photos only) |
+| `latitude` | float \| null | GPS latitude extracted from EXIF (local files only) |
+| `longitude` | float \| null | GPS longitude extracted from EXIF (local files only) |
+| `location` | string \| null | Human-readable location reverse-geocoded from GPS coordinates, e.g. `"Sydney, New South Wales, Australia"`. Populated asynchronously after the folder scan; requires internet access (local files only) |
 | `paused` | bool | Whether the slideshow is paused |
 | `date_filter` | string | Active date filter mode |
 | `frame_id` | int | Monotonic counter incremented on every committed slide. Used by the [card](#-album-slideshow-card) to detect new frames |
