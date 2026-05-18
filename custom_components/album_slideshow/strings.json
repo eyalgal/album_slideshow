@@ -30,5 +30,16 @@
       "invalid_album_url": "That does not look like a Google Photos shared album link.",
       "invalid_path": "Path is empty or invalid."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Local Folder options",
+        "description": "Reverse geocoding sends your photos' EXIF GPS coordinates to the public OpenStreetMap Nominatim service (https://nominatim.openstreetmap.org) to look up a human-readable place name. Coordinates are rounded to ~100 m before lookup and cached on disk. Turn this off to keep coordinates entirely local; the latitude and longitude attributes still work either way.",
+        "data": {
+          "reverse_geocode": "Reverse-geocode EXIF GPS coordinates via OpenStreetMap"
+        }
+      }
+    }
   }
 }
