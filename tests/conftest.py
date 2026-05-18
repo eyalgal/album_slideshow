@@ -81,3 +81,82 @@ class _Store:
 
 
 _storage.Store = _Store  # type: ignore[attr-defined]
+
+
+# ``async_timeout.timeout`` is used by coordinator.py around aiohttp calls;
+# tests that exercise those code paths need a no-op async context manager
+# rather than the empty module stub.
+class _NullAsyncTimeout:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+import async_timeout as _async_timeout
+
+_async_timeout.timeout = lambda *a, **kw: _NullAsyncTimeout()  # type: ignore[attr-defined]
+
+
+# config_flow.py imports ``callback`` from homeassistant.core; provide a
+# pass-through decorator that mirrors the real one's behaviour.
+def _callback(func):
+    return func
+
+
+_core.callback = _callback  # type: ignore[attr-defined]
+
+
+# Minimal stubs for the config_entries types used by ConfigFlow + OptionsFlow.
+class _ConfigFlow:
+    VERSION = 1
+    def __init_subclass__(cls, **kwargs):
+        # Accept the ``domain=...`` keyword used by ConfigFlow subclasses.
+        kwargs.pop("domain", None)
+        super().__init_subclass__(**kwargs)
+
+
+class _OptionsFlow:
+    pass
+
+
+_ce.ConfigFlow = _ConfigFlow  # type: ignore[attr-defined]
+_ce.OptionsFlow = _OptionsFlow  # type: ignore[attr-defined]
+
+
+# data_entry_flow.FlowResult is just an alias for dict in older HA cores.
+_make_stub("homeassistant.data_entry_flow")
+import homeassistant.data_entry_flow as _def
+
+_def.FlowResult = dict  # type: ignore[attr-defined]
+
+
+# helpers.entity.EntityCategory is referenced by sensor.py.
+_make_stub("homeassistant.helpers.entity")
+import homeassistant.helpers.entity as _he
+
+
+class _EntityCategory:
+    DIAGNOSTIC = "diagnostic"
+    CONFIG = "config"
+
+
+_he.EntityCategory = _EntityCategory  # type: ignore[attr-defined]
+
+
+# components.sensor: SensorEntity + SensorStateClass.
+_make_stub("homeassistant.components.sensor")
+import homeassistant.components.sensor as _sensor
+
+
+class _SensorEntity:
+    pass
+
+
+class _SensorStateClass:
+    MEASUREMENT = "measurement"
+
+
+_sensor.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
+_sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
