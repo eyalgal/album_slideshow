@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 import json
@@ -20,6 +21,8 @@ from .const import (
     CONF_ALBUM_URL,
     CONF_LOCAL_PATH,
     CONF_RECURSIVE,
+    CONF_REVERSE_GEOCODE,
+    DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
@@ -42,6 +45,19 @@ class MediaItem:
     uploaded_at: int | None = None
     # File size of the original asset in bytes, when known.
     byte_size: int | None = None
+    # GPS coordinates from EXIF (local-folder provider only); decimal
+    # degrees, signed (negative = South / West). ``location`` is a
+    # human-readable reverse-geocoded label such as
+    # ``"Lisbon, Portugal"`` and may be ``None`` even when coordinates
+    # are present (cache miss, opt-out, or geocoder offline).
+    latitude: float | None = None
+    longitude: float | None = None
+    location: str | None = None
+    # True once the local-folder EXIF reader has visited this file.
+    # Prevents re-reading EXIF on every coordinator refresh and lets the
+    # background enrichment task skip already-processed files even after
+    # an HA restart (the flag round-trips through the items cache).
+    exif_scanned: bool = False
 
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -205,10 +221,345 @@ def _looks_like_video(raw: dict[str, Any]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Local-folder EXIF + reverse-geocode helpers
+# ---------------------------------------------------------------------------
+
+# EXIF tag ids we care about. These are stable IANA-registered numbers, so
+# we can use them directly without depending on ``PIL.ExifTags.TAGS``
+# label lookups (which change wording across Pillow versions).
+_EXIF_TAG_DATETIME_ORIGINAL = 36867       # DateTimeOriginal
+_EXIF_TAG_OFFSET_TIME_ORIGINAL = 36881    # OffsetTimeOriginal (e.g. "+02:00")
+_EXIF_TAG_DATETIME = 306                  # DateTime (modification time)
+_EXIF_TAG_GPS_IFD = 34853                 # Pointer to the GPS IFD
+_EXIF_GPS_LAT_REF = 1                     # "N" / "S"
+_EXIF_GPS_LAT = 2                         # rational tuple
+_EXIF_GPS_LON_REF = 3                     # "E" / "W"
+_EXIF_GPS_LON = 4                         # rational tuple
+
+# Nominatim (OpenStreetMap) is free but rate-limited to 1 request/second
+# per IP and asks integrators to identify themselves with a descriptive
+# User-Agent. See https://operations.osmfoundation.org/policies/nominatim/
+_NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/reverse"
+_NOMINATIM_MIN_INTERVAL_S = 1.1
+_NOMINATIM_TIMEOUT_S = 20
+
+# How many EXIF reads to perform between cache flushes. Bigger batches
+# mean fewer Store writes but more rework if HA is killed mid-scan.
+_EXIF_BATCH_SAVE = 25
+_GEOCODE_BATCH_SAVE = 10
+
+# Inserted between background-enrichment iterations so the event loop
+# stays responsive on the fast path (items that are already scanned and
+# need zero work).
+_ENRICHMENT_FAST_PATH_YIELD_EVERY = 100
+
+
+def _gps_to_decimal(dms: Any, ref: Any) -> float | None:
+    """Convert an EXIF GPS ``(deg, min, sec)`` rational tuple to a signed decimal.
+
+    ``ref`` is the matching reference tag (``"N"``/``"S"`` for latitude or
+    ``"E"``/``"W"`` for longitude). Returns ``None`` when the inputs are
+    malformed or out of the legal coordinate range.
+    """
+    if not isinstance(dms, (tuple, list)) or len(dms) != 3:
+        return None
+    try:
+        deg = float(dms[0])
+        minutes = float(dms[1])
+        sec = float(dms[2])
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    value = deg + minutes / 60.0 + sec / 3600.0
+    if isinstance(ref, bytes):
+        try:
+            ref = ref.decode("ascii", errors="ignore")
+        except Exception:
+            ref = ""
+    if isinstance(ref, str) and ref.strip().upper() in {"S", "W"}:
+        value = -value
+    if not (-180.0 <= value <= 180.0):
+        return None
+    return value
+
+
+def _geocode_cache_key(lat: float, lon: float) -> str:
+    """Return a stable cache key for a coordinate pair.
+
+    Coordinates are rounded to three decimal places (~111 m precision),
+    which is more than enough resolution for a city/neighbourhood label
+    while still folding hundreds of nearby photos into a single
+    Nominatim call. ``-0.0`` is normalised to ``0.0`` so the cache key
+    is identical regardless of which sign of zero the EXIF rounded into.
+    """
+    lat_r = round(float(lat), 3)
+    lon_r = round(float(lon), 3)
+    # ``round`` can yield ``-0.0`` for tiny negative inputs.
+    if lat_r == 0:
+        lat_r = 0.0
+    if lon_r == 0:
+        lon_r = 0.0
+    return f"{lat_r:.3f},{lon_r:.3f}"
+
+
+def _parse_exif_datetime(raw: Any, offset_raw: Any) -> int | None:
+    """Parse an EXIF ``DateTimeOriginal``/``DateTime`` string to epoch ms.
+
+    EXIF stores datetimes as ``"YYYY:MM:DD HH:MM:SS"`` without a timezone.
+    If the companion ``OffsetTimeOriginal`` tag is present (introduced
+    with EXIF 2.31, common on modern cameras and phones) we use it. When
+    it's missing we treat the value as the host's local time, which is
+    the closest thing to "what the user expects" for cameras that don't
+    record an offset.
+    """
+    from datetime import datetime, timezone
+
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw or raw.startswith(("0000", "    ")):
+        return None
+    try:
+        dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+    offset_str: str | None = None
+    if isinstance(offset_raw, bytes):
+        try:
+            offset_str = offset_raw.decode("ascii", errors="ignore").strip()
+        except Exception:
+            offset_str = None
+    elif isinstance(offset_raw, str):
+        offset_str = offset_raw.strip()
+
+    if offset_str:
+        try:
+            offset_dt = datetime.fromisoformat(f"2000-01-01T00:00:00{offset_str}")
+            dt = dt.replace(tzinfo=offset_dt.tzinfo)
+        except ValueError:
+            dt = dt.astimezone().replace(tzinfo=None).astimezone()
+    else:
+        # Interpret as the host's local time.
+        dt = dt.astimezone()
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return int(dt.timestamp() * 1000)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _read_local_exif(path: Path) -> dict[str, Any]:
+    """Read EXIF metadata for a local file.
+
+    Returns a dict with any of the keys ``captured_at`` (epoch ms),
+    ``latitude`` and ``longitude``. All keys are optional - missing
+    metadata is just omitted. ``captured_at`` always falls back to the
+    file's modification time so date-sorting works even for screenshots
+    and scans without EXIF.
+
+    Designed to be called from an executor thread: it does only
+    synchronous Pillow + filesystem I/O.
+    """
+    out: dict[str, Any] = {}
+
+    # mtime fallback for captured_at. Cameras that don't record EXIF
+    # (screenshots, scans, certain Android camera apps) still need a
+    # plausible "taken on" timestamp for the date-filter sensors and
+    # ordering. The EXIF parse below overrides this when present.
+    try:
+        out["captured_at"] = int(path.stat().st_mtime * 1000)
+    except OSError:
+        pass
+
+    try:
+        from PIL import Image
+    except Exception:  # pragma: no cover - Pillow ships with HA core
+        return out
+
+    try:
+        with Image.open(path) as img:
+            exif = img.getexif()
+            if not exif:
+                return out
+
+            dt_raw = exif.get(_EXIF_TAG_DATETIME_ORIGINAL) or exif.get(
+                _EXIF_TAG_DATETIME
+            )
+            offset_raw = exif.get(_EXIF_TAG_OFFSET_TIME_ORIGINAL)
+            parsed = _parse_exif_datetime(dt_raw, offset_raw)
+            if parsed is not None:
+                out["captured_at"] = parsed
+
+            gps = None
+            try:
+                gps = exif.get_ifd(_EXIF_TAG_GPS_IFD) or None
+            except Exception:
+                gps = None
+            if gps:
+                lat = _gps_to_decimal(
+                    gps.get(_EXIF_GPS_LAT), gps.get(_EXIF_GPS_LAT_REF)
+                )
+                lon = _gps_to_decimal(
+                    gps.get(_EXIF_GPS_LON), gps.get(_EXIF_GPS_LON_REF)
+                )
+                if lat is not None and lon is not None:
+                    # Null Island guard: GPS chips and some editors stamp
+                    # ``(0, 0)`` when the fix is invalid. Treat that as no
+                    # location rather than dropping every such photo onto
+                    # the equator off the African coast.
+                    if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+                        return out
+                    out["latitude"] = lat
+                    out["longitude"] = lon
+    except Exception as err:
+        _LOGGER.debug("EXIF: failed to read %s: %s", path, err)
+
+    return out
+
+
+def _format_nominatim_location(payload: dict[str, Any]) -> str | None:
+    """Turn a Nominatim reverse-geocode response into a short label.
+
+    Prefers ``city`` > ``town`` > ``village`` > ``municipality`` >
+    ``county`` for the locality portion, plus ``country`` when present.
+    Falls back to Nominatim's pre-formatted ``display_name`` (truncated
+    to the first two comma-separated parts) when no recognisable
+    locality fields are present.
+    """
+    if not isinstance(payload, dict):
+        return None
+    address = payload.get("address") if isinstance(payload.get("address"), dict) else {}
+    locality = None
+    for key in ("city", "town", "village", "hamlet", "municipality", "county", "state"):
+        val = address.get(key)
+        if isinstance(val, str) and val.strip():
+            locality = val.strip()
+            break
+    country = address.get("country") if isinstance(address.get("country"), str) else None
+
+    if locality and country:
+        return f"{locality}, {country}"
+    if locality:
+        return locality
+    if isinstance(country, str) and country.strip():
+        return country.strip()
+
+    display = payload.get("display_name")
+    if isinstance(display, str) and display.strip():
+        parts = [p.strip() for p in display.split(",") if p.strip()]
+        if len(parts) >= 2:
+            return ", ".join(parts[:2])
+        if parts:
+            return parts[0]
+    return None
+
+
+async def _nominatim_lookup(
+    session: Any,
+    lat: float,
+    lon: float,
+    user_agent: str,
+) -> str | None:
+    """Reverse-geocode a coordinate pair via Nominatim.
+
+    Returns a human-readable label or ``None`` if the lookup failed or
+    the response had no useful address. Never raises - geocoding is
+    best-effort and a failure must never stop the slideshow.
+    """
+    params = {
+        "format": "jsonv2",
+        "lat": f"{lat:.5f}",
+        "lon": f"{lon:.5f}",
+        "zoom": "10",      # Roughly city-level - we don't need street precision.
+        "addressdetails": "1",
+    }
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+        "Accept-Language": "en",
+    }
+    try:
+        async with async_timeout.timeout(_NOMINATIM_TIMEOUT_S):
+            resp = await session.get(
+                _NOMINATIM_ENDPOINT, params=params, headers=headers
+            )
+            if resp.status == 429:
+                _LOGGER.warning(
+                    "Nominatim rate-limited the integration; pausing geocode"
+                )
+                # Honour the policy by sleeping a full second before the
+                # caller schedules another request.
+                await asyncio.sleep(_NOMINATIM_MIN_INTERVAL_S)
+                return None
+            if resp.status >= 400:
+                _LOGGER.debug("Nominatim returned HTTP %s", resp.status)
+                return None
+            try:
+                payload = await resp.json(content_type=None)
+            except Exception:
+                return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Nominatim lookup failed (%s, %s): %s", lat, lon, err)
+        return None
+
+    return _format_nominatim_location(payload)
+
+
+def _read_manifest_version(integration_dir: Path) -> str:
+    """Best-effort read of ``manifest.json`` version. Returns ``""`` on error."""
+    try:
+        manifest_path = integration_dir / "manifest.json"
+        with manifest_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        version = data.get("version")
+        if isinstance(version, str):
+            return version
+    except Exception:
+        pass
+    return ""
+
+
+def _merge_prior_enrichment(
+    new_items: list[MediaItem], prior_items: list[MediaItem]
+) -> None:
+    """Copy EXIF + geocode metadata from prior coordinator items by URL.
+
+    Local-folder scans rebuild the ``MediaItem`` list from scratch on
+    every refresh, but reading EXIF + reverse-geocoding the same files
+    again would be wasteful (and would re-bill the user against the
+    Nominatim rate limit). This in-place merge preserves anything we
+    learned about files whose URL (and therefore path) hasn't changed.
+    """
+    if not prior_items:
+        return
+    prior_by_url: dict[str, MediaItem] = {it.url: it for it in prior_items}
+    for item in new_items:
+        prev = prior_by_url.get(item.url)
+        if prev is None:
+            continue
+        if prev.captured_at is not None and item.captured_at is None:
+            item.captured_at = prev.captured_at
+        if prev.latitude is not None and item.latitude is None:
+            item.latitude = prev.latitude
+        if prev.longitude is not None and item.longitude is None:
+            item.longitude = prev.longitude
+        if prev.location and not item.location:
+            item.location = prev.location
+        if prev.exif_scanned:
+            item.exif_scanned = True
+
 
 class AlbumCoordinator(DataUpdateCoordinator):
     # Bump when the persisted item shape changes incompatibly.
-    _ITEM_CACHE_VERSION = 1
+    _ITEM_CACHE_VERSION = 2
+    # Bump independently of the items cache - the geocode cache is
+    # keyed by coordinate and is safe to keep across item-shape changes.
+    _GEOCODE_CACHE_VERSION = 1
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, store: SlideshowStore) -> None:
         self.hass = hass
@@ -229,6 +580,34 @@ class AlbumCoordinator(DataUpdateCoordinator):
         )
         self._items_cache_loaded: bool = False
 
+        # Reverse-geocode cache. Coordinates rounded to ~100 m via
+        # ``_geocode_cache_key``; mapping value -> label string. Shared
+        # across all items in the album, persisted independently of the
+        # items cache so changes to one don't invalidate the other.
+        self._geocode_cache_store: Store = Store(
+            hass,
+            self._GEOCODE_CACHE_VERSION,
+            f"{DOMAIN}.{entry.entry_id}.geocode",
+        )
+        self._geocode_cache: dict[str, str] = {}
+        self._geocode_cache_loaded: bool = False
+        # Per-coordinator User-Agent so OSM operators can track us if we
+        # ever misbehave. Resolved lazily because __init__ is sync.
+        self._integration_version: str | None = None
+        # Background EXIF + geocode worker. Cancelled and replaced on
+        # every refresh so a stalled run from a previous interval never
+        # accumulates.
+        self._enrichment_task: asyncio.Task | None = None
+        # Progress data exposed to the diagnostic sensor. ``phase`` is
+        # ``None``/``"exif"``/``"geocoding"``/``"done"``.
+        self._enrich_progress: dict[str, Any] = {
+            "phase": None,
+            "exif_total": 0,
+            "exif_done": 0,
+            "geocode_total": 0,
+            "geocode_done": 0,
+        }
+
         super().__init__(
             hass,
             _LOGGER,
@@ -242,6 +621,11 @@ class AlbumCoordinator(DataUpdateCoordinator):
         store.add_listener(_on_store_change)
 
     async def _async_update_data(self) -> dict[str, Any]:
+        # Cancel any in-flight enrichment from a previous interval before
+        # the new scan runs - it would otherwise race against the new
+        # item list and risk re-saving stale data over fresh state.
+        await self._cancel_enrichment()
+
         try:
             if self.provider == PROVIDER_LOCAL_FOLDER:
                 data = await self._update_local_folder()
@@ -260,6 +644,15 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise
 
         items = data.get("items") or []
+        if self.provider == PROVIDER_LOCAL_FOLDER and items:
+            # Carry forward EXIF/geocode metadata for files we've already
+            # scanned this session; new files get filled in by the
+            # background worker below.
+            prior_items = (self.data or {}).get("items") if isinstance(self.data, dict) else None
+            if prior_items:
+                _merge_prior_enrichment(items, prior_items)
+            self._schedule_enrichment(data)
+
         if items:
             # Only persist non-empty results so we never overwrite a good
             # cache with a transient empty fetch.
@@ -274,6 +667,48 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 return cached
 
         return data
+
+    async def _cancel_enrichment(self) -> None:
+        """Cancel and reap any in-flight background enrichment task."""
+        task = self._enrichment_task
+        if task is None or task.done():
+            self._enrichment_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        finally:
+            self._enrichment_task = None
+
+    def _schedule_enrichment(self, data: dict[str, Any]) -> None:
+        """Kick off the background EXIF + geocode worker if there's work."""
+        items: list[MediaItem] = data.get("items") or []
+        unscanned = [it for it in items if not it.exif_scanned]
+        if not unscanned:
+            # Even with nothing to do, mark the phase as ``done`` so the
+            # diagnostic sensor stops reporting an in-progress run from
+            # the previous refresh.
+            self._enrich_progress = {
+                "phase": "done",
+                "exif_total": len(items),
+                "exif_done": len(items),
+                "geocode_total": 0,
+                "geocode_done": 0,
+            }
+            return
+        self._enrich_progress = {
+            "phase": "exif",
+            "exif_total": len(items),
+            "exif_done": len(items) - len(unscanned),
+            "geocode_total": 0,
+            "geocode_done": 0,
+        }
+        self._enrichment_task = self.hass.async_create_background_task(
+            self._enrich_items_background(data),
+            name=f"album_slideshow_enrich_{self.entry.entry_id}",
+        )
 
     async def _load_cached_items(self) -> dict[str, Any] | None:
         try:
@@ -302,6 +737,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     captured_at=raw.get("captured_at"),
                     uploaded_at=raw.get("uploaded_at"),
                     byte_size=raw.get("byte_size"),
+                    latitude=raw.get("latitude"),
+                    longitude=raw.get("longitude"),
+                    location=raw.get("location"),
+                    exif_scanned=bool(raw.get("exif_scanned", False)),
                 ))
             except Exception:
                 continue
@@ -328,6 +767,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "captured_at": it.captured_at,
                     "uploaded_at": it.uploaded_at,
                     "byte_size": it.byte_size,
+                    "latitude": it.latitude,
+                    "longitude": it.longitude,
+                    "location": it.location,
+                    "exif_scanned": it.exif_scanned,
                 }
                 for it in items
             ],
@@ -395,6 +838,215 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "title": root.name,
             "items": items,
         }
+
+    async def _enrich_items_background(self, data: dict[str, Any]) -> None:
+        """Read EXIF for unscanned local files, then reverse-geocode.
+
+        Runs as a background task so the coordinator's first update can
+        return immediately with the bare file list. Pushes incremental
+        updates to listeners after each EXIF batch so attributes appear
+        on the camera as soon as they are known.
+
+        Cancellation-safe: any progress made before a cancel is
+        persisted via the ``finally`` clause.
+        """
+        items: list[MediaItem] = data.get("items") or []
+        if not items:
+            return
+
+        scanned_since_save = 0
+        try:
+            for idx, item in enumerate(items):
+                if item.exif_scanned:
+                    # Fast path: yield occasionally so we don't starve
+                    # the event loop when (re-)visiting a long list of
+                    # already-processed items.
+                    if idx % _ENRICHMENT_FAST_PATH_YIELD_EVERY == 0:
+                        await asyncio.sleep(0)
+                    continue
+
+                url = item.url
+                if not url.startswith("file://"):
+                    item.exif_scanned = True
+                    continue
+
+                path = Path(url[len("file://"):])
+                try:
+                    info = await self.hass.async_add_executor_job(
+                        _read_local_exif, path
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("EXIF: executor error for %s: %s", path, err)
+                    info = {}
+
+                if "captured_at" in info:
+                    item.captured_at = info["captured_at"]
+                if "latitude" in info and "longitude" in info:
+                    item.latitude = info["latitude"]
+                    item.longitude = info["longitude"]
+                item.exif_scanned = True
+
+                scanned_since_save += 1
+                self._enrich_progress["exif_done"] = (
+                    self._enrich_progress.get("exif_done", 0) + 1
+                )
+
+                if scanned_since_save >= _EXIF_BATCH_SAVE:
+                    scanned_since_save = 0
+                    await self._save_cached_items(data)
+                    self.async_set_updated_data(data)
+
+            # Flush any tail items before the geocode phase.
+            if scanned_since_save:
+                await self._save_cached_items(data)
+                self.async_set_updated_data(data)
+
+            await self._geocode_items_background(data)
+        except asyncio.CancelledError:
+            _LOGGER.debug("Album enrichment: cancelled, persisting progress")
+            raise
+        finally:
+            # Always flush whatever progress we made, even on cancel.
+            try:
+                await self._save_cached_items(data)
+            except Exception:  # pragma: no cover - storage layer
+                pass
+            # Phase ``done`` lets the diagnostic sensor settle at 100%.
+            self._enrich_progress["phase"] = "done"
+
+    async def _geocode_items_background(self, data: dict[str, Any]) -> None:
+        """Reverse-geocode items with EXIF GPS but no location label yet.
+
+        Honours the ``reverse_geocode`` option (default on) so privacy-
+        conscious users can disable the Nominatim calls without losing
+        the GPS coordinates themselves. Successful labels are written
+        back into the items in-place and persisted via the items cache.
+        """
+        if not bool(
+            self.entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE)
+            if hasattr(self.entry, "options") and self.entry.options is not None
+            else DEFAULT_REVERSE_GEOCODE
+        ):
+            _LOGGER.debug("Reverse geocode disabled via options; skipping")
+            return
+
+        items: list[MediaItem] = data.get("items") or []
+        candidates: list[MediaItem] = [
+            it
+            for it in items
+            if it.latitude is not None
+            and it.longitude is not None
+            and not it.location
+        ]
+        if not candidates:
+            return
+
+        await self._ensure_geocode_cache_loaded()
+
+        self._enrich_progress["phase"] = "geocoding"
+        self._enrich_progress["geocode_total"] = len(candidates)
+        self._enrich_progress["geocode_done"] = 0
+
+        session = async_get_clientsession(self.hass)
+        user_agent = await self._async_user_agent()
+
+        # Last network call wall-time; used to throttle Nominatim to the
+        # 1 req/sec policy without sleeping for cached lookups.
+        last_call: float = 0.0
+        loop = asyncio.get_event_loop()
+        unsaved = 0
+
+        try:
+            for item in candidates:
+                key = _geocode_cache_key(item.latitude, item.longitude)
+                cached_label = self._geocode_cache.get(key)
+                if cached_label:
+                    item.location = cached_label
+                    self._enrich_progress["geocode_done"] += 1
+                    continue
+
+                # Respect the 1 req/sec Nominatim usage policy.
+                elapsed = loop.time() - last_call
+                if elapsed < _NOMINATIM_MIN_INTERVAL_S:
+                    await asyncio.sleep(_NOMINATIM_MIN_INTERVAL_S - elapsed)
+
+                label = await _nominatim_lookup(
+                    session, item.latitude, item.longitude, user_agent
+                )
+                last_call = loop.time()
+
+                if label:
+                    self._geocode_cache[key] = label
+                    item.location = label
+                    unsaved += 1
+
+                self._enrich_progress["geocode_done"] += 1
+
+                if unsaved >= _GEOCODE_BATCH_SAVE:
+                    unsaved = 0
+                    await self._save_geocode_cache()
+                    await self._save_cached_items(data)
+                    self.async_set_updated_data(data)
+        finally:
+            if unsaved:
+                try:
+                    await self._save_geocode_cache()
+                except Exception:  # pragma: no cover - storage layer
+                    pass
+            try:
+                await self._save_cached_items(data)
+            except Exception:  # pragma: no cover - storage layer
+                pass
+            self.async_set_updated_data(data)
+
+    async def _ensure_geocode_cache_loaded(self) -> None:
+        if self._geocode_cache_loaded:
+            return
+        try:
+            payload = await self._geocode_cache_store.async_load()
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Geocode cache: failed to load (%s)", err)
+            payload = None
+        if isinstance(payload, dict):
+            entries = payload.get("entries")
+            if isinstance(entries, dict):
+                self._geocode_cache = {
+                    str(k): str(v)
+                    for k, v in entries.items()
+                    if isinstance(v, str) and v
+                }
+        self._geocode_cache_loaded = True
+
+    async def _save_geocode_cache(self) -> None:
+        try:
+            await self._geocode_cache_store.async_save(
+                {"entries": self._geocode_cache}
+            )
+        except Exception as err:  # pragma: no cover - storage layer
+            _LOGGER.debug("Geocode cache: failed to save (%s)", err)
+
+    async def _async_user_agent(self) -> str:
+        """Return a Nominatim-friendly User-Agent string.
+
+        OSM operations explicitly require integrators to identify
+        themselves; using a generic Python/aiohttp UA gets you blocked.
+        We bundle the integration version (from ``manifest.json``) so
+        operators can correlate issues to releases.
+        """
+        if self._integration_version is None:
+            try:
+                self._integration_version = await self.hass.async_add_executor_job(
+                    _read_manifest_version, Path(__file__).parent
+                )
+            except Exception:
+                self._integration_version = ""
+        version = self._integration_version or "dev"
+        return (
+            f"album_slideshow/{version} "
+            "(+https://github.com/eyalgal/album_slideshow)"
+        )
 
     async def _call_publicalbum(
         self,
