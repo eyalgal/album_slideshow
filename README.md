@@ -39,6 +39,11 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - NAS mounted directories
 - Optional recursive scanning
 
+### 📍 EXIF & Location (local / NAS)
+- Reads EXIF capture date (and `OffsetTimeOriginal` when present) so date-filter modes work for local files too
+- Surfaces EXIF GPS as `latitude` / `longitude` camera attributes
+- Optional reverse geocoding via OpenStreetMap Nominatim for a human-readable `location` (e.g. `"Lisbon, Portugal"`); per-album opt-out in the integration's Configure dialog
+
 ### 🗓 Filter & Order by Date
 - Date filter: last 7 / 30 / 365 days, this month, this year, **On this day** memories
 - Order modes: random, album order, **newest taken**, **oldest taken**, **newest added**, **oldest added**
@@ -155,6 +160,37 @@ For NAS:
 - Mount it first
 - Use the mounted path
 
+#### 📍 EXIF capture date & location (local / NAS only)
+
+For local-folder entries the integration reads EXIF metadata in the
+background after every refresh:
+
+- **Capture date** — `DateTimeOriginal` is preferred; if missing, the file's
+  modification time is used so date-based ordering still works for
+  screenshots and scans. When `OffsetTimeOriginal` is present (most modern
+  cameras and phones) it is honoured; otherwise the timestamp is interpreted
+  as the host's local time.
+- **GPS coordinates** — `GPSLatitude`/`GPSLongitude` are exposed as the
+  `latitude` / `longitude` camera attributes. `(0, 0)` "null island" stamps
+  are ignored.
+- **Reverse-geocoded location** — by default the integration calls the
+  public [Nominatim](https://nominatim.openstreetmap.org/) (OpenStreetMap)
+  service to translate coordinates into a human-readable label such as
+  `"Lisbon, Portugal"`, exposed as the `location` attribute. Coordinates
+  are rounded to **~100 m** before lookup and the answer is cached on disk,
+  so the same neighbourhood is only ever fetched once. Nominatim's
+  free-tier policy (1 req/sec, identifying User-Agent) is respected.
+
+**Privacy / opt-out:** if you'd rather not send any coordinates to
+OpenStreetMap, open *Settings → Devices & Services → Album Slideshow → your
+album → Configure* and turn off **Reverse-geocode EXIF GPS coordinates**.
+The `latitude`/`longitude` attributes still work; only the `location`
+label is suppressed. The opt-out is per-album.
+
+Progress for both phases is exposed as the **Enrichment progress**
+diagnostic sensor (percent complete, with `phase`, `exif_done`,
+`geocode_done` etc. as attributes).
+
 ---
 
 ## 🧩 Entities Created
@@ -182,11 +218,12 @@ Each album you configure creates the following entities in Home Assistant.
 
 ### 📊 Sensors
 
-| Entity | Description |
-|--------|------------|
-| Album title | Title of the source album |
-| Media count | Number of images currently available |
-| Image cache usage *(diagnostic)* | Current download cache size in MB |
+| Entity | Source | Description |
+|--------|--------|-------------|
+| Album title | All | Title of the source album |
+| Media count | All | Number of images currently available |
+| Image cache usage *(diagnostic)* | All | Current download cache size in MB |
+| Enrichment progress *(diagnostic)* | Local folder | Percent of files whose EXIF/GPS has been read (and, when enabled, reverse-geocoded). Attributes include `phase`, `exif_done`/`exif_total`, `geocode_done`/`geocode_total`. |
 
 ---
 
@@ -203,10 +240,13 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `current_filename` | string \| null | Source filename when known |
 | `current_url` | string \| null | URL of the current slide |
 | `current_is_portrait` | bool \| null | Orientation of the current slide |
-| `captured_at` | string \| list \| null | ISO-8601 capture date. List of `[primary, partner]` when paired (top/left first) |
+| `captured_at` | string \| list \| null | ISO-8601 capture date. List of `[primary, partner]` when paired (top/left first). For local files this is read from EXIF (or the file's mtime as a fallback). |
 | `captured_at_primary` | string \| null | Capture date of the primary image only |
 | `uploaded_at` | string \| null | ISO-8601 date when added to the album (Google Photos only) |
 | `byte_size` | int \| null | Original file size in bytes (Google Photos only) |
+| `latitude` | float \| null | EXIF GPS latitude in decimal degrees (local folder only) |
+| `longitude` | float \| null | EXIF GPS longitude in decimal degrees (local folder only) |
+| `location` | string \| null | Reverse-geocoded label (e.g. `"Lisbon, Portugal"`). Empty when reverse-geocoding is disabled or has not yet completed for this file. |
 | `paused` | bool | Whether the slideshow is paused |
 | `date_filter` | string | Active date filter mode |
 | `frame_id` | int | Monotonic counter incremented on every committed slide. Used by the [card](#-album-slideshow-card) to detect new frames |
