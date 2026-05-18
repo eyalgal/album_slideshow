@@ -5,6 +5,7 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
@@ -14,6 +15,8 @@ from .const import (
     CONF_ALBUM_URL,
     CONF_LOCAL_PATH,
     CONF_RECURSIVE,
+    CONF_REVERSE_GEOCODE,
+    DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
     DEFAULT_RECURSIVE,
@@ -49,6 +52,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._provider: str | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow handler.
+
+        Only local-folder entries expose user-tunable options today (the
+        reverse-geocode toggle); Google entries get a no-op handler so
+        that the "Configure" button doesn't appear empty in the UI.
+        """
+        if config_entry.data.get(CONF_PROVIDER) == PROVIDER_LOCAL_FOLDER:
+            return LocalFolderOptionsFlow(config_entry)
+        return _NoOptionsFlow(config_entry)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
@@ -127,3 +145,46 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
         return self.async_show_form(step_id="local_folder", data_schema=schema, errors=errors)
+
+
+class LocalFolderOptionsFlow(config_entries.OptionsFlow):
+    """Options for local-folder entries.
+
+    Currently exposes a single toggle: ``reverse_geocode``. Users with
+    privacy concerns about handing EXIF GPS coordinates to an external
+    OSM endpoint can turn this off; the GPS coordinates remain available
+    as ``latitude``/``longitude`` attributes regardless.
+    """
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self.config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self.config_entry.options.get(
+            CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE
+        )
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_REVERSE_GEOCODE, default=bool(current)
+                ): bool,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
+class _NoOptionsFlow(config_entries.OptionsFlow):
+    """Fallback options flow for providers that expose nothing tunable."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self.config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        return self.async_create_entry(title="", data={})
