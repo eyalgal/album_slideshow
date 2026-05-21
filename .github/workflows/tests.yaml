@@ -24,3 +24,22 @@ jobs:
           pip install voluptuous aiohttp
       - name: Run pytest
         run: pytest tests/ -q
+
+  version-sync:
+    # Guards against the v0.8.0 footgun where manifest.json was bumped
+    # but album-slideshow-card.js still logged the previous VERSION,
+    # making the card appear out-of-date in browser consoles.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Card VERSION must match manifest.json version
+        run: |
+          set -euo pipefail
+          MANIFEST=$(python3 -c "import json;print(json.load(open('custom_components/album_slideshow/manifest.json'))['version'])")
+          CARD=$(grep -E '^const VERSION = ' custom_components/album_slideshow/www/album-slideshow-card.js | sed -E 's/^const VERSION = "(.*)";$/\1/')
+          echo "manifest.json version: $MANIFEST"
+          echo "card VERSION:          $CARD"
+          if [ "$MANIFEST" != "$CARD" ]; then
+            echo "::error::album-slideshow-card.js VERSION ($CARD) does not match manifest.json version ($MANIFEST). Bump both together."
+            exit 1
+          fi
