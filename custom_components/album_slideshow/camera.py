@@ -231,6 +231,11 @@ class AlbumSlideshowCamera(Camera):
             "captured_at_primary": captured_at,
             "uploaded_at": _ts_to_iso(getattr(cur, "uploaded_at", None)),
             "byte_size": getattr(cur, "byte_size", None),
+            # GPS + reverse-geocoded label come from EXIF for local-folder
+            # entries; Google albums leave these as ``None``.
+            "latitude": getattr(cur, "latitude", None),
+            "longitude": getattr(cur, "longitude", None),
+            "location": getattr(cur, "location", None),
             "slide_interval": int(self.store.slide_interval),
             "fill_mode": self.store.fill_mode,
             "portrait_mode": self.store.portrait_mode,

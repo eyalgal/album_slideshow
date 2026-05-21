@@ -6,6 +6,13 @@ CONF_ALBUM_NAME = "album_name"
 CONF_LOCAL_PATH = "local_path"
 CONF_RECURSIVE = "recursive"
 CONF_IMAGE_CACHE_MB = "image_cache_mb"
+# Local-folder option: when True (default) the coordinator does best-effort
+# reverse geocoding of EXIF GPS coordinates via the public Nominatim
+# (OpenStreetMap) endpoint and exposes a human-readable ``location``
+# attribute. Users with privacy concerns can disable this from the
+# integration's options dialog.
+CONF_REVERSE_GEOCODE = "reverse_geocode"
+DEFAULT_REVERSE_GEOCODE = True
 
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"

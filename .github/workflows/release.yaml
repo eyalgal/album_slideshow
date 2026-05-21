@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify manifest.json version matches the tag
+        id: meta
+        run: |
+          VERSION=$(python3 -c "import json;print(json.load(open('custom_components/album_slideshow/manifest.json'))['version'])")
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "manifest_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_version=$TAG" >> "$GITHUB_OUTPUT"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::manifest.json version ($VERSION) does not match tag ($TAG)"
+            exit 1
+          fi
+
+      - name: Build album_slideshow.zip
+        run: |
+          cd custom_components/album_slideshow
+          zip -r "$GITHUB_WORKSPACE/album_slideshow.zip" . \
+            -x "__pycache__/*" "*.pyc" ".DS_Store"
+          ls -la "$GITHUB_WORKSPACE/album_slideshow.zip"
+
+      - name: Attach asset to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: album_slideshow.zip
+          fail_on_unmatched_files: true
