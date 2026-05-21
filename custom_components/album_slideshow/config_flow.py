@@ -63,10 +63,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Only local-folder entries expose user-tunable options today (the
         reverse-geocode toggle); Google entries get a no-op handler so
         that the "Configure" button doesn't appear empty in the UI.
+
+        Note: do NOT pass ``config_entry`` to the OptionsFlow constructor.
+        Since Home Assistant 2024.12 the base class manages
+        ``self.config_entry`` as a property and assigning to it in
+        ``__init__`` raises (the symptom is a 500 when the user clicks
+        Configure).
         """
         if config_entry.data.get(CONF_PROVIDER) == PROVIDER_LOCAL_FOLDER:
-            return LocalFolderOptionsFlow(config_entry)
-        return _NoOptionsFlow(config_entry)
+            return LocalFolderOptionsFlow()
+        return _NoOptionsFlow()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
@@ -154,10 +160,11 @@ class LocalFolderOptionsFlow(config_entries.OptionsFlow):
     privacy concerns about handing EXIF GPS coordinates to an external
     OSM endpoint can turn this off; the GPS coordinates remain available
     as ``latitude``/``longitude`` attributes regardless.
-    """
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+    ``self.config_entry`` is provided by ``OptionsFlow`` as a managed
+    property (HA 2024.12+); we deliberately do NOT define ``__init__``
+    or assign to it, since doing so raises in newer cores.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -180,9 +187,6 @@ class LocalFolderOptionsFlow(config_entries.OptionsFlow):
 
 class _NoOptionsFlow(config_entries.OptionsFlow):
     """Fallback options flow for providers that expose nothing tunable."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
