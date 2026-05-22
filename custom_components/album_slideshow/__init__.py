@@ -87,16 +87,18 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     # browser hasn't finished loading the module yet (a real risk after
     # HA restarts and integration upgrades that bust the cache).
     #
-    # Falls back to ``add_extra_js_url`` for YAML-mode dashboards or any
-    # unexpected failure - that path also works but is racier on cold
-    # cache loads.
-    if await _try_register_lovelace_resource(hass, card_url):
-        hass.data.setdefault(DOMAIN, {})["card_registered"] = True
-        _LOGGER.info(
-            "Album Slideshow card registered as Lovelace resource at %s",
-            card_url,
-        )
-        return
+    # The storage-mode resources collection is only consumed by
+    # storage-mode dashboards; YAML-mode dashboards (whether the user
+    # has ``lovelace.mode: yaml`` globally or per-dashboard
+    # ``mode: yaml`` entries) read only the resources declared in their
+    # own YAML and would otherwise never load the card. That's why we
+    # *always* also call ``add_extra_js_url``: the frontend injects a
+    # ``<script>`` tag on every Lovelace render regardless of mode, so
+    # it's the universal fallback. Module loads are deduplicated by URL
+    # and the card's ``customElements.define()`` calls have an
+    # idempotency guard, so a storage-mode dashboard picking up both
+    # paths is a harmless no-op.
+    resource_registered = await _try_register_lovelace_resource(hass, card_url)
 
     try:
         from homeassistant.components.frontend import add_extra_js_url
@@ -104,20 +106,26 @@ async def _async_register_card(hass: HomeAssistant) -> None:
         add_extra_js_url(hass, card_url)
     except Exception:  # noqa: BLE001
         _LOGGER.exception(
-            "Failed to add Album Slideshow card to Lovelace; you can"
-            " still register it manually as a resource at %s",
+            "Failed to add Album Slideshow card via add_extra_js_url"
+            " (URL %s); the card may still load if a Lovelace resource"
+            " was registered above.",
             card_url,
         )
-        return
 
     hass.data.setdefault(DOMAIN, {})["card_registered"] = True
-    _LOGGER.info(
-        "Album Slideshow card registered via add_extra_js_url at %s."
-        " For YAML-mode dashboards this is the right path; for"
-        " storage-mode dashboards a Lovelace resource is preferred but"
-        " the resources collection wasn't available when we set up.",
-        card_url,
-    )
+    if resource_registered:
+        _LOGGER.info(
+            "Album Slideshow card registered (Lovelace resource +"
+            " add_extra_js_url) at %s",
+            card_url,
+        )
+    else:
+        _LOGGER.info(
+            "Album Slideshow card registered via add_extra_js_url at"
+            " %s; Lovelace resources collection was not available so"
+            " no resource entry was created.",
+            card_url,
+        )
 
 
 async def _try_register_lovelace_resource(
