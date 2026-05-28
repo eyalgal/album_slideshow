@@ -8,5 +8,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/eyalgal/album_slideshow/issues",
   "requirements": ["Pillow"],
-  "version": "0.8.2"
+  "version": "0.8.3"
 }

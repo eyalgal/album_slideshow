@@ -26,7 +26,30 @@
  *   tap_action: none        # none | more-info
  */
 
-const VERSION = "0.8.2";
+const VERSION = "0.8.3";
+
+// Recover the *native* ``HTMLElement`` constructor. Some plugins
+// (notably ``browser_mod``) load
+// ``@webcomponents/scoped-custom-element-registry``, which replaces
+// ``window.HTMLElement`` with a wrapper that throws
+// ``Illegal constructor`` from ``super()`` for any class HA core later
+// tries to instantiate via ``document.createElement`` /
+// ``new ClassRef()``. The polyfill does **not** patch concrete
+// subclasses like ``HTMLDivElement``, so walking up its prototype
+// chain yields the unpatched constructor regardless of script load
+// order. Falls back to ``HTMLElement`` so the card still works in
+// environments where the prototype chain isn't shaped as expected.
+const NativeHTMLElement = (() => {
+  try {
+    const proto = HTMLDivElement && HTMLDivElement.prototype;
+    const parent = proto && Object.getPrototypeOf(proto);
+    const ctor = parent && parent.constructor;
+    if (typeof ctor === "function" && ctor !== Object) return ctor;
+  } catch (_) {
+    /* fall through */
+  }
+  return HTMLElement;
+})();
 
 const ANIMATED_TRANSITIONS = [
   "fade",
@@ -58,7 +81,7 @@ function isAlbumSlideshowCamera(state) {
   );
 }
 
-class AlbumSlideshowCard extends HTMLElement {
+class AlbumSlideshowCard extends NativeHTMLElement {
   static getStubConfig(hass) {
     let entity = "";
     if (hass && hass.states) {
@@ -550,7 +573,7 @@ const DEFAULTS = {
   tap_action: "none",
 };
 
-class AlbumSlideshowCardEditor extends HTMLElement {
+class AlbumSlideshowCardEditor extends NativeHTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
