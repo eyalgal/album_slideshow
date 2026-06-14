@@ -134,6 +134,14 @@ class AlbumSlideshowCamera(Camera):
         # When the current frame is a paired image, this is [taken_a, taken_b]
         # ISO strings (top/left first); None for single frames.
         self._last_captured_at_pair: list[str | None] | None = None
+        # Full per-half caption metadata for a paired frame: a list of two
+        # dicts (top/left first) each carrying captured_at / location /
+        # latitude / longitude. None for single frames. Lets the Lovelace
+        # card overlay an accurate caption on each half of a pair.
+        self._last_pair_frames: list[dict] | None = None
+        # ``horizontal`` (side-by-side, left/right) or ``vertical`` (stacked,
+        # top/bottom) for a paired frame; None for single frames.
+        self._last_pair_orientation: str | None = None
         # Cached effective playlist (after date filter + ordering). Invalidated
         # by any store change or coordinator update.
         self._effective_cache: tuple[int, list[MediaItem]] | None = None
@@ -236,6 +244,13 @@ class AlbumSlideshowCamera(Camera):
             "latitude": getattr(cur, "latitude", None),
             "longitude": getattr(cur, "longitude", None),
             "location": getattr(cur, "location", None),
+            # Structured per-image caption metadata. A single-element list for
+            # normal slides; two elements (top/left first) for paired slides,
+            # so the card can overlay an accurate date/location on each half.
+            # ``pair_orientation`` tells the card how the two halves are laid
+            # out: ``horizontal`` (left/right) or ``vertical`` (top/bottom).
+            "caption_frames": self._caption_frames(cur, captured_at),
+            "pair_orientation": self._last_pair_orientation,
             "slide_interval": int(self.store.slide_interval),
             "fill_mode": self.store.fill_mode,
             "portrait_mode": self.store.portrait_mode,
@@ -249,6 +264,26 @@ class AlbumSlideshowCamera(Camera):
             "frame_id": self._frame_id,
             "pagination_debug": data.get("pagination_debug"),
         }
+
+    def _caption_frames(self, cur, captured_at: str | None) -> list[dict]:
+        """Per-image caption metadata for the current slide.
+
+        Returns a list with one dict for a normal slide, or two (top/left
+        first) for a paired slide. Each dict carries ``captured_at`` (ISO
+        string or ``None``), ``location`` (human label or ``None``), and
+        ``latitude`` / ``longitude``. The card reads this to overlay an
+        accurate caption on each image, including each half of a pair.
+        """
+        if self._last_pair_frames:
+            return self._last_pair_frames
+        return [
+            {
+                "captured_at": captured_at,
+                "location": getattr(cur, "location", None),
+                "latitude": getattr(cur, "latitude", None),
+                "longitude": getattr(cur, "longitude", None),
+            }
+        ]
 
     @property
     def entity_picture(self) -> str | None:
@@ -472,6 +507,8 @@ class AlbumSlideshowCamera(Camera):
         else:
             self._last_is_portrait = None
         self._last_captured_at_pair = meta.get("captured_at_pair") if meta else None
+        self._last_pair_frames = meta.get("pair_frames") if meta else None
+        self._last_pair_orientation = meta.get("pair_orientation") if meta else None
 
         self._broadcast_frame(encoded)
         self.async_write_ha_state()
@@ -601,16 +638,28 @@ class AlbumSlideshowCamera(Camera):
                 other_img = pair[0] if pair else None
                 other_item = pair[1] if pair else None
                 pair_meta: list[str | None] | None = None
+                pair_frames: list[dict] | None = None
                 try:
                     if other_img is not None:
                         composed = await self.hass.async_add_executor_job(
                             ip.pair_images, img, other_img, width, height, fill_mode,
                             is_portrait_canvas, divider, divider_fill, transparent_divider,
                         )
-                        pair_meta = [
-                            _ts_to_iso(getattr(cur, "captured_at", None)),
-                            _ts_to_iso(getattr(other_item, "captured_at", None)),
+                        pair_frames = [
+                            {
+                                "captured_at": _ts_to_iso(getattr(cur, "captured_at", None)),
+                                "location": getattr(cur, "location", None),
+                                "latitude": getattr(cur, "latitude", None),
+                                "longitude": getattr(cur, "longitude", None),
+                            },
+                            {
+                                "captured_at": _ts_to_iso(getattr(other_item, "captured_at", None)),
+                                "location": getattr(other_item, "location", None),
+                                "latitude": getattr(other_item, "latitude", None),
+                                "longitude": getattr(other_item, "longitude", None),
+                            },
                         ]
+                        pair_meta = [f["captured_at"] for f in pair_frames]
                     else:
                         composed = await self.hass.async_add_executor_job(
                             ip.render_image, img, fill_mode, width, height,
@@ -620,6 +669,14 @@ class AlbumSlideshowCamera(Camera):
                 meta = {
                     "is_portrait": cur_is_portrait,
                     "captured_at_pair": pair_meta,
+                    "pair_frames": pair_frames,
+                    # ``pair_images`` stacks images top/bottom on a portrait
+                    # canvas and places them left/right on a landscape canvas.
+                    "pair_orientation": (
+                        ("vertical" if is_portrait_canvas else "horizontal")
+                        if pair_frames
+                        else None
+                    ),
                 }
                 return composed, meta
 

@@ -247,6 +247,8 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `latitude` | float \| null | EXIF GPS latitude in decimal degrees (local folder only) |
 | `longitude` | float \| null | EXIF GPS longitude in decimal degrees (local folder only) |
 | `location` | string \| null | Reverse-geocoded label (e.g. `"Lisbon, Portugal"`). Empty when reverse-geocoding is disabled or has not yet completed for this file. |
+| `caption_frames` | list | Structured per-image caption metadata: one entry for a normal slide, two (top/left first) for a pair. Each entry has `captured_at`, `location`, `latitude`, `longitude`. Used by the card's caption overlay. |
+| `pair_orientation` | string \| null | How a paired slide is split: `horizontal` (left/right) or `vertical` (top/bottom). `null` for single slides. |
 | `paused` | bool | Whether the slideshow is paused |
 | `date_filter` | string | Active date filter mode |
 | `frame_id` | int | Monotonic counter incremented on every committed slide. Used by the [card](#-album-slideshow-card) to detect new frames |
@@ -283,12 +285,25 @@ fit: auto                   # auto | cover | contain
                             # auto inherits the camera's fill_mode (cover / contain / blur)
 background: '#000'          # color shown behind contained images
 tap_action: none            # none | more-info
+caption:                    # overlay the photo's date and/or location
+  show: [date, location]    #   any of: date, location (order = display order)
+  position: bottom-left     #   top/center/bottom + -left/-center/-right, or center
+  date_format: medium       #   medium | full | month_year | year | numeric
+                            #     | weekday | relative, or a custom token string
+                            #     (YYYY, MMMM, MMM, MM, M, DD, D, dddd, ddd)
+  layout: stacked           #   stacked (one per line) | inline (same line)
+  per_image: true           #   caption each half of a portrait pair separately
+  color: '#ffffff'          #   any CSS color
+  font_size: 14px           #   any CSS size
+  shadow: true              #   drop shadow for readability on bright photos
 ```
 
 ### Notes
 
 - `transition: random` picks a different effect per slide and avoids repeating the previous one.
 - `fit: auto` reads the camera's `fill_mode` attribute. `blur` renders the slide as `contain` plus a blurred backdrop layer behind it.
+- **Caption overlay:** omit the `caption:` block (or set `show: []`) to disable it. The date comes from `captured_at` (EXIF or file mtime); `location` comes from EXIF reverse-geocoding and is simply skipped when a photo has none, so Google Photos slides show only the date. On a portrait pair, `per_image: true` anchors each photo's own date/location to its half; set it to `false` for a single caption over the whole frame.
+- `date_format` accepts a preset name or a custom token string. Presets are locale-aware (they follow your Home Assistant language). Example custom format: `'D MMMM YYYY'` -> `29 July 2023`.
 - Every slide commit increments the camera's `frame_id` attribute. The card cache-busts the camera proxy URL with that value, so the browser refetches a fresh JPEG on every change instead of serving a stale cached image.
 - If the entity is unavailable, the card shows a "Camera not ready" placeholder.
 

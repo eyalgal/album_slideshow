@@ -26,7 +26,7 @@
  *   tap_action: none        # none | more-info
  */
 
-const VERSION = "0.9.0";
+const VERSION = "1.0.0";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
@@ -45,6 +45,33 @@ const ANIMATED_TRANSITIONS = [
 const TRANSITIONS = new Set(["random", "none", ...ANIMATED_TRANSITIONS]);
 
 const FIT_MODES = new Set(["auto", "cover", "contain"]);
+
+// Caption overlay (date / location). ``show`` is an ordered subset of
+// these fields; ``position`` is one of a 3x3 anchor grid; ``date_format``
+// is one of the named presets below or a custom token string.
+const CAPTION_FIELDS = ["date", "location"];
+const CAPTION_POSITIONS = new Set([
+  "top-left",
+  "top-center",
+  "top-right",
+  "center-left",
+  "center",
+  "center-right",
+  "bottom-left",
+  "bottom-center",
+  "bottom-right",
+]);
+const CAPTION_LAYOUTS = new Set(["stacked", "inline"]);
+const DATE_FORMAT_PRESETS = {
+  full: { year: "numeric", month: "long", day: "numeric" },
+  long: { year: "numeric", month: "long", day: "numeric" },
+  medium: { year: "numeric", month: "short", day: "numeric" },
+  short: { year: "numeric", month: "numeric", day: "numeric" },
+  numeric: { year: "numeric", month: "numeric", day: "numeric" },
+  month_year: { year: "numeric", month: "long" },
+  year: { year: "numeric" },
+  weekday: { weekday: "long", year: "numeric", month: "long", day: "numeric" },
+};
 
 /** Identify album_slideshow camera entities by their distinctive
  * ``frame_id`` attribute, which no other camera integration emits. */
@@ -137,6 +164,8 @@ function createAlbumSlideshowCardClass(Base) {
         config.tap_pause_seconds === 0
           ? 0
           : Number(config.tap_pause_seconds ?? 8),
+      // Caption overlay (date / location). ``null`` when disabled.
+      caption: this._normalizeCaption(config.caption),
     };
     if (this._rendered) {
       // Config edited live; rebuild styles + reset state.
@@ -146,6 +175,46 @@ function createAlbumSlideshowCardClass(Base) {
       this._currentTransition = null;
       this._maybeSwap();
     }
+  }
+
+  /** Normalize the ``caption`` config into a stable shape, or ``null`` when
+   * the overlay is disabled. Accepts ``true`` (all defaults), an object, a
+   * comma/space separated ``show`` string, etc. Returns ``null`` when there
+   * is nothing to show so the rest of the card can cheaply skip captions. */
+  _normalizeCaption(raw) {
+    if (raw == null || raw === false) return null;
+    if (raw === true) raw = {};
+    if (typeof raw !== "object") return null;
+    let show = raw.show;
+    if (typeof show === "string") show = show.split(/[,\s]+/);
+    if (!Array.isArray(show)) show = ["date", "location"];
+    show = show
+      .map((s) => String(s).toLowerCase().trim())
+      .filter((s) => CAPTION_FIELDS.includes(s));
+    show = [...new Set(show)];
+    if (show.length === 0) return null;
+    let position = String(raw.position || "bottom-left").toLowerCase();
+    if (!CAPTION_POSITIONS.has(position)) position = "bottom-left";
+    let layout = String(raw.layout || "stacked").toLowerCase();
+    if (!CAPTION_LAYOUTS.has(layout)) layout = "stacked";
+    const color =
+      typeof raw.color === "string" && raw.color.trim()
+        ? raw.color.trim()
+        : "#ffffff";
+    const fontSize =
+      typeof raw.font_size === "string" && raw.font_size.trim()
+        ? raw.font_size.trim()
+        : "14px";
+    return {
+      show,
+      position,
+      layout,
+      per_image: raw.per_image !== false,
+      date_format: raw.date_format != null ? String(raw.date_format) : "medium",
+      color,
+      font_size: fontSize,
+      shadow: raw.shadow !== false,
+    };
   }
 
   getCardSize() {
@@ -250,6 +319,38 @@ function createAlbumSlideshowCardClass(Base) {
           font-size: 0.85rem;
           font-family: var(--paper-font-body1_-_font-family, sans-serif);
         }
+        .captions {
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          opacity: 1;
+          transition: opacity ${c.duration}ms ${c.easing};
+        }
+        .cap-region {
+          position: absolute;
+          display: flex;
+          padding: 3.5% 4%;
+          box-sizing: border-box;
+        }
+        .cap-box {
+          display: flex;
+          max-width: 92%;
+          line-height: 1.25;
+          font-family: var(--paper-font-body1_-_font-family, sans-serif);
+        }
+        .cap-box.stacked { flex-direction: column; }
+        .cap-box.inline {
+          flex-direction: row;
+          flex-wrap: wrap;
+          align-items: baseline;
+          gap: 0.15em 0.6em;
+        }
+        .cap-line { font-weight: 500; }
+        .cap-box.cap-shadow {
+          text-shadow:
+            0 1px 2px rgba(0, 0, 0, 0.9),
+            0 1px 6px rgba(0, 0, 0, 0.55);
+        }
         ${this._transitionStyles()}
       </style>
       <ha-card part="card">
@@ -258,6 +359,7 @@ function createAlbumSlideshowCardClass(Base) {
           <img class="blur-bg" id="blur-b" alt="" />
           <img class="layer" id="a" alt="" />
           <img class="layer" id="b" alt="" />
+          <div class="captions" id="captions" aria-hidden="true"></div>
           <div class="placeholder" id="placeholder">Waiting for first frame...</div>
         </div>
       </ha-card>
@@ -377,19 +479,33 @@ function createAlbumSlideshowCardClass(Base) {
       url = `${url}${sep}_frame=${frameId}`;
     }
     const { fit, blurBackdrop } = this._resolvedFit(attrs);
-    this._loadAndSwap(url, fit, blurBackdrop);
+    // Snapshot the caption-relevant attributes now so the overlay swaps
+    // in lockstep with the image it describes (state may advance again
+    // while the next image is still decoding).
+    const captionData = this._config.caption
+      ? {
+          caption_frames: attrs.caption_frames,
+          pair_orientation: attrs.pair_orientation,
+          captured_at_primary: attrs.captured_at_primary,
+          captured_at: attrs.captured_at,
+          location: attrs.location,
+          latitude: attrs.latitude,
+          longitude: attrs.longitude,
+        }
+      : null;
+    this._loadAndSwap(url, fit, blurBackdrop, captionData);
   }
 
-  _loadAndSwap(url, fit, blurBackdrop) {
+  _loadAndSwap(url, fit, blurBackdrop, captionData) {
     // Pre-decode the new image so the swap is instant.
     const next = new Image();
     next.decoding = "async";
-    next.onload = () => this._performSwap(url, fit, blurBackdrop);
+    next.onload = () => this._performSwap(url, fit, blurBackdrop, captionData);
     next.onerror = () => this._setPlaceholder("Failed to load slide");
     next.src = url;
   }
 
-  _performSwap(url, fit, blurBackdrop) {
+  _performSwap(url, fit, blurBackdrop, captionData) {
     const root = this.shadowRoot;
     const placeholder = root.getElementById("placeholder");
     if (placeholder) placeholder.remove();
@@ -424,6 +540,7 @@ function createAlbumSlideshowCardClass(Base) {
         showingBlur.classList.add("show");
       }
       this._currentTransition = transitionClass;
+      this._renderCaptions(captionData, false);
       return;
     }
 
@@ -460,12 +577,238 @@ function createAlbumSlideshowCardClass(Base) {
 
     this._showing = this._showing === "a" ? "b" : "a";
 
+    // Cross-fade the caption overlay in time with the image it describes.
+    this._renderCaptions(captionData, true);
+
     // Cleanup the .exit class after the animation so it doesn't fight the
     // next swap. Slightly longer than the duration to be safe.
     const dur = this._config.duration + 50;
     setTimeout(() => {
       showing.classList.remove("exit");
     }, dur);
+  }
+
+  _renderCaptions(captionData, fade) {
+    const cap = this._config.caption;
+    const container =
+      this.shadowRoot && this.shadowRoot.getElementById("captions");
+    if (!container) return;
+    container.innerHTML = "";
+    if (!cap || !captionData) return;
+
+    const frames = this._buildCaptionFrames(captionData);
+    const orientation = captionData.pair_orientation;
+    const isPair =
+      cap.per_image &&
+      frames.length >= 2 &&
+      (orientation === "horizontal" || orientation === "vertical");
+
+    if (isPair) {
+      this._addCaptionRegion(container, frames[0], cap, orientation, 0);
+      this._addCaptionRegion(container, frames[1], cap, orientation, 1);
+    } else {
+      this._addCaptionRegion(container, frames[0], cap, null, 0);
+    }
+
+    // Fade the new caption in alongside the image cross-fade. On the very
+    // first frame (fade=false) just show it immediately.
+    if (fade && container.firstChild) {
+      container.style.opacity = "0";
+      // Two RAFs so the browser registers the 0 before transitioning to 1.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          container.style.opacity = "1";
+        });
+      });
+    } else {
+      container.style.opacity = "1";
+    }
+  }
+
+  /** Per-image caption metadata. Prefers the integration's structured
+   * ``caption_frames`` (one entry per image, two for a pair); falls back to
+   * the flat attributes for older integration versions. */
+  _buildCaptionFrames(data) {
+    const cf = data.caption_frames;
+    if (Array.isArray(cf) && cf.length) return cf;
+    let captured = data.captured_at_primary;
+    if (captured == null) {
+      captured = Array.isArray(data.captured_at)
+        ? data.captured_at[0]
+        : data.captured_at;
+    }
+    return [
+      {
+        captured_at: captured ?? null,
+        location: data.location ?? null,
+        latitude: data.latitude ?? null,
+        longitude: data.longitude ?? null,
+      },
+    ];
+  }
+
+  _captionLines(frame, cap) {
+    const lines = [];
+    for (const field of cap.show) {
+      if (field === "date") {
+        const txt = this._formatDate(frame.captured_at, cap.date_format);
+        if (txt) lines.push(txt);
+      } else if (field === "location") {
+        if (frame.location) lines.push(String(frame.location));
+      }
+    }
+    return lines;
+  }
+
+  /** Build one positioned caption block. ``orientation`` is ``null`` for a
+   * full-frame caption, or ``horizontal`` / ``vertical`` to anchor the block
+   * inside the left/right or top/bottom half of a pair (``half`` 0 or 1). */
+  _addCaptionRegion(container, frame, cap, orientation, half) {
+    const lines = this._captionLines(frame, cap);
+    if (lines.length === 0) return;
+
+    const region = document.createElement("div");
+    region.className = "cap-region";
+
+    // Region geometry: full frame, or one half of a pair.
+    let top = "0";
+    let right = "0";
+    let bottom = "0";
+    let left = "0";
+    if (orientation === "horizontal") {
+      if (half === 0) right = "50%";
+      else left = "50%";
+    } else if (orientation === "vertical") {
+      if (half === 0) bottom = "50%";
+      else top = "50%";
+    }
+    region.style.top = top;
+    region.style.right = right;
+    region.style.bottom = bottom;
+    region.style.left = left;
+
+    // Anchor within the region from the 3x3 position grid.
+    const pos = cap.position;
+    const parts = pos === "center" ? ["center", "center"] : pos.split("-");
+    const v = parts[0];
+    const h = parts[1] || "center";
+    const justify = { left: "flex-start", center: "center", right: "flex-end" };
+    const align = { top: "flex-start", center: "center", bottom: "flex-end" };
+    region.style.justifyContent = justify[h] || "flex-start";
+    region.style.alignItems = align[v] || "flex-end";
+
+    const box = document.createElement("div");
+    box.className = `cap-box ${cap.layout}`;
+    if (cap.shadow) box.classList.add("cap-shadow");
+    box.style.color = cap.color;
+    box.style.fontSize = cap.font_size;
+    box.style.textAlign = h === "center" ? "center" : h;
+
+    for (const line of lines) {
+      const el = document.createElement("div");
+      el.className = "cap-line";
+      el.textContent = line;
+      box.appendChild(el);
+    }
+    region.appendChild(box);
+    container.appendChild(region);
+  }
+
+  _locale() {
+    return (
+      (this._hass && this._hass.locale && this._hass.locale.language) ||
+      (typeof navigator !== "undefined" && navigator.language) ||
+      "en"
+    );
+  }
+
+  _formatDate(iso, fmt) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    const locale = this._locale();
+    if (fmt === "relative") return this._relativeTime(d);
+    const preset = DATE_FORMAT_PRESETS[fmt];
+    if (preset) {
+      try {
+        return new Intl.DateTimeFormat(locale, preset).format(d);
+      } catch (_) {
+        return d.toLocaleDateString();
+      }
+    }
+    // Anything else is treated as a custom token string.
+    return this._formatTokens(d, String(fmt));
+  }
+
+  _relativeTime(d) {
+    const diff = d.getTime() - Date.now(); // negative => past
+    const abs = Math.abs(diff);
+    const sec = 1000;
+    const min = 60 * sec;
+    const hour = 60 * min;
+    const day = 24 * hour;
+    const week = 7 * day;
+    const month = 30 * day;
+    const year = 365 * day;
+    let unit = "second";
+    let val = diff / sec;
+    if (abs >= year) {
+      unit = "year";
+      val = diff / year;
+    } else if (abs >= month) {
+      unit = "month";
+      val = diff / month;
+    } else if (abs >= week) {
+      unit = "week";
+      val = diff / week;
+    } else if (abs >= day) {
+      unit = "day";
+      val = diff / day;
+    } else if (abs >= hour) {
+      unit = "hour";
+      val = diff / hour;
+    } else if (abs >= min) {
+      unit = "minute";
+      val = diff / min;
+    }
+    try {
+      const rtf = new Intl.RelativeTimeFormat(this._locale(), {
+        numeric: "auto",
+      });
+      return rtf.format(Math.round(val), unit);
+    } catch (_) {
+      return this._formatDate(d.toISOString(), "medium");
+    }
+  }
+
+  _formatTokens(d, fmt) {
+    const locale = this._locale();
+    const pad = (n) => String(n).padStart(2, "0");
+    const part = (opts) => {
+      try {
+        return new Intl.DateTimeFormat(locale, opts).format(d);
+      } catch (_) {
+        return "";
+      }
+    };
+    const map = {
+      YYYY: d.getFullYear(),
+      YY: pad(d.getFullYear() % 100),
+      MMMM: part({ month: "long" }),
+      MMM: part({ month: "short" }),
+      MM: pad(d.getMonth() + 1),
+      M: d.getMonth() + 1,
+      DD: pad(d.getDate()),
+      D: d.getDate(),
+      dddd: part({ weekday: "long" }),
+      ddd: part({ weekday: "short" }),
+      HH: pad(d.getHours()),
+      mm: pad(d.getMinutes()),
+    };
+    return fmt.replace(
+      /YYYY|YY|MMMM|MMM|MM|M|DD|D|dddd|ddd|HH|mm/g,
+      (t) => map[t],
+    );
   }
 
   _setPlaceholder(text) {
@@ -542,6 +885,38 @@ const TAP_OPTIONS = [
   { value: "more-info", label: "Open more-info" },
 ];
 
+const CAPTION_SHOW_OPTIONS = [
+  { value: "date", label: "Date" },
+  { value: "location", label: "Location" },
+];
+
+const CAPTION_POSITION_OPTIONS = [
+  { value: "top-left", label: "Top left" },
+  { value: "top-center", label: "Top center" },
+  { value: "top-right", label: "Top right" },
+  { value: "center-left", label: "Center left" },
+  { value: "center", label: "Center" },
+  { value: "center-right", label: "Center right" },
+  { value: "bottom-left", label: "Bottom left" },
+  { value: "bottom-center", label: "Bottom center" },
+  { value: "bottom-right", label: "Bottom right" },
+];
+
+const CAPTION_LAYOUT_OPTIONS = [
+  { value: "stacked", label: "Stacked (one per line)" },
+  { value: "inline", label: "Inline (same line)" },
+];
+
+const CAPTION_DATE_FORMAT_OPTIONS = [
+  { value: "medium", label: "Medium (Aug 16, 2014)" },
+  { value: "full", label: "Full (August 16, 2014)" },
+  { value: "month_year", label: "Month & year (August 2014)" },
+  { value: "year", label: "Year (2014)" },
+  { value: "numeric", label: "Numeric (8/16/2014)" },
+  { value: "weekday", label: "Weekday (Saturday, August 16, 2014)" },
+  { value: "relative", label: "Relative (3 years ago)" },
+];
+
 const DEFAULTS = {
   transition: "random",
   duration: 600,
@@ -551,6 +926,17 @@ const DEFAULTS = {
   background: "",
   tap_action: "none",
   tap_pause_seconds: 8,
+};
+
+const CAPTION_DEFAULTS = {
+  show: ["date", "location"],
+  position: "bottom-left",
+  layout: "stacked",
+  per_image: true,
+  date_format: "medium",
+  color: "#ffffff",
+  font_size: "14px",
+  shadow: true,
 };
 
 // Live integration settings the editor surfaces directly. Each maps to a
@@ -870,6 +1256,56 @@ function createAlbumSlideshowCardEditorClass(Base) {
           },
         ],
       },
+      {
+        type: "expandable",
+        title: "Caption (date & location)",
+        icon: "mdi:format-text",
+        schema: [
+          { name: "caption_enabled", selector: { boolean: {} } },
+          {
+            name: "caption_show",
+            selector: {
+              select: {
+                multiple: true,
+                mode: "list",
+                options: CAPTION_SHOW_OPTIONS,
+              },
+            },
+          },
+          {
+            name: "caption_position",
+            selector: {
+              select: { mode: "dropdown", options: CAPTION_POSITION_OPTIONS },
+            },
+          },
+          {
+            name: "caption_date_format",
+            selector: {
+              select: {
+                mode: "dropdown",
+                custom_value: true,
+                options: CAPTION_DATE_FORMAT_OPTIONS,
+              },
+            },
+          },
+          {
+            name: "caption_layout",
+            selector: {
+              select: { mode: "dropdown", options: CAPTION_LAYOUT_OPTIONS },
+            },
+          },
+          { name: "caption_per_image", selector: { boolean: {} } },
+          {
+            type: "grid",
+            name: "",
+            schema: [
+              { name: "caption_color", selector: { text: {} } },
+              { name: "caption_font_size", selector: { text: {} } },
+            ],
+          },
+          { name: "caption_shadow", selector: { boolean: {} } },
+        ],
+      },
     ];
 
     if (this._hasLiveControls()) {
@@ -900,7 +1336,29 @@ function createAlbumSlideshowCardEditorClass(Base) {
         c.tap_pause_seconds != null
           ? Number(c.tap_pause_seconds)
           : DEFAULTS.tap_pause_seconds,
+      ...this._captionData(),
       ...this._liveDataFromStates(),
+    };
+  }
+
+  /** Flatten the nested ``caption`` config into the fields ha-form binds. */
+  _captionData() {
+    const cap = this._config && this._config.caption;
+    const enabled = !!cap && cap !== false;
+    const c = cap && typeof cap === "object" ? cap : {};
+    let show = c.show;
+    if (typeof show === "string") show = show.split(/[,\s]+/).filter(Boolean);
+    if (!Array.isArray(show)) show = CAPTION_DEFAULTS.show.slice();
+    return {
+      caption_enabled: enabled,
+      caption_show: show,
+      caption_position: c.position || CAPTION_DEFAULTS.position,
+      caption_layout: c.layout || CAPTION_DEFAULTS.layout,
+      caption_per_image: c.per_image !== false,
+      caption_date_format: c.date_format || CAPTION_DEFAULTS.date_format,
+      caption_color: c.color || CAPTION_DEFAULTS.color,
+      caption_font_size: c.font_size || CAPTION_DEFAULTS.font_size,
+      caption_shadow: c.shadow !== false,
     };
   }
 
@@ -944,6 +1402,15 @@ function createAlbumSlideshowCardEditorClass(Base) {
       background: "Background (optional)",
       tap_action: "Tap action",
       tap_pause_seconds: "Tap pause (seconds)",
+      caption_enabled: "Show caption overlay",
+      caption_show: "Show",
+      caption_position: "Position",
+      caption_layout: "Layout",
+      caption_per_image: "Per-image captions on pairs",
+      caption_date_format: "Date format",
+      caption_color: "Text color",
+      caption_font_size: "Font size",
+      caption_shadow: "Text shadow",
       ...LIVE_LABELS,
     };
     return labels[s.name] || s.name;
@@ -955,6 +1422,12 @@ function createAlbumSlideshowCardEditorClass(Base) {
       transition: "Random picks a different effect each slide.",
       tap_pause_seconds:
         "How long the card freezes its slide after a tap. 0 disables it.",
+      caption_date_format:
+        "Pick a preset or type a custom format (YYYY, MMMM, MMM, MM, DD, D).",
+      caption_per_image:
+        "When a portrait pair is shown, caption each photo with its own date and location.",
+      caption_color: "CSS color, e.g. #ffffff or white.",
+      caption_font_size: "CSS size, e.g. 14px, 1.1em.",
       live_paused:
         "These control the Album Slideshow integration directly and apply everywhere this album is shown, not only this card.",
     };
@@ -1150,6 +1623,31 @@ function createAlbumSlideshowCardEditorClass(Base) {
     const tps = Number(data.tap_pause_seconds);
     if (!isNaN(tps) && tps !== DEFAULTS.tap_pause_seconds) {
       n.tap_pause_seconds = tps;
+    }
+
+    // Caption: only emit a ``caption`` block when enabled and at least one
+    // field is selected. Non-default sub-settings are written; defaults are
+    // omitted to keep the YAML lean.
+    if (data.caption_enabled) {
+      let show = data.caption_show;
+      if (!Array.isArray(show)) show = show ? [show] : [];
+      show = show.filter((v) => v === "date" || v === "location");
+      if (show.length > 0) {
+        const cap = { show };
+        const pos = data.caption_position || CAPTION_DEFAULTS.position;
+        if (pos !== CAPTION_DEFAULTS.position) cap.position = pos;
+        const lay = data.caption_layout || CAPTION_DEFAULTS.layout;
+        if (lay !== CAPTION_DEFAULTS.layout) cap.layout = lay;
+        if (data.caption_per_image === false) cap.per_image = false;
+        const df = data.caption_date_format || CAPTION_DEFAULTS.date_format;
+        if (df !== CAPTION_DEFAULTS.date_format) cap.date_format = df;
+        const col = (data.caption_color || "").trim();
+        if (col && col.toLowerCase() !== CAPTION_DEFAULTS.color) cap.color = col;
+        const fs = (data.caption_font_size || "").trim();
+        if (fs && fs !== CAPTION_DEFAULTS.font_size) cap.font_size = fs;
+        if (data.caption_shadow === false) cap.shadow = false;
+        n.caption = cap;
+      }
     }
 
     this._config = n;
