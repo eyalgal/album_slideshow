@@ -11,6 +11,9 @@ from custom_components.album_slideshow.const import (
     DATE_FILTER_ON_THIS_DAY,
     DATE_FILTER_THIS_MONTH,
     DATE_FILTER_THIS_YEAR,
+    MISSING_DATE_EXCLUDE,
+    MISSING_DATE_INCLUDE,
+    MISSING_DATE_USE_UPLOADED,
     ORDER_ALBUM,
     ORDER_NEWEST_ADDED,
     ORDER_NEWEST_TAKEN,
@@ -157,3 +160,107 @@ def test_filter_on_this_day_drops_undated():
     out = [it.url for it in playlist.filter_items(items, mode=DATE_FILTER_ON_THIS_DAY, now=_NOW)]
     # On-this-day is strict - undated items can't satisfy it, so they are dropped.
     assert out == ["anniversary"]
+
+
+# -- filter_items: missing capture date -------------------------------------
+
+def test_missing_date_use_uploaded_at_applies_window_to_upload_date():
+    items = [
+        _Item("recent_upload", uploaded_at=_ms(2026, 4, 28)),
+        _Item("old_upload", uploaded_at=_ms(2023, 1, 1)),
+        _Item("dated", captured_at=_ms(2026, 4, 29)),
+    ]
+    out = [
+        it.url
+        for it in playlist.filter_items(
+            items,
+            mode=DATE_FILTER_LAST_7,
+            missing_date=MISSING_DATE_USE_UPLOADED,
+            now=_NOW,
+        )
+    ]
+    # Undated photo is dated by its upload date: recent one passes, old one
+    # is filtered out.
+    assert out == ["recent_upload", "dated"]
+
+
+def test_missing_date_use_uploaded_at_keeps_fully_undated_for_windows():
+    items = [
+        _Item("nodates"),
+        _Item("old_upload", uploaded_at=_ms(2023, 1, 1)),
+    ]
+    out = [
+        it.url
+        for it in playlist.filter_items(
+            items,
+            mode=DATE_FILTER_LAST_30,
+            missing_date=MISSING_DATE_USE_UPLOADED,
+            now=_NOW,
+        )
+    ]
+    # No usable date at all -> lenient for window filters; old upload dropped.
+    assert out == ["nodates"]
+
+
+def test_missing_date_use_uploaded_at_is_default():
+    items = [_Item("old_upload", uploaded_at=_ms(2023, 1, 1))]
+    # Default missing_date should behave like use_uploaded_at.
+    out = playlist.filter_items(items, mode=DATE_FILTER_LAST_7, now=_NOW)
+    assert out == []
+
+
+def test_missing_date_exclude_drops_undated():
+    items = [
+        _Item("undated"),
+        _Item("upload_only", uploaded_at=_ms(2026, 4, 29)),
+        _Item("dated", captured_at=_ms(2026, 4, 29)),
+    ]
+    out = [
+        it.url
+        for it in playlist.filter_items(
+            items,
+            mode=DATE_FILTER_LAST_7,
+            missing_date=MISSING_DATE_EXCLUDE,
+            now=_NOW,
+        )
+    ]
+    # Only the photo with a real capture date survives.
+    assert out == ["dated"]
+
+
+def test_missing_date_include_keeps_undated_for_windows():
+    items = [
+        _Item("undated"),
+        _Item("old_upload", uploaded_at=_ms(2020, 1, 1)),
+        _Item("dated", captured_at=_ms(2026, 4, 29)),
+    ]
+    out = [
+        it.url
+        for it in playlist.filter_items(
+            items,
+            mode=DATE_FILTER_LAST_7,
+            missing_date=MISSING_DATE_INCLUDE,
+            now=_NOW,
+        )
+    ]
+    # include ignores upload date and keeps every undated photo for windows.
+    assert out == ["undated", "old_upload", "dated"]
+
+
+def test_missing_date_use_uploaded_at_strict_on_this_day():
+    items = [
+        _Item("anniv_upload", uploaded_at=_ms(2019, 4, 29)),
+        _Item("wrong_day_upload", uploaded_at=_ms(2019, 4, 28)),
+        _Item("nodates"),
+    ]
+    out = [
+        it.url
+        for it in playlist.filter_items(
+            items,
+            mode=DATE_FILTER_ON_THIS_DAY,
+            missing_date=MISSING_DATE_USE_UPLOADED,
+            now=_NOW,
+        )
+    ]
+    # Upload date can satisfy on_this_day; fully undated photos are dropped.
+    assert out == ["anniv_upload"]

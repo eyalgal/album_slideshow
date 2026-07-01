@@ -17,6 +17,9 @@ from .const import (
     DATE_FILTER_ON_THIS_DAY,
     DATE_FILTER_THIS_MONTH,
     DATE_FILTER_THIS_YEAR,
+    DEFAULT_MISSING_DATE_MODE,
+    MISSING_DATE_EXCLUDE,
+    MISSING_DATE_USE_UPLOADED,
     ORDER_ALBUM,
     ORDER_NEWEST_ADDED,
     ORDER_NEWEST_TAKEN,
@@ -72,12 +75,20 @@ def filter_items(
     items: Iterable[T],
     *,
     mode: str,
+    missing_date: str = DEFAULT_MISSING_DATE_MODE,
     now: datetime | None = None,
 ) -> list[T]:
-    """Filter items by ``captured_at`` according to ``mode``.
+    """Filter items by date according to ``mode``.
 
-    Items with no ``captured_at`` are kept by default unless the mode is
-    ``on_this_day`` (treated as a strict filter).
+    ``missing_date`` decides what happens to photos that have no EXIF
+    ``captured_at``:
+
+    - ``use_uploaded_at`` - fall back to ``uploaded_at`` for the comparison
+      so date windows stay meaningful. Photos with neither timestamp are
+      kept for window filters and dropped for the strict ``on_this_day``.
+    - ``include`` - keep undated photos for window filters (the legacy
+      behaviour); the strict ``on_this_day`` still drops them.
+    - ``exclude`` - drop undated photos entirely.
 
     ``now`` is overridable for deterministic tests.
     """
@@ -93,11 +104,25 @@ def filter_items(
     out: list[T] = []
     for it in items:
         ts = getattr(it, "captured_at", None)
-        if not isinstance(ts, int):
-            if not strict:
+        if isinstance(ts, int):
+            if pred(ts):
                 out.append(it)
             continue
-        if pred(ts):
+
+        # No capture date: behaviour depends on ``missing_date``.
+        if missing_date == MISSING_DATE_EXCLUDE:
+            continue
+        if missing_date == MISSING_DATE_USE_UPLOADED:
+            up = getattr(it, "uploaded_at", None)
+            if isinstance(up, int):
+                if pred(up):
+                    out.append(it)
+                continue
+            # No upload date either: fall through to the lenient default.
+
+        # ``include`` (or ``use_uploaded_at`` with no usable date): keep for
+        # window filters, drop for strict modes like ``on_this_day``.
+        if not strict:
             out.append(it)
     return out
 

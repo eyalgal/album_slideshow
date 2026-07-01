@@ -26,7 +26,7 @@
  *   tap_action: none        # none | more-info
  */
 
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
@@ -952,6 +952,7 @@ const CAPTION_DEFAULTS = {
 const LIVE_FIELDS = [
   "paused",
   "date_filter",
+  "missing_date_mode",
   "portrait_mode",
   "order_mode",
   "slide_interval",
@@ -962,6 +963,7 @@ const LIVE_FIELDS = [
 const LIVE_SUFFIX = {
   paused: "_paused",
   date_filter: "_date_filter",
+  missing_date_mode: "_missing_date_mode",
   portrait_mode: "_portrait_mode",
   order_mode: "_order_mode",
   slide_interval: "_interval",
@@ -974,6 +976,7 @@ const LIVE_SUFFIX = {
 const LIVE_LABELS = {
   live_paused: "Pause slideshow",
   live_date_filter: "Date filter",
+  live_missing_date_mode: "Missing capture date",
   live_portrait_mode: "Orientation mismatch mode",
   live_order_mode: "Order mode",
   live_slide_interval: "Slide interval (seconds)",
@@ -1130,6 +1133,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
     }
     for (const [field, id] of [
       ["date_filter", s.date_filter],
+      ["missing_date_mode", s.missing_date_mode],
       ["portrait_mode", s.portrait_mode],
       ["order_mode", s.order_mode],
     ]) {
@@ -1377,7 +1381,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
       const e = st(s.paused);
       out.live_paused = !!e && e.state === "on";
     }
-    for (const f of ["date_filter", "portrait_mode", "order_mode"]) {
+    for (const f of ["date_filter", "missing_date_mode", "portrait_mode", "order_mode"]) {
       if (s[f]) {
         const e = st(s[f]);
         out[`live_${f}`] = e ? e.state : "";
@@ -1435,6 +1439,8 @@ function createAlbumSlideshowCardEditorClass(Base) {
       caption_font_size: "CSS size, e.g. 14px, 1.1em.",
       live_paused:
         "These control the Album Slideshow integration directly and apply everywhere this album is shown, not only this card.",
+      live_missing_date_mode:
+        "What a date filter does with photos that have no capture date: use the upload date, keep them, or drop them.",
     };
     return helpers[s.name] || "";
   };
@@ -1558,6 +1564,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
       });
     } else if (
       field === "date_filter" ||
+      field === "missing_date_mode" ||
       field === "portrait_mode" ||
       field === "order_mode"
     ) {

@@ -60,6 +60,21 @@ DATE_FILTER_OPTIONS = [
 ]
 DEFAULT_DATE_FILTER = DATE_FILTER_OFF
 
+# How the date filter treats photos that have no EXIF capture date.
+#   use_uploaded_at - fall back to the upload date (keeps filters meaningful)
+#   include         - keep undated photos (legacy behaviour for windows)
+#   exclude         - drop undated photos entirely
+MISSING_DATE_USE_UPLOADED = "use_uploaded_at"
+MISSING_DATE_INCLUDE = "include"
+MISSING_DATE_EXCLUDE = "exclude"
+
+MISSING_DATE_OPTIONS = [
+    MISSING_DATE_USE_UPLOADED,
+    MISSING_DATE_INCLUDE,
+    MISSING_DATE_EXCLUDE,
+]
+DEFAULT_MISSING_DATE_MODE = MISSING_DATE_USE_UPLOADED
+
 DEFAULT_SLIDE_INTERVAL = 60
 DEFAULT_REFRESH_HOURS = 24
 DEFAULT_FILL_MODE = FILL_BLUR

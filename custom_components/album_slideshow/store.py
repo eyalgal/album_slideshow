@@ -15,6 +15,7 @@ from .const import (
     DEFAULT_IMAGE_CACHE_MB,
     DEFAULT_MAX_RESOLUTION,
     DEFAULT_DATE_FILTER,
+    DEFAULT_MISSING_DATE_MODE,
 )
 
 
@@ -36,6 +37,9 @@ class SlideshowStore:
 
     # Date filter mode (preset windows like this_year / on_this_day).
     date_filter: str = DEFAULT_DATE_FILTER
+
+    # How the date filter treats photos with no EXIF capture date.
+    missing_date_mode: str = DEFAULT_MISSING_DATE_MODE
 
     # Pause toggle - when True, the slideshow holds on the current frame.
     paused: bool = False

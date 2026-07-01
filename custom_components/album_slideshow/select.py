@@ -19,6 +19,8 @@ from .const import (
     ORDER_RANDOM,
     DATE_FILTER_OPTIONS,
     DATE_FILTER_OFF,
+    MISSING_DATE_OPTIONS,
+    MISSING_DATE_USE_UPLOADED,
 )
 from .store import SlideshowStore
 
@@ -39,6 +41,7 @@ async def async_setup_entry(
             AspectRatioSelect(entry, store),
             MaxResolutionSelect(entry, store),
             DateFilterSelect(entry, store),
+            MissingDateModeSelect(entry, store),
         ]
     )
 
@@ -238,4 +241,32 @@ class DateFilterSelect(_BaseSelect):
         old = await self.async_get_last_state()
         if old and old.state in self.options:
             self.store.date_filter = old.state
+            self.store.notify()
+
+
+class MissingDateModeSelect(_BaseSelect):
+    _attr_icon = "mdi:calendar-question"
+
+    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
+        super().__init__(entry, store)
+        self._attr_unique_id = f"{entry.entry_id}_missing_date_mode"
+        self._attr_name = "Missing capture date"
+        self._attr_options = list(MISSING_DATE_OPTIONS)
+
+    @property
+    def current_option(self):
+        value = self.store.missing_date_mode
+        return value if value in self.options else MISSING_DATE_USE_UPLOADED
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in self.options:
+            return
+        self.store.missing_date_mode = option
+        self.store.notify()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        old = await self.async_get_last_state()
+        if old and old.state in self.options:
+            self.store.missing_date_mode = old.state
             self.store.notify()
