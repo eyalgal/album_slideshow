@@ -17,10 +17,20 @@ from .const import (
     CONF_MEDIA_CONTENT_ID,
     CONF_RECURSIVE,
     CONF_REVERSE_GEOCODE,
+    CONF_IMMICH_URL,
+    CONF_IMMICH_API_KEY,
+    CONF_IMMICH_SELECTION_TYPE,
+    CONF_IMMICH_SELECTION_ID,
+    CONF_IMMICH_IMAGE_SIZE,
+    DEFAULT_IMMICH_IMAGE_SIZE,
+    IMMICH_IMAGE_SIZE_OPTIONS,
+    IMMICH_SELECTION_ALBUM,
+    IMMICH_SELECTION_PERSON,
     DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
     PROVIDER_MEDIA_SOURCE,
+    PROVIDER_IMMICH,
     DEFAULT_RECURSIVE,
 )
 
@@ -54,6 +64,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._provider: str | None = None
+        # Immich flow state carried between steps.
+        self._immich_url: str | None = None
+        self._immich_key: str | None = None
+        self._immich_options: dict[str, tuple[str, str]] = {}
 
     @staticmethod
     @callback
@@ -83,6 +97,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_local_folder()
             if self._provider == PROVIDER_MEDIA_SOURCE:
                 return await self.async_step_media_source()
+            if self._provider == PROVIDER_IMMICH:
+                return await self.async_step_immich()
             return await self.async_step_google_shared()
 
         schema = vol.Schema(
@@ -90,7 +106,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_PROVIDER, default=PROVIDER_GOOGLE_SHARED): vol.In({
                     PROVIDER_GOOGLE_SHARED: "Google Photos",
                     PROVIDER_LOCAL_FOLDER: "Local Folder",
-                    PROVIDER_MEDIA_SOURCE: "Media Source (Immich, local media, ...)",
+                    PROVIDER_IMMICH: "Immich (direct API, full metadata)",
+                    PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
                 })
             }
         )
@@ -190,6 +207,99 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(
             step_id="media_source", data_schema=schema, errors=errors
+        )
+
+    async def async_step_immich(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the Immich URL + API key and validate them."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_IMMICH_URL].strip()
+            key = user_input[CONF_IMMICH_API_KEY].strip()
+            from . import immich as immich_api
+
+            client = immich_api.ImmichClient(self.hass, url, key)
+            try:
+                await client.async_validate()
+                albums = await client.async_list_albums()
+                people = await client.async_list_people()
+            except Exception:  # noqa: BLE001 - any failure means bad URL/key
+                errors["base"] = "immich_cannot_connect"
+            else:
+                self._immich_url = client.base_url
+                self._immich_key = key
+                # Map a display label -> (selection_type, id).
+                options: dict[str, tuple[str, str]] = {}
+                for a in albums:
+                    if a.get("id"):
+                        label = f"Album: {a.get('albumName') or a['id']}"
+                        options[label] = (IMMICH_SELECTION_ALBUM, a["id"])
+                for p in people:
+                    if p.get("id") and (p.get("name") or "").strip():
+                        label = f"Person: {p['name']}"
+                        options[label] = (IMMICH_SELECTION_PERSON, p["id"])
+                if not options:
+                    errors["base"] = "immich_no_content"
+                else:
+                    self._immich_options = options
+                    return await self.async_step_immich_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_IMMICH_URL): str,
+                vol.Required(CONF_IMMICH_API_KEY): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="immich", data_schema=schema, errors=errors
+        )
+
+    async def async_step_immich_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick an album or person and finish the Immich entry."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            label = user_input["selection"]
+            name = user_input[CONF_ALBUM_NAME].strip()
+            size = user_input.get(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE)
+            sel = self._immich_options.get(label)
+            if not sel:
+                errors["base"] = "immich_no_content"
+            else:
+                sel_type, sel_id = sel
+                await self.async_set_unique_id(
+                    f"{DOMAIN}:{PROVIDER_IMMICH}:{self._immich_url}:{sel_type}:{sel_id}"
+                )
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_PROVIDER: PROVIDER_IMMICH,
+                        CONF_IMMICH_URL: self._immich_url,
+                        CONF_IMMICH_API_KEY: self._immich_key,
+                        CONF_IMMICH_SELECTION_TYPE: sel_type,
+                        CONF_IMMICH_SELECTION_ID: sel_id,
+                        CONF_IMMICH_IMAGE_SIZE: size,
+                        CONF_ALBUM_NAME: name,
+                    },
+                )
+
+        labels = list(self._immich_options.keys())
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required("selection"): vol.In(labels),
+                vol.Optional(
+                    CONF_IMMICH_IMAGE_SIZE, default=DEFAULT_IMMICH_IMAGE_SIZE
+                ): vol.In(IMMICH_IMAGE_SIZE_OPTIONS),
+            }
+        )
+        return self.async_show_form(
+            step_id="immich_select", data_schema=schema, errors=errors
         )
 
 

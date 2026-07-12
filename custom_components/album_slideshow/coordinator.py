@@ -24,11 +24,18 @@ from .const import (
     CONF_MEDIA_CONTENT_ID,
     CONF_RECURSIVE,
     CONF_REVERSE_GEOCODE,
+    CONF_IMMICH_URL,
+    CONF_IMMICH_API_KEY,
+    CONF_IMMICH_SELECTION_TYPE,
+    CONF_IMMICH_SELECTION_ID,
+    CONF_IMMICH_IMAGE_SIZE,
+    DEFAULT_IMMICH_IMAGE_SIZE,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
     PROVIDER_MEDIA_SOURCE,
+    PROVIDER_IMMICH,
 )
 from .store import SlideshowStore
 
@@ -60,6 +67,9 @@ class MediaItem:
     # read from EXIF ImageDescription, IPTC Caption-Abstract, or XMP
     # dc:description. Used by the card's caption overlay when enabled.
     description: str | None = None
+    # Provider-specific source identifier (e.g. the Immich asset id) used by
+    # background enrichment to fetch per-item metadata.
+    source_id: str | None = None
     # True once the local-folder EXIF reader has visited this file.
     # Prevents re-reading EXIF on every coordinator refresh and lets the
     # background enrichment task skip already-processed files even after
@@ -841,6 +851,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self.local_path: str | None = entry.data.get(CONF_LOCAL_PATH)
         self.recursive: bool = bool(entry.data.get(CONF_RECURSIVE, True))
         self.media_content_id: str | None = entry.data.get(CONF_MEDIA_CONTENT_ID)
+        # Extra headers the camera must send when fetching image bytes
+        # (Immich API key). Empty for providers that need no auth.
+        self.image_request_headers: dict[str, str] = {}
 
         # Persist the most recent successful album fetch so that a transient
         # network/Google failure doesn't blank the slideshow on restart.
@@ -904,6 +917,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_google_shared()
             elif self.provider == PROVIDER_MEDIA_SOURCE:
                 data = await self._update_media_source()
+            elif self.provider == PROVIDER_IMMICH:
+                data = await self._update_immich()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -917,9 +932,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise
 
         items = data.get("items") or []
-        if self.provider == PROVIDER_LOCAL_FOLDER and items:
-            # Carry forward EXIF/geocode metadata for files we've already
-            # scanned this session; new files get filled in by the
+        if self.provider in (PROVIDER_LOCAL_FOLDER, PROVIDER_IMMICH) and items:
+            # Carry forward EXIF/geocode metadata for items we've already
+            # scanned this session; new items get filled in by the
             # background worker below.
             prior_items = (self.data or {}).get("items") if isinstance(self.data, dict) else None
             if prior_items:
@@ -1014,6 +1029,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     longitude=raw.get("longitude"),
                     location=raw.get("location"),
                     description=raw.get("description"),
+                    source_id=raw.get("source_id"),
                     exif_scanned=bool(raw.get("exif_scanned", False)),
                 ))
             except Exception:
@@ -1045,6 +1061,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "longitude": it.longitude,
                     "location": it.location,
                     "description": it.description,
+                    "source_id": it.source_id,
                     "exif_scanned": it.exif_scanned,
                 }
                 for it in items
@@ -1266,6 +1283,93 @@ class AlbumCoordinator(DataUpdateCoordinator):
         except Exception:
             return ""
 
+    async def _update_immich(self) -> dict[str, Any]:
+        """Build the item list from an Immich album or person via its API.
+
+        Unlike Media Source, the Immich API exposes per-photo metadata, so
+        capture date, GPS/location, and description all work. Dates come from
+        the asset list up front; location and description are filled in by the
+        background enrichment worker (one asset-detail call each, cached).
+        """
+        from . import immich as immich_api
+
+        url = self.entry.data.get(CONF_IMMICH_URL)
+        api_key = self.entry.data.get(CONF_IMMICH_API_KEY)
+        sel_type = self.entry.data.get(CONF_IMMICH_SELECTION_TYPE)
+        sel_id = self.entry.data.get(CONF_IMMICH_SELECTION_ID)
+        size = self.entry.data.get(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE)
+        if not url or not api_key or not sel_id:
+            raise UpdateFailed("Immich provider is missing URL, API key, or selection")
+
+        client = immich_api.ImmichClient(self.hass, url, api_key)
+        # Auth header the camera must send when fetching image bytes. Sent
+        # server-side only, so the key never reaches the browser or the
+        # ``current_url`` attribute.
+        self.image_request_headers = dict(client.image_headers)
+
+        try:
+            assets = await client.async_collect_assets(sel_type, sel_id)
+        except Exception as err:
+            raise UpdateFailed(f"Error querying Immich: {err}") from err
+
+        if not assets:
+            raise UpdateFailed("No images found for the selected Immich album/person")
+
+        items: list[MediaItem] = []
+        for a in assets:
+            aid = a.get("id")
+            if not aid:
+                continue
+            captured = immich_api._to_epoch_ms(
+                a.get("localDateTime")
+            ) or immich_api._to_epoch_ms(a.get("fileCreatedAt"))
+            w = a.get("width")
+            h = a.get("height")
+            items.append(
+                MediaItem(
+                    url=immich_api.build_image_url(client.base_url, aid, size),
+                    width=w if isinstance(w, int) else None,
+                    height=h if isinstance(h, int) else None,
+                    mime_type=None,
+                    filename=a.get("originalFileName"),
+                    captured_at=captured,
+                    source_id=aid,
+                )
+            )
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _enrich_immich_item(self, item: MediaItem) -> None:
+        """Fetch one Immich asset's detail and fill location/description."""
+        from . import immich as immich_api
+
+        url = self.entry.data.get(CONF_IMMICH_URL)
+        api_key = self.entry.data.get(CONF_IMMICH_API_KEY)
+        if not item.source_id or not url or not api_key:
+            item.exif_scanned = True
+            return
+        client = immich_api.ImmichClient(self.hass, url, api_key)
+        try:
+            asset = await client.async_get_asset(item.source_id)
+        except Exception as err:
+            _LOGGER.debug("Immich: failed to fetch asset %s: %s", item.source_id, err)
+            item.exif_scanned = True
+            return
+        info = immich_api.parse_asset_exif(asset)
+        if "captured_at" in info:
+            item.captured_at = info["captured_at"]
+        if "latitude" in info and "longitude" in info:
+            item.latitude = info["latitude"]
+            item.longitude = info["longitude"]
+        if "location" in info:
+            item.location = info["location"]
+        if "description" in info:
+            item.description = info["description"]
+        item.exif_scanned = True
+
     async def _enrich_items_background(self, data: dict[str, Any]) -> None:
         """Read EXIF for unscanned local files, then reverse-geocode.
 
@@ -1290,6 +1394,24 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     # already-processed items.
                     if idx % _ENRICHMENT_FAST_PATH_YIELD_EVERY == 0:
                         await asyncio.sleep(0)
+                    continue
+
+                if self.provider == PROVIDER_IMMICH:
+                    try:
+                        await self._enrich_immich_item(item)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.debug("Immich enrich error: %s", err)
+                        item.exif_scanned = True
+                    scanned_since_save += 1
+                    self._enrich_progress["exif_done"] = (
+                        self._enrich_progress.get("exif_done", 0) + 1
+                    )
+                    if scanned_since_save >= _EXIF_BATCH_SAVE:
+                        scanned_since_save = 0
+                        await self._save_cached_items(data)
+                        self.async_set_updated_data(data)
                     continue
 
                 url = item.url

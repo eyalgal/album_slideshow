@@ -11,6 +11,25 @@ CONF_IMAGE_CACHE_MB = "image_cache_mb"
 # coordinator browses it, collects the image children, and resolves each to
 # a playable URL.
 CONF_MEDIA_CONTENT_ID = "media_content_id"
+# Immich (direct API) provider.
+CONF_IMMICH_URL = "immich_url"
+CONF_IMMICH_API_KEY = "immich_api_key"
+CONF_IMMICH_SELECTION_TYPE = "immich_selection_type"
+CONF_IMMICH_SELECTION_ID = "immich_selection_id"
+CONF_IMMICH_IMAGE_SIZE = "immich_image_size"
+
+IMMICH_SELECTION_ALBUM = "album"
+IMMICH_SELECTION_PERSON = "person"
+
+IMMICH_IMAGE_PREVIEW = "preview"
+IMMICH_IMAGE_FULLSIZE = "fullsize"
+IMMICH_IMAGE_ORIGINAL = "original"
+IMMICH_IMAGE_SIZE_OPTIONS = [
+    IMMICH_IMAGE_PREVIEW,
+    IMMICH_IMAGE_FULLSIZE,
+    IMMICH_IMAGE_ORIGINAL,
+]
+DEFAULT_IMMICH_IMAGE_SIZE = IMMICH_IMAGE_PREVIEW
 # Local-folder option: when True (default) the coordinator does best-effort
 # reverse geocoding of EXIF GPS coordinates via the public Nominatim
 # (OpenStreetMap) endpoint and exposes a human-readable ``location``
@@ -22,6 +41,7 @@ DEFAULT_REVERSE_GEOCODE = True
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
 PROVIDER_MEDIA_SOURCE = "media_source"
+PROVIDER_IMMICH = "immich"
 
 FILL_COVER = "cover"
 FILL_CONTAIN = "contain"

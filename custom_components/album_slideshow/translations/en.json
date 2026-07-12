@@ -32,12 +32,31 @@
           "album_name": "Album name",
           "media_content_id": "Media Source id (media-source://...)"
         }
+      },
+      "immich": {
+        "title": "Immich",
+        "description": "Connect directly to your Immich server for full photo metadata (date, location, description). Create an API key in Immich under Account Settings > API Keys.",
+        "data": {
+          "immich_url": "Immich URL (e.g. http://192.168.1.10:2283)",
+          "immich_api_key": "API key"
+        }
+      },
+      "immich_select": {
+        "title": "Immich album or person",
+        "description": "Choose which album or person to slideshow, and the image quality to fetch.",
+        "data": {
+          "album_name": "Album name",
+          "selection": "Album or person",
+          "immich_image_size": "Image quality"
+        }
       }
     },
     "error": {
       "invalid_album_url": "That does not look like a Google Photos shared album link.",
       "invalid_path": "Path is empty or invalid.",
-      "invalid_media_source": "That does not look like a Media Source id (should start with media-source://)."
+      "invalid_media_source": "That does not look like a Media Source id (should start with media-source://).",
+      "immich_cannot_connect": "Could not connect to Immich. Check the URL and API key.",
+      "immich_no_content": "No albums or named people were found on this Immich server."
     }
   },
   "options": {

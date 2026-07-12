@@ -883,11 +883,24 @@ class AlbumSlideshowCamera(Camera):
         self._download_cache.put(url, data)
         return data
 
+    def _image_request_headers(self, url: str) -> dict[str, str] | None:
+        """Auth headers required to fetch image bytes for some providers.
+
+        The Immich provider stores an ``x-api-key`` header on the coordinator;
+        it is sent server-side only, so the key never reaches the browser or
+        the camera's ``current_url`` attribute. Returns ``None`` when no extra
+        headers are needed (Google, local folder, media source).
+        """
+        headers = getattr(self.coordinator, "image_request_headers", None)
+        if headers and isinstance(url, str) and url.startswith("http"):
+            return dict(headers)
+        return None
+
     async def _http_get(self, url: str) -> bytes | None:
         session = async_get_clientsession(self.hass)
         try:
             async with async_timeout.timeout(30):
-                async with session.get(url) as resp:
+                async with session.get(url, headers=self._image_request_headers(url)) as resp:
                     resp.raise_for_status()
 
                     content_type = resp.headers.get("Content-Type", "")
