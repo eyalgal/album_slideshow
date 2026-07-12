@@ -76,6 +76,33 @@ _VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", 
 _MEDIA_SOURCE_MAX_ITEMS = 5000
 _MEDIA_SOURCE_MAX_DEPTH = 8
 
+# System/metadata folders and files that some sources (notably Synology)
+# expose but which are never user photos.
+_SKIP_MEDIA_TITLES = {"@eadir", ".ds_store", "thumbs.db", "@syno", "#recycle"}
+# Image formats a browser cannot render inline; skip so we don't queue
+# guaranteed fetch failures.
+_NON_WEB_IMAGE_EXTS = {
+    ".psd", ".tif", ".tiff", ".heic", ".heif",
+    ".cr2", ".nef", ".arw", ".dng", ".raw", ".orf", ".rw2",
+}
+
+
+def _is_junk_media_title(title: Any) -> bool:
+    """Return True for system folders / non-renderable files to skip."""
+    if not isinstance(title, str):
+        return False
+    t = title.strip().lower()
+    if not t:
+        return False
+    if t in _SKIP_MEDIA_TITLES:
+        return True
+    if t.startswith("@") or t.startswith("."):
+        return True
+    dot = t.rfind(".")
+    if dot != -1 and t[dot:] in _NON_WEB_IMAGE_EXTS:
+        return True
+    return False
+
 
 def _media_node_is_image(media_class: Any, media_content_type: Any) -> bool:
     """Return True if a browsed media node looks like a still image.
@@ -1121,7 +1148,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
             resolved = await self._resolve_media(media_source, cid)
             if resolved is None:
                 continue
-            url = _normalize_resolved_url(resolved[0], base_url)
+            raw = resolved[0]
+            # ``async_resolve_media`` returns an UNSIGNED ``/media/...`` path
+            # when called directly (the frontend's websocket handler is what
+            # normally signs it). Fetching an unsigned local-media path
+            # server-side gets a 401, so sign it ourselves before use.
+            if isinstance(raw, str) and raw.startswith("/"):
+                raw = self._sign_media_path(raw)
+            url = _normalize_resolved_url(raw, base_url)
             if not url:
                 continue
             items.append(
@@ -1142,6 +1176,36 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "items": items,
         }
 
+    def _sign_media_path(self, path: str) -> str:
+        """Sign a relative ``/media/...`` path so it can be fetched server-side.
+
+        Mirrors what Home Assistant's ``media_source/resolve_media`` websocket
+        handler does: quote the path and append an ``authSig`` signature. Uses
+        the content user so signing works from a background task with no
+        request context (the same mechanism that lets Cast devices fetch local
+        media). Signs for a window comfortably longer than the album refresh
+        interval; every refresh re-signs, so URLs stay fresh.
+        """
+        from urllib.parse import quote
+
+        try:
+            from homeassistant.components.http.auth import async_sign_path
+        except Exception:  # pragma: no cover - http always present
+            return path
+
+        quoted = quote(path)
+        expiration = timedelta(hours=max(48, int(self.store.refresh_hours) * 2 + 1))
+        for kwargs in ({"use_content_user": True}, {}):
+            try:
+                return async_sign_path(self.hass, quoted, expiration, **kwargs)
+            except TypeError:
+                # Older/newer signature without ``use_content_user``.
+                continue
+            except Exception as err:
+                _LOGGER.debug("media_source: failed to sign %s: %s", path, err)
+                return path
+        return path
+
     async def _browse_media_source(
         self,
         media_source,
@@ -1160,11 +1224,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
             child_id = getattr(child, "media_content_id", None)
             if not child_id:
                 continue
+            title = getattr(child, "title", None)
+            if _is_junk_media_title(title):
+                continue
             if _media_node_is_image(
                 getattr(child, "media_class", None),
                 getattr(child, "media_content_type", None),
             ):
-                collected.append((child_id, getattr(child, "title", None)))
+                collected.append((child_id, title))
             elif getattr(child, "can_expand", False):
                 await self._browse_media_source(
                     media_source, child_id, collected, depth + 1
