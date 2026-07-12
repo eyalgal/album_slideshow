@@ -204,18 +204,23 @@ import asyncio
 
 
 class _FakeClient(immich.ImmichClient):
-    """ImmichClient whose _post is stubbed with canned per-person pages."""
+    """ImmichClient whose _post is stubbed with canned per-id pages.
 
-    def __init__(self, pages_by_person):
+    ``id_field`` is ``personIds`` or ``albumIds`` - whichever the union
+    collector queries with.
+    """
+
+    def __init__(self, pages_by_id, id_field="personIds"):
         # Skip the real __init__ (no hass/session needed for these tests).
-        self._pages_by_person = pages_by_person
+        self._pages_by_id = pages_by_id
+        self._id_field = id_field
         self.calls = []
 
     async def _post(self, path, body):
         self.calls.append((path, body))
-        pid = body["personIds"][0]
+        one = body[self._id_field][0]
         page = body.get("page", 1)
-        pages = self._pages_by_person.get(pid, [])
+        pages = self._pages_by_id.get(one, [])
         idx = page - 1
         if idx >= len(pages):
             return {"assets": {"items": [], "total": 0, "nextPage": None}}
@@ -267,3 +272,23 @@ def test_people_union_ignores_blank_ids():
     out = asyncio.run(client.async_collect_assets("people", "p1,,"))
     assert [a["id"] for a in out] == ["a"]
     assert {c[1]["personIds"][0] for c in client.calls} == {"p1"}
+
+
+def test_albums_union_ors_and_dedupes():
+    client = _FakeClient(
+        {
+            "al1": [[_asset("a"), _asset("shared")]],
+            "al2": [[_asset("shared"), _asset("b")]],
+        },
+        id_field="albumIds",
+    )
+    out = asyncio.run(client.async_collect_assets("albums", "al1,al2"))
+    assert [a["id"] for a in out] == ["a", "shared", "b"]
+    # Each album is queried on its own (OR), never combined into one AND query.
+    assert all(len(c[1]["albumIds"]) == 1 for c in client.calls)
+
+
+def test_albums_union_single_album():
+    client = _FakeClient({"al1": [[_asset("a")]]}, id_field="albumIds")
+    out = asyncio.run(client.async_collect_assets("albums", "al1"))
+    assert [a["id"] for a in out] == ["a"]

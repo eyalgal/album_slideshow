@@ -10,8 +10,9 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
-# Sentinel value for the "Select all people" option in the People multi-select.
-_ALL_PEOPLE = "__all__"
+# Sentinel values for the "Select all" options in the multi-selects.
+_ALL_PEOPLE = "__all_people__"
+_ALL_ALBUMS = "__all_albums__"
 
 from .const import (
     DOMAIN,
@@ -30,8 +31,7 @@ from .const import (
     CONF_IMMICH_FILTER,
     DEFAULT_IMMICH_IMAGE_SIZE,
     IMMICH_IMAGE_SIZE_OPTIONS,
-    IMMICH_SELECTION_ALBUM,
-    IMMICH_SELECTION_PERSON,
+    IMMICH_SELECTION_ALBUMS,
     IMMICH_SELECTION_PEOPLE,
     IMMICH_SELECTION_FAVORITES,
     IMMICH_SELECTION_ALL,
@@ -78,8 +78,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Immich flow state carried between steps.
         self._immich_url: str | None = None
         self._immich_key: str | None = None
-        self._immich_options: dict[str, tuple[str, str]] = {}
-        # Named people (id -> name) for the multi-select "People" source.
+        # Source category label -> selection_type.
+        self._immich_options: dict[str, str] = {}
+        # id -> name maps for the Albums and People multi-selects.
+        self._immich_albums: dict[str, str] = {}
         self._immich_people: dict[str, str] = {}
 
     @staticmethod
@@ -243,36 +245,31 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 self._immich_url = client.base_url
                 self._immich_key = key
-                # Map a display label -> (selection_type, id). Fixed sources
-                # first, then the user's albums and named people.
-                options: dict[str, tuple[str, str | None]] = {
-                    "All photos (recent)": (IMMICH_SELECTION_ALL, None),
-                    "Favorites": (IMMICH_SELECTION_FAVORITES, None),
-                    "Random": (IMMICH_SELECTION_RANDOM, None),
-                    "Custom search (JSON filter)": (IMMICH_SELECTION_SEARCH, None),
+                # id -> name maps for the two multi-select pickers.
+                self._immich_albums = {
+                    a["id"]: (a.get("albumName") or a["id"])
+                    for a in albums
+                    if a.get("id")
                 }
-                for a in albums:
-                    if a.get("id"):
-                        label = f"Album: {a.get('albumName') or a['id']}"
-                        options[label] = (IMMICH_SELECTION_ALBUM, a["id"])
-                named_people = [
-                    p
+                self._immich_people = {
+                    p["id"]: p["name"]
                     for p in people
                     if p.get("id") and (p.get("name") or "").strip()
-                ]
-                if len(named_people) >= 2:
-                    options["People (any of - pick below)"] = (
-                        IMMICH_SELECTION_PEOPLE,
-                        None,
-                    )
-                for p in named_people:
-                    label = f"Person: {p['name']}"
-                    options[label] = (IMMICH_SELECTION_PERSON, p["id"])
-                self._immich_options = options
-                # Named people for the multi-select "People (any of)" source.
-                self._immich_people = {
-                    p["id"]: p["name"] for p in named_people
                 }
+                # Source category label -> selection_type. Global sources are
+                # pinned to the top; the Albums/People categories (which use
+                # the multi-selects) only appear when there's content for them.
+                options: dict[str, str] = {
+                    "All photos (recent)": IMMICH_SELECTION_ALL,
+                    "Favorites": IMMICH_SELECTION_FAVORITES,
+                    "Random": IMMICH_SELECTION_RANDOM,
+                }
+                if self._immich_albums:
+                    options["Albums (pick below)"] = IMMICH_SELECTION_ALBUMS
+                if self._immich_people:
+                    options["People (pick below)"] = IMMICH_SELECTION_PEOPLE
+                options["Custom search (JSON filter)"] = IMMICH_SELECTION_SEARCH
+                self._immich_options = options
                 return await self.async_step_immich_select()
 
         schema = vol.Schema(
@@ -296,11 +293,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             name = user_input[CONF_ALBUM_NAME].strip()
             size = user_input.get(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE)
             raw_filter = (user_input.get(CONF_IMMICH_FILTER) or "").strip()
-            sel = self._immich_options.get(label)
-            if not sel:
+            sel_type = self._immich_options.get(label)
+            sel_id: str | None = None
+            if not sel_type:
                 errors["base"] = "immich_no_content"
             else:
-                sel_type, sel_id = sel
                 if sel_type == IMMICH_SELECTION_SEARCH:
                     if not raw_filter:
                         errors[CONF_IMMICH_FILTER] = "immich_filter_required"
@@ -311,16 +308,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 raise ValueError
                         except ValueError:
                             errors[CONF_IMMICH_FILTER] = "immich_filter_invalid"
-                if sel_type == IMMICH_SELECTION_PEOPLE:
+                elif sel_type == IMMICH_SELECTION_PEOPLE:
                     chosen = [p for p in user_input.get("people", []) if p]
                     if _ALL_PEOPLE in chosen:
                         chosen = list(self._immich_people.keys())
                     else:
-                        chosen = [
-                            p for p in chosen if p in self._immich_people
-                        ]
+                        chosen = [p for p in chosen if p in self._immich_people]
                     if not chosen:
                         errors["people"] = "immich_people_required"
+                    else:
+                        sel_id = ",".join(chosen)
+                elif sel_type == IMMICH_SELECTION_ALBUMS:
+                    chosen = [a for a in user_input.get("albums", []) if a]
+                    if _ALL_ALBUMS in chosen:
+                        chosen = list(self._immich_albums.keys())
+                    else:
+                        chosen = [a for a in chosen if a in self._immich_albums]
+                    if not chosen:
+                        errors["albums"] = "immich_albums_required"
                     else:
                         sel_id = ",".join(chosen)
                 if not errors:
@@ -354,6 +359,23 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             ),
         }
+        if self._immich_albums:
+            album_options = [
+                selector.SelectOptionDict(
+                    value=_ALL_ALBUMS, label="Select all albums"
+                )
+            ] + [
+                selector.SelectOptionDict(value=aid, label=name)
+                for aid, name in self._immich_albums.items()
+            ]
+            fields[vol.Optional("albums")] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=album_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    custom_value=False,
+                )
+            )
         if self._immich_people:
             people_options = [
                 selector.SelectOptionDict(

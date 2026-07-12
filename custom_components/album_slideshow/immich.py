@@ -266,7 +266,13 @@ class ImmichClient:
             # where everyone appears together). To get OR (any of the people),
             # query each person separately and union by asset id. See #19.
             ids = [p for p in (selection_id or "").split(",") if p]
-            return await self._collect_people_union(ids)
+            return await self._collect_union("personIds", ids)
+
+        if selection_type == "albums":
+            # Same OR behavior for a set of albums: query each album on its own
+            # and union the results, deduped by asset id.
+            ids = [a for a in (selection_id or "").split(",") if a]
+            return await self._collect_union("albumIds", ids)
 
         base = build_search_body(selection_type, selection_id, filter_body)
         return await self._collect_metadata(base)
@@ -285,17 +291,22 @@ class ImmichClient:
             page = next_page
         return collected
 
-    async def _collect_people_union(
-        self, person_ids: list[str]
+    async def _collect_union(
+        self, id_field: str, ids: list[str]
     ) -> list[dict[str, Any]]:
-        """Union the photos of several people (OR), deduped by asset id."""
+        """Union the photos of several people or albums (OR), deduped by id.
+
+        ``id_field`` is ``personIds`` or ``albumIds``. Each id is queried on
+        its own so the results are a union (any of), not Immich's default AND
+        (only assets that match every id at once). See #19.
+        """
         seen: set[str] = set()
         out: list[dict[str, Any]] = []
-        for pid in person_ids:
+        for one in ids:
             if len(out) >= _MAX_ASSETS:
                 break
             items = await self._collect_metadata(
-                {"type": "IMAGE", "personIds": [pid]}
+                {"type": "IMAGE", id_field: [one]}
             )
             for it in items:
                 aid = it.get("id")

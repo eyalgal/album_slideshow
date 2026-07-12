@@ -43,11 +43,12 @@
       },
       "immich_select": {
         "title": "Immich source",
-        "description": "Choose what to slideshow: an album, a person, several people, all photos, favorites, random, or a custom JSON search filter. The Source list is searchable - just start typing. To combine people, pick 'People (any of - pick below)' and tick the names (there's a 'Select all people' option too). For Custom search, fill in the Filter field (e.g. {\"city\": \"Paris\", \"isFavorite\": true}).",
+        "description": "Pick a Source, then fill in the matching picker below. Choose Albums or People to combine several at once (each is a searchable list with a Select all option), or pick All photos, Favorites, Random, or Custom search. For Custom search, put an Immich search filter in the Filter field - see the README for examples.",
         "data": {
-          "album_name": "Album name",
+          "album_name": "Name",
           "selection": "Source",
-          "people": "People (any of, for the People source)",
+          "albums": "Albums (for the Albums source)",
+          "people": "People (for the People source)",
           "immich_filter": "Filter (JSON, for Custom search only)",
           "immich_image_size": "Image quality"
         }
@@ -60,8 +61,9 @@
       "immich_cannot_connect": "Could not connect to Immich. Check the URL and API key.",
       "immich_no_content": "No albums or named people were found on this Immich server.",
       "immich_filter_required": "Custom search needs a JSON filter.",
-      "immich_filter_invalid": "The filter must be a valid JSON object (e.g. {\"city\": \"Paris\"}).",
-      "immich_people_required": "Pick at least one person for the People source."
+      "immich_filter_invalid": "The filter must be a valid JSON object. See the README for examples.",
+      "immich_people_required": "Pick at least one person for the People source.",
+      "immich_albums_required": "Pick at least one album for the Albums source."
     }
   },
   "options": {

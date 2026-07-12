@@ -1302,9 +1302,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         if not url or not api_key or not sel_type:
             raise UpdateFailed("Immich provider is missing URL, API key, or selection")
 
-        # ``album`` and ``person``/``people`` need a target id; favorites/all/
-        # random/search do not.
-        if sel_type in ("album", "person", "people") and not sel_id:
+        # ``album``/``albums`` and ``person``/``people`` need a target id;
+        # favorites/all/random/search do not.
+        if sel_type in ("album", "albums", "person", "people") and not sel_id:
             raise UpdateFailed("Immich provider is missing the album/person id")
 
         filter_body = None
