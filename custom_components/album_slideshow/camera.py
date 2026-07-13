@@ -414,25 +414,15 @@ class AlbumSlideshowCamera(Camera):
                 raise
             except Exception as err:
                 self._consecutive_failures += 1
-                # Escalating, but gentle for the first couple of failures so a
-                # single stale image (common with Google Photos' expiring CDN
-                # URLs) is skipped almost immediately rather than stalling for
-                # seconds. Real outages still back off toward a minute.
-                backoff = min(0.5 * 2 ** (self._consecutive_failures - 1), 60)
+                backoff = min(2 ** self._consecutive_failures, 60)
                 _LOGGER.warning(
-                    "Album Slideshow: render cycle failed (attempt %d), retrying in %.1fs: %s",
+                    "Album Slideshow: render cycle failed (attempt %d), retrying in %ds: %s",
                     self._consecutive_failures, backoff, err,
                 )
-                # Interruptible backoff. A plain sleep here would swallow a
-                # "next slide" press (or a data/settings change) for up to a
-                # minute - very visible with Google Photos, whose CDN URLs
-                # expire and fail intermittently. If the user explicitly asks
-                # for the next slide, break out now and skip the broken image
-                # without penalising them with the growing backoff.
-                await self._wait_or_interrupt(backoff)
-                if self._force_next:
-                    self._force_next = False
-                    self._consecutive_failures = 0
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    raise
                 should_advance = True  # Skip the broken image on retry
                 continue
 
