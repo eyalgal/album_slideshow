@@ -7,7 +7,7 @@
 
 <img width="800" alt="banner" src="https://github.com/user-attachments/assets/591b3541-5e2a-43d0-a97a-145f365cff94" />
 
-Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
+Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, an **iCloud Shared Album**, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
 
 Clean. Flexible. Fully runtime configurable. Designed for dashboards.
 
@@ -20,6 +20,7 @@ Album Slideshow creates a **camera entity** that automatically cycles through im
 - **Google Photos** shared albums  
 - **Immich** (direct API): album, person, favorites, all, random, or a custom search  
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search  
+- **iCloud** Shared Albums (public link)  
 - **Local folders** and NAS mounted directories  
 - Home Assistant **Media Source** (local media, Jellyfin, ...)  
 
@@ -39,6 +40,7 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - **Google Photos** shared albums
 - **Immich** (direct API): album, person, favorites, all, random, or a custom search, with full metadata
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search, with full metadata
+- **iCloud** Shared Albums (public link), with capture date + captions
 - **Local folder** paths and NAS mounted directories
 - Home Assistant **Media Source** (local media, Jellyfin, ...)
 - Optional recursive scanning
@@ -146,6 +148,7 @@ Pick the provider that matches where your photos live:
 | **Google Photos** | A shared album link | ✅ (dates only) | ❌ | ❌ |
 | **Immich** | An Immich server (album, person, favorites, all, search) | ✅ | ✅ | ✅ |
 | **PhotoPrism** | A PhotoPrism server (album, person, favorites, all, search) | ✅ | ✅ | ✅ |
+| **iCloud** | An iCloud Shared Album public link | ✅ | ❌ | ✅ |
 | **Local Folder** | Files on the HA host / NAS | ✅ | ✅ | ✅ |
 | **Media Source** | Any HA media source with no API (local media, Jellyfin, ...) | ❌ | ❌ | ❌ |
 
@@ -284,6 +287,38 @@ country:jp year:2023
 - All photo metadata (date, location, description) comes back inline with the
   photo list, so date filters, location and captions work from the first load
   with no background pass.
+
+---
+
+### iCloud Shared Album
+
+The **iCloud** provider slideshows a **public iCloud Shared Album**. No Apple ID
+or password is needed - the album's share link is the only credential, the same
+way anyone with the link can view it on the web.
+
+1. In the **Photos** app (iPhone/iPad/Mac), open the shared album, tap the
+   people/share icon, and enable **Public Website** (then copy that link). The
+   link looks like `https://www.icloud.com/sharedalbum/#B2Xabc...`.
+2. Add the integration, choose **iCloud Shared Album**, paste the link, give it
+   a name, and pick an image quality.
+
+#### Image quality
+
+- **Full size** (default) - the largest version Apple generated (usually around
+  2048px); best for a slideshow.
+- **Preview** - a small thumbnail; fastest / least bandwidth.
+
+#### Notes
+
+- **Capture date and captions work** (both come inline with the album data), so
+  date filters, date ordering, and the caption overlay all apply.
+- **No location.** Apple strips GPS from shared-album web data, so the
+  `latitude`/`longitude`/`location` attributes stay empty (same as Google
+  Photos).
+- Contributors can keep adding photos to the album; new ones show up on the next
+  refresh.
+- The image URLs Apple hands out are signed and expire after about a day, so the
+  integration re-fetches them on every album refresh.
 
 ---
 

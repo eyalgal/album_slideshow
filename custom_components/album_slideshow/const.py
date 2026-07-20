@@ -56,6 +56,21 @@ PROVIDER_LOCAL_FOLDER = "local_folder"
 PROVIDER_MEDIA_SOURCE = "media_source"
 PROVIDER_IMMICH = "immich"
 PROVIDER_PHOTOPRISM = "photoprism"
+PROVIDER_ICLOUD = "icloud"
+
+# iCloud Shared Album provider. The share token in the pasted link is the only
+# credential; no account or password is involved.
+CONF_ICLOUD_URL = "icloud_url"
+CONF_ICLOUD_TOKEN = "icloud_token"
+CONF_ICLOUD_IMAGE_SIZE = "icloud_image_size"
+
+# ``full`` picks the largest derivative Apple generated (best for a slideshow,
+# usually ~2048px); ``preview`` picks the smallest (a thumbnail; fastest).
+ICLOUD_IMAGE_FULL = "full"
+ICLOUD_IMAGE_PREVIEW = "preview"
+ICLOUD_IMAGE_SIZE_OPTIONS = [ICLOUD_IMAGE_FULL, ICLOUD_IMAGE_PREVIEW]
+DEFAULT_ICLOUD_IMAGE_SIZE = ICLOUD_IMAGE_FULL
+
 
 # PhotoPrism (direct API) provider.
 CONF_PHOTOPRISM_URL = "photoprism_url"

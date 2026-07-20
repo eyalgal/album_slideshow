@@ -41,6 +41,9 @@ from .const import (
     CONF_PHOTOPRISM_IMAGE_SIZE,
     CONF_PHOTOPRISM_FILTER,
     DEFAULT_PHOTOPRISM_IMAGE_SIZE,
+    CONF_ICLOUD_TOKEN,
+    CONF_ICLOUD_IMAGE_SIZE,
+    DEFAULT_ICLOUD_IMAGE_SIZE,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
@@ -48,6 +51,7 @@ from .const import (
     PROVIDER_MEDIA_SOURCE,
     PROVIDER_IMMICH,
     PROVIDER_PHOTOPRISM,
+    PROVIDER_ICLOUD,
 )
 from .store import SlideshowStore
 
@@ -933,6 +937,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_immich()
             elif self.provider == PROVIDER_PHOTOPRISM:
                 data = await self._update_photoprism()
+            elif self.provider == PROVIDER_ICLOUD:
+                data = await self._update_icloud()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -1439,6 +1445,67 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     exif_scanned=True,
                 )
             )
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_icloud(self) -> dict[str, Any]:
+        """Fetch photos from a public iCloud Shared Album.
+
+        The webstream response carries capture date and caption inline, so
+        there is no enrichment pass. Signed image URLs are resolved up front
+        and expire after roughly a day, so they are refreshed on every album
+        refresh (like Google Photos).
+        """
+        from . import icloud as icloud_api
+
+        token = self.entry.data.get(CONF_ICLOUD_TOKEN)
+        size = self.entry.data.get(CONF_ICLOUD_IMAGE_SIZE, DEFAULT_ICLOUD_IMAGE_SIZE)
+        if not token:
+            raise UpdateFailed("iCloud provider is missing the album token")
+
+        client = icloud_api.IcloudClient(self.hass, token)
+        try:
+            photos = await client.async_get_photos()
+            asset_urls = await client.async_get_asset_urls(
+                [p["photoGuid"] for p in photos if p.get("photoGuid")]
+            )
+        except Exception as err:
+            raise UpdateFailed(f"Error querying iCloud album: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the iCloud album")
+
+        items: list[MediaItem] = []
+        for p in photos:
+            guid = p.get("photoGuid")
+            checksum = icloud_api.pick_checksum(p, size)
+            if not guid or not checksum:
+                continue
+            url = icloud_api.build_image_url(asset_urls.get(checksum))
+            if not url:
+                continue
+            meta = icloud_api.parse_photo_meta(p)
+            w = p.get("width")
+            h = p.get("height")
+            items.append(
+                MediaItem(
+                    url=url,
+                    width=int(w) if str(w).isdigit() else None,
+                    height=int(h) if str(h).isdigit() else None,
+                    mime_type=None,
+                    filename=None,
+                    captured_at=meta.get("captured_at"),
+                    description=meta.get("description"),
+                    source_id=guid,
+                    exif_scanned=True,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any iCloud image URLs")
 
         return {
             "title": self.entry.title,

@@ -75,6 +75,15 @@
           "photoprism_filter": "Extra search query (optional)",
           "photoprism_image_size": "Image quality"
         }
+      },
+      "icloud": {
+        "title": "iCloud Shared Album",
+        "description": "Paste the public link to an iCloud Shared Album (in Photos, open the album, tap the share icon, and copy the Public Website link). No Apple ID or password is needed - the link itself is the credential. Capture date and captions come through; Apple does not include location in shared albums.",
+        "data": {
+          "album_name": "Album name",
+          "icloud_url": "Shared album link",
+          "icloud_image_size": "Image quality"
+        }
       }
     },
     "error": {
@@ -89,7 +98,9 @@
       "immich_albums_required": "Pick at least one album for the Albums source.",
       "photoprism_cannot_connect": "Could not connect to PhotoPrism. Check the URL and credentials.",
       "photoprism_token_required": "Enter an app password, or switch to Username + password.",
-      "photoprism_user_required": "Enter both a username and password, or switch to App password."
+      "photoprism_user_required": "Enter both a username and password, or switch to App password.",
+      "invalid_icloud_url": "That does not look like an iCloud Shared Album link.",
+      "icloud_cannot_connect": "Could not reach that album. Check the link is a current public share."
     }
   },
   "options": {

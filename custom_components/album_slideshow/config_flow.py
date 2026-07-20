@@ -48,12 +48,19 @@ from .const import (
     PHOTOPRISM_AUTH_APP_PASSWORD,
     PHOTOPRISM_AUTH_USER_PASSWORD,
     PHOTOPRISM_SELECTION_COMPOSITE,
+    CONF_ICLOUD_URL,
+    CONF_ICLOUD_TOKEN,
+    CONF_ICLOUD_IMAGE_SIZE,
+    DEFAULT_ICLOUD_IMAGE_SIZE,
+    ICLOUD_IMAGE_FULL,
+    ICLOUD_IMAGE_PREVIEW,
     DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
     PROVIDER_MEDIA_SOURCE,
     PROVIDER_IMMICH,
     PROVIDER_PHOTOPRISM,
+    PROVIDER_ICLOUD,
     DEFAULT_RECURSIVE,
 )
 
@@ -134,6 +141,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_immich()
             if self._provider == PROVIDER_PHOTOPRISM:
                 return await self.async_step_photoprism()
+            if self._provider == PROVIDER_ICLOUD:
+                return await self.async_step_icloud()
             return await self.async_step_google_shared()
 
         schema = vol.Schema(
@@ -143,6 +152,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     PROVIDER_LOCAL_FOLDER: "Local Folder",
                     PROVIDER_IMMICH: "Immich (direct API, full metadata)",
                     PROVIDER_PHOTOPRISM: "PhotoPrism (direct API, full metadata)",
+                    PROVIDER_ICLOUD: "iCloud Shared Album",
                     PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
                 })
             }
@@ -584,6 +594,61 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = vol.Schema(fields)
         return self.async_show_form(
             step_id="photoprism_select", data_schema=schema, errors=errors
+        )
+
+    async def async_step_icloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate an iCloud Shared Album link."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            raw_url = user_input[CONF_ICLOUD_URL].strip()
+            size = user_input.get(CONF_ICLOUD_IMAGE_SIZE, DEFAULT_ICLOUD_IMAGE_SIZE)
+
+            from . import icloud as icloud_api
+
+            token = icloud_api.parse_share_link(raw_url)
+            if not token:
+                errors[CONF_ICLOUD_URL] = "invalid_icloud_url"
+            else:
+                client = icloud_api.IcloudClient(self.hass, token)
+                try:
+                    await client.async_validate()
+                except Exception:  # noqa: BLE001 - any failure means bad/expired link
+                    errors["base"] = "icloud_cannot_connect"
+                else:
+                    await self.async_set_unique_id(
+                        f"{DOMAIN}:{PROVIDER_ICLOUD}:{token}"
+                    )
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=name,
+                        data={
+                            CONF_PROVIDER: PROVIDER_ICLOUD,
+                            CONF_ICLOUD_TOKEN: token,
+                            CONF_ICLOUD_IMAGE_SIZE: size,
+                            CONF_ALBUM_NAME: name,
+                        },
+                    )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_ICLOUD_URL): str,
+                vol.Optional(
+                    CONF_ICLOUD_IMAGE_SIZE, default=DEFAULT_ICLOUD_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        ICLOUD_IMAGE_FULL: "Full size (best for slideshow)",
+                        ICLOUD_IMAGE_PREVIEW: "Preview (thumbnail, fastest)",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="icloud", data_schema=schema, errors=errors
         )
 
 
