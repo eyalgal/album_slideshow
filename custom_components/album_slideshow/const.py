@@ -57,6 +57,34 @@ PROVIDER_MEDIA_SOURCE = "media_source"
 PROVIDER_IMMICH = "immich"
 PROVIDER_PHOTOPRISM = "photoprism"
 PROVIDER_ICLOUD = "icloud"
+PROVIDER_SYNOLOGY = "synology"
+
+# Synology Photos (direct API) provider. Talks to a DSM Photos package over its
+# entry.cgi web API. The account password is stored so the coordinator can
+# re-authenticate when the session id expires; accounts with 2FA are handled by
+# capturing a trusted-device token during setup (see synology.py).
+CONF_SYNOLOGY_URL = "synology_url"
+CONF_SYNOLOGY_USERNAME = "synology_username"
+CONF_SYNOLOGY_PASSWORD = "synology_password"
+CONF_SYNOLOGY_DEVICE_ID = "synology_device_id"
+CONF_SYNOLOGY_SPACE = "synology_space"
+CONF_SYNOLOGY_ALBUM_ID = "synology_album_id"
+CONF_SYNOLOGY_IMAGE_SIZE = "synology_image_size"
+
+# Personal ("My Photos") vs shared ("Shared Space") library.
+SYNOLOGY_SPACE_PERSONAL = "personal"
+SYNOLOGY_SPACE_SHARED = "shared"
+
+# Native Synology thumbnail sizes. ``xl`` is the largest (best for a slideshow).
+SYNOLOGY_IMAGE_SMALL = "sm"
+SYNOLOGY_IMAGE_MEDIUM = "m"
+SYNOLOGY_IMAGE_LARGE = "xl"
+SYNOLOGY_IMAGE_SIZE_OPTIONS = [
+    SYNOLOGY_IMAGE_SMALL,
+    SYNOLOGY_IMAGE_MEDIUM,
+    SYNOLOGY_IMAGE_LARGE,
+]
+DEFAULT_SYNOLOGY_IMAGE_SIZE = SYNOLOGY_IMAGE_LARGE
 
 # iCloud Shared Album provider. The share token in the pasted link is the only
 # credential; no account or password is involved.

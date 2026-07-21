@@ -54,6 +54,19 @@ from .const import (
     DEFAULT_ICLOUD_IMAGE_SIZE,
     ICLOUD_IMAGE_FULL,
     ICLOUD_IMAGE_PREVIEW,
+    CONF_SYNOLOGY_URL,
+    CONF_SYNOLOGY_USERNAME,
+    CONF_SYNOLOGY_PASSWORD,
+    CONF_SYNOLOGY_DEVICE_ID,
+    CONF_SYNOLOGY_SPACE,
+    CONF_SYNOLOGY_ALBUM_ID,
+    CONF_SYNOLOGY_IMAGE_SIZE,
+    DEFAULT_SYNOLOGY_IMAGE_SIZE,
+    SYNOLOGY_SPACE_PERSONAL,
+    SYNOLOGY_SPACE_SHARED,
+    SYNOLOGY_IMAGE_SMALL,
+    SYNOLOGY_IMAGE_MEDIUM,
+    SYNOLOGY_IMAGE_LARGE,
     DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
@@ -61,6 +74,7 @@ from .const import (
     PROVIDER_IMMICH,
     PROVIDER_PHOTOPRISM,
     PROVIDER_ICLOUD,
+    PROVIDER_SYNOLOGY,
     DEFAULT_RECURSIVE,
 )
 
@@ -108,6 +122,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._pp_password: str | None = None
         self._pp_albums: dict[str, str] = {}
         self._pp_people: dict[str, str] = {}
+        # Synology flow state carried between steps.
+        self._syn_url: str | None = None
+        self._syn_username: str | None = None
+        self._syn_password: str | None = None
+        self._syn_device_id: str | None = None
+        self._syn_space: str = SYNOLOGY_SPACE_PERSONAL
+        self._syn_albums: dict[str, str] = {}
 
     @staticmethod
     @callback
@@ -143,6 +164,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_photoprism()
             if self._provider == PROVIDER_ICLOUD:
                 return await self.async_step_icloud()
+            if self._provider == PROVIDER_SYNOLOGY:
+                return await self.async_step_synology()
             return await self.async_step_google_shared()
 
         schema = vol.Schema(
@@ -153,6 +176,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     PROVIDER_IMMICH: "Immich (direct API, full metadata)",
                     PROVIDER_PHOTOPRISM: "PhotoPrism (direct API, full metadata)",
                     PROVIDER_ICLOUD: "iCloud Shared Album",
+                    PROVIDER_SYNOLOGY: "Synology Photos (direct API, full metadata)",
                     PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
                 })
             }
@@ -649,6 +673,140 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(
             step_id="icloud", data_schema=schema, errors=errors
+        )
+
+    async def async_step_synology(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect the Synology URL + credentials (and optional 2FA code)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            url = user_input[CONF_SYNOLOGY_URL].strip()
+            username = user_input[CONF_SYNOLOGY_USERNAME].strip()
+            password = user_input.get(CONF_SYNOLOGY_PASSWORD) or ""
+            space = user_input.get(CONF_SYNOLOGY_SPACE, SYNOLOGY_SPACE_PERSONAL)
+            otp = (user_input.get("otp_code") or "").strip()
+
+            from . import synology as syn_api
+
+            client = syn_api.SynologyClient(
+                self.hass,
+                url,
+                username=username,
+                password=password,
+                space=space,
+            )
+            try:
+                await client.async_login(otp_code=otp or None)
+                albums = await client.async_list_albums()
+            except syn_api.SynologyOtpRequired:
+                errors["otp_code"] = "synology_otp_required"
+            except Exception:  # noqa: BLE001 - any failure means bad URL/creds
+                errors["base"] = "synology_cannot_connect"
+            else:
+                self._syn_url = client.base_url
+                self._syn_username = username
+                self._syn_password = password
+                self._syn_space = space
+                # A trusted-device token is captured only on the OTP login;
+                # store it so future logins skip the 2FA prompt.
+                self._syn_device_id = client.captured_device_id
+                self._syn_albums = {
+                    str(a["id"]): (a.get("name") or str(a["id"]))
+                    for a in albums
+                    if a.get("id") is not None
+                }
+                await client.async_logout()
+                return await self.async_step_synology_select()
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_SYNOLOGY_URL): str,
+                vol.Required(CONF_SYNOLOGY_USERNAME): str,
+                vol.Required(CONF_SYNOLOGY_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Required(
+                    CONF_SYNOLOGY_SPACE, default=SYNOLOGY_SPACE_PERSONAL
+                ): vol.In(
+                    {
+                        SYNOLOGY_SPACE_PERSONAL: "Personal (My Photos)",
+                        SYNOLOGY_SPACE_SHARED: "Shared Space",
+                    }
+                ),
+                vol.Optional("otp_code"): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="synology", data_schema=schema, errors=errors
+        )
+
+    async def async_step_synology_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick a Synology album (or the whole space) and image size."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            size = user_input.get(
+                CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
+            )
+            album_id = user_input.get("album")
+            if album_id in (None, "", "__all__") or album_id not in self._syn_albums:
+                album_id = ""
+
+            unique = (
+                f"{DOMAIN}:{PROVIDER_SYNOLOGY}:{self._syn_url}:"
+                f"{self._syn_space}:{album_id or 'all'}"
+            )
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
+            data = {
+                CONF_PROVIDER: PROVIDER_SYNOLOGY,
+                CONF_SYNOLOGY_URL: self._syn_url,
+                CONF_SYNOLOGY_USERNAME: self._syn_username,
+                CONF_SYNOLOGY_PASSWORD: self._syn_password,
+                CONF_SYNOLOGY_SPACE: self._syn_space,
+                CONF_SYNOLOGY_IMAGE_SIZE: size,
+                CONF_ALBUM_NAME: name,
+            }
+            if album_id:
+                data[CONF_SYNOLOGY_ALBUM_ID] = album_id
+            if self._syn_device_id:
+                data[CONF_SYNOLOGY_DEVICE_ID] = self._syn_device_id
+            return self.async_create_entry(title=name, data=data)
+
+        album_options = [
+            selector.SelectOptionDict(value="__all__", label="All photos in this space")
+        ] + [
+            selector.SelectOptionDict(value=aid, label=aname)
+            for aid, aname in self._syn_albums.items()
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Optional("album", default="__all__"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=album_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                        custom_value=False,
+                    )
+                ),
+                vol.Optional(
+                    CONF_SYNOLOGY_IMAGE_SIZE, default=DEFAULT_SYNOLOGY_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        SYNOLOGY_IMAGE_LARGE: "Large (best for slideshow)",
+                        SYNOLOGY_IMAGE_MEDIUM: "Medium",
+                        SYNOLOGY_IMAGE_SMALL: "Small (thumbnail, fastest)",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="synology_select", data_schema=schema, errors=errors
         )
 
 

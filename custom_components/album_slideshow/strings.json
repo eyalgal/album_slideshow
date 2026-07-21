@@ -84,6 +84,26 @@
           "icloud_url": "Shared album link",
           "icloud_image_size": "Image quality"
         }
+      },
+      "synology": {
+        "title": "Synology Photos",
+        "description": "Connect to the Photos package on your Synology NAS. Enter the DSM address (e.g. http://192.168.1.10:5000 or your HTTPS/QuickConnect URL) and an account. If the account has two-factor authentication, also enter a current 6-digit code once; a trusted-device token is then stored so future refreshes do not need a code. Tip: use a dedicated read-only Photos account rather than an admin login.",
+        "data": {
+          "synology_url": "DSM URL",
+          "synology_username": "Username",
+          "synology_password": "Password",
+          "synology_space": "Library",
+          "otp_code": "2FA code (only if enabled)"
+        }
+      },
+      "synology_select": {
+        "title": "Synology source",
+        "description": "Pick an album or show the whole library, and choose the image quality.",
+        "data": {
+          "album_name": "Album name",
+          "album": "Album",
+          "synology_image_size": "Image quality"
+        }
       }
     },
     "error": {
@@ -100,7 +120,9 @@
       "photoprism_token_required": "Enter an app password, or switch to Username + password.",
       "photoprism_user_required": "Enter both a username and password, or switch to App password.",
       "invalid_icloud_url": "That does not look like an iCloud Shared Album link.",
-      "icloud_cannot_connect": "Could not reach that album. Check the link is a current public share."
+      "icloud_cannot_connect": "Could not reach that album. Check the link is a current public share.",
+      "synology_cannot_connect": "Could not connect to Synology. Check the URL, username and password.",
+      "synology_otp_required": "This account needs a two-factor code. Enter a current 6-digit code to continue."
     }
   },
   "options": {

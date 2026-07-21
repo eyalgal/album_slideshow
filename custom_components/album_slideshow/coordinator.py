@@ -44,6 +44,15 @@ from .const import (
     CONF_ICLOUD_TOKEN,
     CONF_ICLOUD_IMAGE_SIZE,
     DEFAULT_ICLOUD_IMAGE_SIZE,
+    CONF_SYNOLOGY_URL,
+    CONF_SYNOLOGY_USERNAME,
+    CONF_SYNOLOGY_PASSWORD,
+    CONF_SYNOLOGY_DEVICE_ID,
+    CONF_SYNOLOGY_SPACE,
+    CONF_SYNOLOGY_ALBUM_ID,
+    CONF_SYNOLOGY_IMAGE_SIZE,
+    DEFAULT_SYNOLOGY_IMAGE_SIZE,
+    SYNOLOGY_SPACE_PERSONAL,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
@@ -52,6 +61,7 @@ from .const import (
     PROVIDER_IMMICH,
     PROVIDER_PHOTOPRISM,
     PROVIDER_ICLOUD,
+    PROVIDER_SYNOLOGY,
 )
 from .store import SlideshowStore
 
@@ -939,6 +949,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_photoprism()
             elif self.provider == PROVIDER_ICLOUD:
                 data = await self._update_icloud()
+            elif self.provider == PROVIDER_SYNOLOGY:
+                data = await self._update_synology()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -1506,6 +1518,87 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
         if not items:
             raise UpdateFailed("Could not resolve any iCloud image URLs")
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_synology(self) -> dict[str, Any]:
+        """Fetch photos from a Synology Photos library via its web API.
+
+        Metadata (capture date, GPS, address, description) is returned inline
+        with each item, so every ``MediaItem`` is built fully here - there is
+        no background enrichment pass. Thumbnail URLs carry no SID; the session
+        cookie is stored on the coordinator and sent server-side by the camera
+        (like the Immich x-api-key), so the SID never reaches the browser.
+        """
+        from . import synology as syn_api
+
+        url = self.entry.data.get(CONF_SYNOLOGY_URL)
+        username = self.entry.data.get(CONF_SYNOLOGY_USERNAME)
+        password = self.entry.data.get(CONF_SYNOLOGY_PASSWORD)
+        device_id = self.entry.data.get(CONF_SYNOLOGY_DEVICE_ID)
+        space = self.entry.data.get(CONF_SYNOLOGY_SPACE, SYNOLOGY_SPACE_PERSONAL)
+        album_id = self.entry.data.get(CONF_SYNOLOGY_ALBUM_ID)
+        size = self.entry.data.get(
+            CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
+        )
+        if not url or not username or not password:
+            raise UpdateFailed("Synology provider is missing URL or credentials")
+
+        client = syn_api.SynologyClient(
+            self.hass,
+            url,
+            username=username,
+            password=password,
+            device_id=device_id,
+            space=space,
+        )
+        try:
+            await client.async_login()
+            photos = await client.async_collect_assets(album_id or None)
+        except Exception as err:
+            raise UpdateFailed(f"Error querying Synology Photos: {err}") from err
+
+        if not photos:
+            await client.async_logout()
+            raise UpdateFailed("No images found for the selected Synology source")
+
+        # Store the session cookie so the camera can fetch thumbnail bytes
+        # server-side. Do not log out: the SID must stay valid until the next
+        # refresh re-authenticates.
+        self.image_request_headers = dict(client.image_headers)
+
+        items: list[MediaItem] = []
+        for p in photos:
+            ref = syn_api.thumbnail_ref(p)
+            if not ref:
+                continue
+            unit_id, cache_key = ref
+            meta = syn_api.parse_photo_meta(p)
+            items.append(
+                MediaItem(
+                    url=syn_api.build_thumbnail_url(
+                        client.base_url, unit_id, cache_key, size, space
+                    ),
+                    width=meta.get("width"),
+                    height=meta.get("height"),
+                    mime_type=None,
+                    filename=p.get("filename"),
+                    captured_at=meta.get("captured_at"),
+                    byte_size=meta.get("byte_size"),
+                    latitude=meta.get("latitude"),
+                    longitude=meta.get("longitude"),
+                    location=meta.get("location"),
+                    description=meta.get("description"),
+                    source_id=str(p.get("id")) if p.get("id") is not None else None,
+                    exif_scanned=True,
+                )
+            )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any Synology images")
 
         return {
             "title": self.entry.title,

@@ -7,7 +7,7 @@
 
 <img width="800" alt="banner" src="https://github.com/user-attachments/assets/591b3541-5e2a-43d0-a97a-145f365cff94" />
 
-Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, an **iCloud Shared Album**, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
+Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, an **iCloud Shared Album**, a **Synology Photos** library, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
 
 Clean. Flexible. Fully runtime configurable. Designed for dashboards.
 
@@ -21,6 +21,7 @@ Album Slideshow creates a **camera entity** that automatically cycles through im
 - **Immich** (direct API): album, person, favorites, all, random, or a custom search  
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search  
 - **iCloud** Shared Albums (public link)  
+- **Synology Photos** (direct API): personal or shared library, whole space or an album  
 - **Local folders** and NAS mounted directories  
 - Home Assistant **Media Source** (local media, Jellyfin, ...)  
 
@@ -41,11 +42,12 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - **Immich** (direct API): album, person, favorites, all, random, or a custom search, with full metadata
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search, with full metadata
 - **iCloud** Shared Albums (public link), with capture date + captions
+- **Synology Photos** (direct API): personal or shared library, whole space or an album, with full metadata
 - **Local folder** paths and NAS mounted directories
 - Home Assistant **Media Source** (local media, Jellyfin, ...)
 - Optional recursive scanning
 
-### 📍 EXIF & Location (local / NAS / Immich / PhotoPrism)
+### 📍 EXIF & Location (local / NAS / Immich / PhotoPrism / Synology)
 - Reads capture date so date-filter modes work (EXIF `DateTimeOriginal` with `OffsetTimeOriginal` for local files; Immich's own capture date for the Immich provider)
 - Surfaces GPS as `latitude` / `longitude` camera attributes
 - Human-readable `location` label (reverse-geocoded via OpenStreetMap Nominatim for local files, or Immich's own place data); per-album opt-out for geocoding in the integration's Configure dialog
@@ -149,6 +151,7 @@ Pick the provider that matches where your photos live:
 | **Immich** | An Immich server (album, person, favorites, all, search) | ✅ | ✅ | ✅ |
 | **PhotoPrism** | A PhotoPrism server (album, person, favorites, all, search) | ✅ | ✅ | ✅ |
 | **iCloud** | An iCloud Shared Album public link | ✅ | ❌ | ✅ |
+| **Synology** | A Synology Photos library (personal or shared, whole space or an album) | ✅ | ✅ | ✅ |
 | **Local Folder** | Files on the HA host / NAS | ✅ | ✅ | ✅ |
 | **Media Source** | Any HA media source with no API (local media, Jellyfin, ...) | ❌ | ❌ | ❌ |
 
@@ -319,6 +322,48 @@ way anyone with the link can view it on the web.
   refresh.
 - The image URLs Apple hands out are signed and expire after about a day, so the
   integration re-fetches them on every album refresh.
+
+---
+
+### Synology Photos
+
+The **Synology** provider connects straight to the **Photos** package on your
+Synology NAS for **full photo metadata** (capture date, GPS location and
+captions). It can slideshow your whole library or a single album, from either
+the **personal** ("My Photos") or **shared** ("Shared Space") library.
+
+1. Add the integration and choose **Synology Photos (direct API, full
+   metadata)**.
+2. Enter your DSM address (e.g. `http://192.168.1.10:5000`, or your HTTPS /
+   QuickConnect URL) and an account username and password.
+3. Choose the **Personal** or **Shared** library.
+4. If the account has **two-factor authentication**, also enter a current
+   6-digit code. This is only needed once - a trusted-device token is stored so
+   later refreshes never prompt for a code again.
+5. Pick an album (or **All photos in this space**), name it, and choose an image
+   quality.
+
+> **Use a dedicated account.** Create a normal (non-admin) DSM user, give it
+> access only to the Photos content you want to show, and use that here rather
+> than your admin login.
+
+#### Image quality
+
+Synology serves pre-generated thumbnails:
+
+- **Large** (default) - the biggest thumbnail; best for a slideshow.
+- **Medium** - a good balance of detail and bandwidth.
+- **Small** - a small thumbnail; fastest / least bandwidth.
+
+#### Notes
+
+- **Date, location and captions all work** - Synology returns capture date, GPS
+  coordinates and a reverse-geocoded place name inline, so date filters, date
+  ordering, the location attribute, and the caption overlay all apply.
+- The password is stored so the integration can re-authenticate when its session
+  expires. The session id is sent only server-side (it never appears in the
+  camera's image URL or the browser).
+- New photos added to the album or library show up on the next refresh.
 
 ---
 
