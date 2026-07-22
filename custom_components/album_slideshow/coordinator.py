@@ -53,6 +53,15 @@ from .const import (
     CONF_SYNOLOGY_IMAGE_SIZE,
     DEFAULT_SYNOLOGY_IMAGE_SIZE,
     SYNOLOGY_SPACE_PERSONAL,
+    CONF_NEXTCLOUD_URL,
+    CONF_NEXTCLOUD_USERNAME,
+    CONF_NEXTCLOUD_PASSWORD,
+    CONF_NEXTCLOUD_FOLDER,
+    CONF_NEXTCLOUD_RECURSIVE,
+    CONF_NEXTCLOUD_IMAGE_SIZE,
+    DEFAULT_NEXTCLOUD_IMAGE_SIZE,
+    NEXTCLOUD_IMAGE_ORIGINAL,
+    NEXTCLOUD_PREVIEW_PX,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
@@ -62,6 +71,7 @@ from .const import (
     PROVIDER_PHOTOPRISM,
     PROVIDER_ICLOUD,
     PROVIDER_SYNOLOGY,
+    PROVIDER_NEXTCLOUD,
 )
 from .store import SlideshowStore
 
@@ -420,6 +430,11 @@ _NOMINATIM_TIMEOUT_S = 20
 _EXIF_BATCH_SAVE = 25
 _GEOCODE_BATCH_SAVE = 10
 
+# Cap a single Nextcloud enrichment download. EXIF/IPTC/XMP live in the first
+# blocks of the file, but we read the whole thing since Pillow needs a complete
+# image; this bounds memory for pathological files. 64 MB matches the camera.
+_NEXTCLOUD_ENRICH_MAX_BYTES = 64 * 1024 * 1024
+
 # Inserted between background-enrichment iterations so the event loop
 # stays responsive on the fast path (items that are already scanned and
 # need zero work).
@@ -674,49 +689,86 @@ def _read_local_exif(path: Path) -> dict[str, Any]:
 
     try:
         with Image.open(path) as img:
-            exif = img.getexif()
-
-            if exif:
-                dt_raw = exif.get(_EXIF_TAG_DATETIME_ORIGINAL) or exif.get(
-                    _EXIF_TAG_DATETIME
-                )
-                offset_raw = exif.get(_EXIF_TAG_OFFSET_TIME_ORIGINAL)
-                parsed = _parse_exif_datetime(dt_raw, offset_raw)
-                if parsed is not None:
-                    out["captured_at"] = parsed
-
-            # Description can come from IPTC / XMP even when the file has no
-            # EXIF IFD, so this runs regardless of ``exif`` being present.
-            description = _read_photo_description(img, exif)
-            if description:
-                out["description"] = description
-
-            if not exif:
-                return out
-
-            gps = None
-            try:
-                gps = exif.get_ifd(_EXIF_TAG_GPS_IFD) or None
-            except Exception:
-                gps = None
-            if gps:
-                lat = _gps_to_decimal(
-                    gps.get(_EXIF_GPS_LAT), gps.get(_EXIF_GPS_LAT_REF)
-                )
-                lon = _gps_to_decimal(
-                    gps.get(_EXIF_GPS_LON), gps.get(_EXIF_GPS_LON_REF)
-                )
-                if lat is not None and lon is not None:
-                    # Null Island guard: GPS chips and some editors stamp
-                    # ``(0, 0)`` when the fix is invalid. Treat that as no
-                    # location rather than dropping every such photo onto
-                    # the equator off the African coast.
-                    if abs(lat) < 1e-6 and abs(lon) < 1e-6:
-                        return out
-                    out["latitude"] = lat
-                    out["longitude"] = lon
+            _read_exif_from_image(img, out)
     except Exception as err:
         _LOGGER.debug("EXIF: failed to read %s: %s", path, err)
+
+    return out
+
+
+def _read_exif_from_image(img: Any, out: dict[str, Any]) -> None:
+    """Fill ``out`` with capture date / description / GPS from an open image.
+
+    Shared by ``_read_local_exif`` (opens from a filesystem path) and
+    ``_read_exif_from_bytes`` (opens from downloaded bytes, e.g. the
+    Nextcloud provider) - both hand this an already-``Image.open``'d image
+    plus a dict pre-seeded with a fallback ``captured_at``.
+    """
+    exif = img.getexif()
+
+    if exif:
+        dt_raw = exif.get(_EXIF_TAG_DATETIME_ORIGINAL) or exif.get(
+            _EXIF_TAG_DATETIME
+        )
+        offset_raw = exif.get(_EXIF_TAG_OFFSET_TIME_ORIGINAL)
+        parsed = _parse_exif_datetime(dt_raw, offset_raw)
+        if parsed is not None:
+            out["captured_at"] = parsed
+
+    # Description can come from IPTC / XMP even when the file has no EXIF
+    # IFD, so this runs regardless of ``exif`` being present.
+    description = _read_photo_description(img, exif)
+    if description:
+        out["description"] = description
+
+    if not exif:
+        return
+
+    gps = None
+    try:
+        gps = exif.get_ifd(_EXIF_TAG_GPS_IFD) or None
+    except Exception:
+        gps = None
+    if gps:
+        lat = _gps_to_decimal(gps.get(_EXIF_GPS_LAT), gps.get(_EXIF_GPS_LAT_REF))
+        lon = _gps_to_decimal(gps.get(_EXIF_GPS_LON), gps.get(_EXIF_GPS_LON_REF))
+        if lat is not None and lon is not None:
+            # Null Island guard: GPS chips and some editors stamp ``(0, 0)``
+            # when the fix is invalid. Treat that as no location rather than
+            # dropping every such photo onto the equator off the African coast.
+            if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+                return
+            out["latitude"] = lat
+            out["longitude"] = lon
+
+
+def _read_exif_from_bytes(
+    data: bytes, mtime_fallback_ms: int | None
+) -> dict[str, Any]:
+    """Read EXIF metadata from already-downloaded image bytes.
+
+    Same return shape as ``_read_local_exif``, for providers (Nextcloud)
+    whose files live on a remote server rather than the local filesystem -
+    the caller downloads the file once for enrichment, regardless of which
+    quality is used for display. ``mtime_fallback_ms`` takes the place of
+    the filesystem mtime fallback (e.g. the WebDAV ``Last-Modified`` date).
+    """
+    out: dict[str, Any] = {}
+    if isinstance(mtime_fallback_ms, int):
+        out["captured_at"] = mtime_fallback_ms
+
+    try:
+        from PIL import Image
+    except Exception:  # pragma: no cover - Pillow ships with HA core
+        return out
+
+    try:
+        import io
+
+        with Image.open(io.BytesIO(data)) as img:
+            _read_exif_from_image(img, out)
+    except Exception as err:
+        _LOGGER.debug("EXIF: failed to read image bytes: %s", err)
 
     return out
 
@@ -951,6 +1003,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_icloud()
             elif self.provider == PROVIDER_SYNOLOGY:
                 data = await self._update_synology()
+            elif self.provider == PROVIDER_NEXTCLOUD:
+                data = await self._update_nextcloud()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -964,7 +1018,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise
 
         items = data.get("items") or []
-        if self.provider in (PROVIDER_LOCAL_FOLDER, PROVIDER_IMMICH) and items:
+        if self.provider in (PROVIDER_LOCAL_FOLDER, PROVIDER_IMMICH, PROVIDER_NEXTCLOUD) and items:
             # Carry forward EXIF/geocode metadata for items we've already
             # scanned this session; new items get filled in by the
             # background worker below.
@@ -1605,6 +1659,143 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "items": items,
         }
 
+    async def _update_nextcloud(self) -> dict[str, Any]:
+        """List photos from an authenticated Nextcloud WebDAV folder.
+
+        The PROPFIND listing carries filename/size/content-type/mtime but no
+        EXIF, so capture date, GPS and description are filled in afterwards by
+        the background enrichment worker (one original-file download per photo -
+        Nextcloud has no metadata-only endpoint the way Immich does). The app
+        password is sent server-side only via the coordinator's image headers.
+        """
+        from . import nextcloud as nc_api
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        username = self.entry.data.get(CONF_NEXTCLOUD_USERNAME)
+        password = self.entry.data.get(CONF_NEXTCLOUD_PASSWORD)
+        folder = self.entry.data.get(CONF_NEXTCLOUD_FOLDER) or ""
+        recursive = bool(self.entry.data.get(CONF_NEXTCLOUD_RECURSIVE, False))
+        size = self.entry.data.get(
+            CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+        )
+        if not url or not username or not password:
+            raise UpdateFailed("Nextcloud provider is missing URL or credentials")
+
+        client = nc_api.NextcloudClient(self.hass, url, username, password, folder)
+        try:
+            photos = await client.async_list_photos(recursive=recursive)
+        except Exception as err:
+            raise UpdateFailed(f"Error listing Nextcloud folder: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the Nextcloud folder")
+
+        # The camera fetches image bytes server-side with this Basic-auth
+        # header, so the app password never appears in the browser URL.
+        self.image_request_headers = dict(client.image_headers)
+
+        items: list[MediaItem] = []
+        for p in photos:
+            href = p.get("href")
+            if not href:
+                continue
+            if size != NEXTCLOUD_IMAGE_ORIGINAL and p.get("file_id"):
+                display_url = nc_api.build_preview_url(
+                    client.base_url, p["file_id"], NEXTCLOUD_PREVIEW_PX
+                )
+            else:
+                display_url = href
+            items.append(
+                MediaItem(
+                    url=display_url,
+                    width=None,
+                    height=None,
+                    mime_type=p.get("content_type"),
+                    filename=p.get("filename"),
+                    uploaded_at=p.get("mtime_ms"),
+                    byte_size=p.get("size"),
+                    source_id=p.get("file_id") or href,
+                )
+            )
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _enrich_nextcloud_item(self, item: MediaItem) -> None:
+        """Download one Nextcloud photo's original bytes and read its EXIF.
+
+        Nextcloud's WebDAV folder has no metadata-only endpoint (unlike
+        Immich's per-asset detail call), so enrichment costs one full-file
+        download per photo regardless of the display quality configured.
+        """
+        from . import nextcloud as nc_api
+        from urllib.parse import quote
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        username = self.entry.data.get(CONF_NEXTCLOUD_USERNAME)
+        password = self.entry.data.get(CONF_NEXTCLOUD_PASSWORD)
+        folder = self.entry.data.get(CONF_NEXTCLOUD_FOLDER) or ""
+        if not username or not password or not url:
+            item.exif_scanned = True
+            return
+
+        # Reconstruct the original-file URL: for preview items the display url
+        # is the preview endpoint, so fall back to the folder href by filename.
+        original_url = None
+        if isinstance(item.url, str) and "/remote.php/dav/files/" in item.url:
+            original_url = item.url
+        elif item.filename:
+            client = nc_api.NextcloudClient(self.hass, url, username, password, folder)
+            original_url = client.dav_root + quote(item.filename)
+        if not original_url:
+            item.exif_scanned = True
+            return
+
+        headers = {
+            "Authorization": nc_api.basic_auth_header(username, password)
+        }
+        session = async_get_clientsession(self.hass)
+        try:
+            async with async_timeout.timeout(30):
+                async with session.get(original_url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        total += len(chunk)
+                        if total > _NEXTCLOUD_ENRICH_MAX_BYTES:
+                            _LOGGER.debug(
+                                "Nextcloud: %s exceeded %d byte enrichment cap; skipping",
+                                item.filename, _NEXTCLOUD_ENRICH_MAX_BYTES,
+                            )
+                            item.exif_scanned = True
+                            return
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Nextcloud: failed to download %s for enrichment: %s",
+                item.filename, err,
+            )
+            item.exif_scanned = True
+            return
+
+        info = await self.hass.async_add_executor_job(
+            _read_exif_from_bytes, data, item.uploaded_at
+        )
+        if "captured_at" in info:
+            item.captured_at = info["captured_at"]
+        if "description" in info:
+            item.description = info["description"]
+        if "latitude" in info and "longitude" in info:
+            item.latitude = info["latitude"]
+            item.longitude = info["longitude"]
+        item.exif_scanned = True
+
     async def _enrich_immich_item(self, item: MediaItem) -> None:
         """Fetch one Immich asset's detail and fill location/description."""
         from . import immich as immich_api
@@ -1666,6 +1857,24 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         raise
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.debug("Immich enrich error: %s", err)
+                        item.exif_scanned = True
+                    scanned_since_save += 1
+                    self._enrich_progress["exif_done"] = (
+                        self._enrich_progress.get("exif_done", 0) + 1
+                    )
+                    if scanned_since_save >= _EXIF_BATCH_SAVE:
+                        scanned_since_save = 0
+                        await self._save_cached_items(data)
+                        self.async_set_updated_data(data)
+                    continue
+
+                if self.provider == PROVIDER_NEXTCLOUD:
+                    try:
+                        await self._enrich_nextcloud_item(item)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.debug("Nextcloud enrich error: %s", err)
                         item.exif_scanned = True
                     scanned_since_save += 1
                     self._enrich_progress["exif_done"] = (

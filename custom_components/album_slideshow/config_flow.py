@@ -67,6 +67,15 @@ from .const import (
     SYNOLOGY_IMAGE_SMALL,
     SYNOLOGY_IMAGE_MEDIUM,
     SYNOLOGY_IMAGE_LARGE,
+    CONF_NEXTCLOUD_URL,
+    CONF_NEXTCLOUD_USERNAME,
+    CONF_NEXTCLOUD_PASSWORD,
+    CONF_NEXTCLOUD_FOLDER,
+    CONF_NEXTCLOUD_RECURSIVE,
+    CONF_NEXTCLOUD_IMAGE_SIZE,
+    DEFAULT_NEXTCLOUD_IMAGE_SIZE,
+    NEXTCLOUD_IMAGE_PREVIEW,
+    NEXTCLOUD_IMAGE_ORIGINAL,
     DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
@@ -75,6 +84,7 @@ from .const import (
     PROVIDER_PHOTOPRISM,
     PROVIDER_ICLOUD,
     PROVIDER_SYNOLOGY,
+    PROVIDER_NEXTCLOUD,
     DEFAULT_RECURSIVE,
 )
 
@@ -147,7 +157,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         ``__init__`` raises (the symptom is a 500 when the user clicks
         Configure).
         """
-        if config_entry.data.get(CONF_PROVIDER) == PROVIDER_LOCAL_FOLDER:
+        if config_entry.data.get(CONF_PROVIDER) in (
+            PROVIDER_LOCAL_FOLDER,
+            PROVIDER_NEXTCLOUD,
+        ):
             return LocalFolderOptionsFlow()
         return _NoOptionsFlow()
 
@@ -166,6 +179,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_icloud()
             if self._provider == PROVIDER_SYNOLOGY:
                 return await self.async_step_synology()
+            if self._provider == PROVIDER_NEXTCLOUD:
+                return await self.async_step_nextcloud()
             return await self.async_step_google_shared()
 
         schema = vol.Schema(
@@ -177,6 +192,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     PROVIDER_PHOTOPRISM: "PhotoPrism (direct API, full metadata)",
                     PROVIDER_ICLOUD: "iCloud Shared Album",
                     PROVIDER_SYNOLOGY: "Synology Photos (direct API, full metadata)",
+                    PROVIDER_NEXTCLOUD: "Nextcloud (WebDAV folder, full metadata)",
                     PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
                 })
             }
@@ -807,6 +823,78 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(
             step_id="synology_select", data_schema=schema, errors=errors
+        )
+
+    async def async_step_nextcloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate a Nextcloud WebDAV folder + app password."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            url = user_input[CONF_NEXTCLOUD_URL].strip()
+            username = user_input[CONF_NEXTCLOUD_USERNAME].strip()
+            password = user_input.get(CONF_NEXTCLOUD_PASSWORD) or ""
+            folder = (user_input.get(CONF_NEXTCLOUD_FOLDER) or "").strip()
+            recursive = bool(user_input.get(CONF_NEXTCLOUD_RECURSIVE, False))
+            size = user_input.get(
+                CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+            )
+
+            from . import nextcloud as nc_api
+
+            client = nc_api.NextcloudClient(
+                self.hass, url, username, password, folder
+            )
+            try:
+                await client.async_validate()
+            except Exception:  # noqa: BLE001 - any failure means bad URL/creds/folder
+                errors["base"] = "nextcloud_cannot_connect"
+            else:
+                await self.async_set_unique_id(
+                    f"{DOMAIN}:{PROVIDER_NEXTCLOUD}:{client.base_url}:"
+                    f"{username}:{client.folder}"
+                )
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=name,
+                    data={
+                        CONF_PROVIDER: PROVIDER_NEXTCLOUD,
+                        CONF_NEXTCLOUD_URL: client.base_url,
+                        CONF_NEXTCLOUD_USERNAME: username,
+                        CONF_NEXTCLOUD_PASSWORD: password,
+                        CONF_NEXTCLOUD_FOLDER: client.folder,
+                        CONF_NEXTCLOUD_RECURSIVE: recursive,
+                        CONF_NEXTCLOUD_IMAGE_SIZE: size,
+                        CONF_ALBUM_NAME: name,
+                    },
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_NEXTCLOUD_URL): str,
+                vol.Required(CONF_NEXTCLOUD_USERNAME): str,
+                vol.Required(CONF_NEXTCLOUD_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_NEXTCLOUD_FOLDER, default=""): str,
+                vol.Optional(CONF_NEXTCLOUD_RECURSIVE, default=False): (
+                    selector.BooleanSelector()
+                ),
+                vol.Optional(
+                    CONF_NEXTCLOUD_IMAGE_SIZE, default=DEFAULT_NEXTCLOUD_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        NEXTCLOUD_IMAGE_PREVIEW: "Preview (smoothest slideshow)",
+                        NEXTCLOUD_IMAGE_ORIGINAL: "Original (full quality, slower)",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="nextcloud", data_schema=schema, errors=errors
         )
 
 

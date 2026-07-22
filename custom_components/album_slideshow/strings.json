@@ -104,6 +104,19 @@
           "album": "Album",
           "synology_image_size": "Image quality"
         }
+      },
+      "nextcloud": {
+        "title": "Nextcloud folder",
+        "description": "Connect to a folder in your Nextcloud files over WebDAV. Enter the server address (e.g. https://cloud.example.com), your username, and an app password (create one under Settings > Security > Devices and sessions - not your main login password). Point it at a folder path (e.g. Photos/Family), or leave the folder blank for your whole files root. Turn on recursive to include subfolders.",
+        "data": {
+          "album_name": "Album name",
+          "nextcloud_url": "Server URL",
+          "nextcloud_username": "Username",
+          "nextcloud_password": "App password",
+          "nextcloud_folder": "Folder path (optional)",
+          "nextcloud_recursive": "Include subfolders",
+          "nextcloud_image_size": "Image quality"
+        }
       }
     },
     "error": {
@@ -122,13 +135,14 @@
       "invalid_icloud_url": "That does not look like an iCloud Shared Album link.",
       "icloud_cannot_connect": "Could not reach that album. Check the link is a current public share.",
       "synology_cannot_connect": "Could not connect to Synology. Check the URL, username and password.",
-      "synology_otp_required": "This account needs a two-factor code. Enter a current 6-digit code to continue."
+      "synology_otp_required": "This account needs a two-factor code. Enter a current 6-digit code to continue.",
+      "nextcloud_cannot_connect": "Could not connect to Nextcloud. Check the URL, username, app password and folder path."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Local Folder options",
+        "title": "Location & privacy options",
         "description": "Reverse geocoding sends your photos' EXIF GPS coordinates to the public OpenStreetMap Nominatim service to look up a human-readable place name. Coordinates are rounded to ~100 m before lookup and cached on disk. Turn this off to keep coordinates entirely local; the latitude and longitude attributes still work either way.",
         "data": {
           "reverse_geocode": "Reverse-geocode EXIF GPS coordinates via OpenStreetMap"

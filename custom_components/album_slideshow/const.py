@@ -58,6 +58,28 @@ PROVIDER_IMMICH = "immich"
 PROVIDER_PHOTOPRISM = "photoprism"
 PROVIDER_ICLOUD = "icloud"
 PROVIDER_SYNOLOGY = "synology"
+PROVIDER_NEXTCLOUD = "nextcloud"
+
+# Nextcloud (authenticated WebDAV folder) provider. Points at any folder in a
+# user's files and lists it over WebDAV. Auth is HTTP Basic with a username +
+# app password (Settings > Security > Devices & sessions); the app password is
+# stored so the coordinator can re-list on each refresh and is sent server-side
+# only, never reaching the browser.
+CONF_NEXTCLOUD_URL = "nextcloud_url"
+CONF_NEXTCLOUD_USERNAME = "nextcloud_username"
+CONF_NEXTCLOUD_PASSWORD = "nextcloud_password"
+CONF_NEXTCLOUD_FOLDER = "nextcloud_folder"
+CONF_NEXTCLOUD_RECURSIVE = "nextcloud_recursive"
+CONF_NEXTCLOUD_IMAGE_SIZE = "nextcloud_image_size"
+
+# ``preview`` uses the core/preview thumbnail endpoint (smoother, smaller);
+# ``original`` fetches the real file straight off the WebDAV collection.
+NEXTCLOUD_IMAGE_PREVIEW = "preview"
+NEXTCLOUD_IMAGE_ORIGINAL = "original"
+NEXTCLOUD_IMAGE_SIZE_OPTIONS = [NEXTCLOUD_IMAGE_PREVIEW, NEXTCLOUD_IMAGE_ORIGINAL]
+DEFAULT_NEXTCLOUD_IMAGE_SIZE = NEXTCLOUD_IMAGE_PREVIEW
+# Long edge (px) requested from the core/preview endpoint for preview quality.
+NEXTCLOUD_PREVIEW_PX = 1920
 
 # Synology Photos (direct API) provider. Talks to a DSM Photos package over its
 # entry.cgi web API. The account password is stored so the coordinator can

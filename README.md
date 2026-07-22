@@ -7,7 +7,7 @@
 
 <img width="800" alt="banner" src="https://github.com/user-attachments/assets/591b3541-5e2a-43d0-a97a-145f365cff94" />
 
-Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, an **iCloud Shared Album**, a **Synology Photos** library, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
+Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, an **iCloud Shared Album**, a **Synology Photos** library, a **Nextcloud** folder, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
 
 Clean. Flexible. Fully runtime configurable. Designed for dashboards.
 
@@ -22,6 +22,7 @@ Album Slideshow creates a **camera entity** that automatically cycles through im
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search  
 - **iCloud** Shared Albums (public link)  
 - **Synology Photos** (direct API): personal or shared library, whole space or an album  
+- **Nextcloud** (WebDAV folder): any folder in your files, with full metadata  
 - **Local folders** and NAS mounted directories  
 - Home Assistant **Media Source** (local media, Jellyfin, ...)  
 
@@ -43,11 +44,12 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search, with full metadata
 - **iCloud** Shared Albums (public link), with capture date + captions
 - **Synology Photos** (direct API): personal or shared library, whole space or an album, with full metadata
+- **Nextcloud** (WebDAV folder): any folder in your files (app-password auth, recursive), with full metadata
 - **Local folder** paths and NAS mounted directories
 - Home Assistant **Media Source** (local media, Jellyfin, ...)
 - Optional recursive scanning
 
-### 📍 EXIF & Location (local / NAS / Immich / PhotoPrism / Synology)
+### 📍 EXIF & Location (local / NAS / Immich / PhotoPrism / Synology / Nextcloud)
 - Reads capture date so date-filter modes work (EXIF `DateTimeOriginal` with `OffsetTimeOriginal` for local files; Immich's own capture date for the Immich provider)
 - Surfaces GPS as `latitude` / `longitude` camera attributes
 - Human-readable `location` label (reverse-geocoded via OpenStreetMap Nominatim for local files, or Immich's own place data); per-album opt-out for geocoding in the integration's Configure dialog
@@ -152,6 +154,7 @@ Pick the provider that matches where your photos live:
 | **PhotoPrism** | A PhotoPrism server (album, person, favorites, all, search) | ✅ | ✅ | ✅ |
 | **iCloud** | An iCloud Shared Album public link | ✅ | ❌ | ✅ |
 | **Synology** | A Synology Photos library (personal or shared, whole space or an album) | ✅ | ✅ | ✅ |
+| **Nextcloud** | Any folder in your Nextcloud files (WebDAV, app password) | ✅ | ✅ | ✅ |
 | **Local Folder** | Files on the HA host / NAS | ✅ | ✅ | ✅ |
 | **Media Source** | Any HA media source with no API (local media, Jellyfin, ...) | ❌ | ❌ | ❌ |
 
@@ -364,6 +367,46 @@ Synology serves pre-generated thumbnails:
   expires. The session id is sent only server-side (it never appears in the
   camera's image URL or the browser).
 - New photos added to the album or library show up on the next refresh.
+
+---
+
+### Nextcloud
+
+The **Nextcloud** provider slideshows **any folder in your Nextcloud files**
+over WebDAV, with **full photo metadata** (capture date, GPS location and
+captions). It works on any Nextcloud server - no Photos or Memories app is
+required.
+
+1. In Nextcloud, create an **app password**: **Settings -> Security ->
+   Devices & sessions -> Create new app password**. Copy the generated
+   password (it is shown only once).
+2. Add the integration and choose **Nextcloud (WebDAV folder, full metadata)**.
+3. Enter your server URL (e.g. `https://cloud.example.com`), your username, and
+   the app password.
+4. Point it at a **folder path** (e.g. `Photos/Family`), or leave it blank for
+   your whole files root. Tick **Include subfolders** to recurse.
+5. Name it and pick an image quality.
+
+#### Image quality
+
+- **Preview** (default) - a resized thumbnail from Nextcloud's `core/preview`
+  endpoint; smoothest slideshow.
+- **Original** - the untouched original file straight off WebDAV (largest,
+  slowest).
+
+#### Notes
+
+- **Date, location and captions all work.** Nextcloud has no metadata-only API
+  for a folder, so the integration reads EXIF the same way the **Local Folder**
+  provider does: it downloads each original photo once in the background and
+  reads its EXIF/IPTC/XMP. Progress is tracked by the same **Enrichment
+  progress** diagnostic sensor, and the same reverse-geocoding opt-out applies
+  in the integration's **Configure** dialog.
+- The app password is stored so the integration can re-list the folder on each
+  refresh. It is sent to Nextcloud server-side only (HTTP Basic auth) and never
+  appears in the camera's image URL or the browser.
+- New photos dropped into the folder show up on the next refresh.
+- Videos and non-image files are skipped.
 
 ---
 
