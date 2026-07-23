@@ -21,7 +21,7 @@ Album Slideshow creates a **camera entity** that automatically cycles through im
 - **Immich** (direct API): album, person, favorites, all, random, or a custom search  
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search  
 - **iCloud** Shared Albums (public link)  
-- **Synology Photos** (direct API): personal or shared library, whole space or an album  
+- **Synology Photos** (direct API): favorites, albums, people, places, tags or subjects  
 - **Nextcloud** (WebDAV folder): any folder in your files, with full metadata  
 - **Local folders** and NAS mounted directories  
 - Home Assistant **Media Source** (local media, Jellyfin, ...)  
@@ -43,7 +43,7 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - **Immich** (direct API): album, person, favorites, all, random, or a custom search, with full metadata
 - **PhotoPrism** (direct API): album, person, favorites, all, or a custom search, with full metadata
 - **iCloud** Shared Albums (public link), with capture date + captions
-- **Synology Photos** (direct API): personal or shared library, whole space or an album, with full metadata
+- **Synology Photos** (direct API): favorites, albums, people, places, tags or subjects, with full metadata
 - **Nextcloud** (WebDAV folder): any folder in your files (app-password auth, recursive), with full metadata
 - **Local folder** paths and NAS mounted directories
 - Home Assistant **Media Source** (local media, Jellyfin, ...)
@@ -153,7 +153,7 @@ Pick the provider that matches where your photos live:
 | **Immich** | An Immich server (album, person, favorites, all, search) | ✅ | ✅ | ✅ |
 | **PhotoPrism** | A PhotoPrism server (album, person, favorites, all, search) | ✅ | ✅ | ✅ |
 | **iCloud** | An iCloud Shared Album public link | ✅ | ❌ | ✅ |
-| **Synology** | A Synology Photos library (personal or shared, whole space or an album) | ✅ | ✅ | ✅ |
+| **Synology** | A Synology Photos library (favorites, albums, people, places, tags, subjects) | ✅ | ✅ | ✅ |
 | **Nextcloud** | Any folder in your Nextcloud files (WebDAV, app password) | ✅ | ✅ | ✅ |
 | **Local Folder** | Files on the HA host / NAS | ✅ | ✅ | ✅ |
 | **Media Source** | Any HA media source with no API (local media, Jellyfin, ...) | ❌ | ❌ | ❌ |
@@ -332,8 +332,10 @@ way anyone with the link can view it on the web.
 
 The **Synology** provider connects straight to the **Photos** package on your
 Synology NAS for **full photo metadata** (capture date, GPS location and
-captions). It can slideshow your whole library or a single album, from either
-the **personal** ("My Photos") or **shared** ("Shared Space") library.
+captions). Like the Immich and PhotoPrism providers, you can combine any mix of
+**favorites, albums (including albums shared with you), people, places, tags and
+subjects** into one slideshow, from either the **personal** ("My Photos") or
+**shared** ("Shared Space") library.
 
 1. Add the integration and choose **Synology Photos (direct API, full
    metadata)**.
@@ -343,12 +345,14 @@ the **personal** ("My Photos") or **shared** ("Shared Space") library.
 4. If the account has **two-factor authentication**, also enter a current
    6-digit code. This is only needed once - a trusted-device token is stored so
    later refreshes never prompt for a code again.
-5. Pick an album (or **All photos in this space**), name it, and choose an image
-   quality.
+5. Tick what you want to show (favorites, albums, people, places, tags,
+   subjects) - or leave everything unticked for **all photos** - then name it
+   and choose an image quality.
 
-> **Use a dedicated account.** Create a normal (non-admin) DSM user, give it
-> access only to the Photos content you want to show, and use that here rather
-> than your admin login.
+> **Combining sources.** Synology has no "OR" across categories, so the
+> integration queries each ticked album/person/place/tag/subject separately and
+> merges the results (duplicates removed). Favorites and subjects are a Personal
+> library feature.
 
 #### Image quality
 
@@ -367,6 +371,12 @@ Synology serves pre-generated thumbnails:
   expires. The session id is sent only server-side (it never appears in the
   camera's image URL or the browser).
 - New photos added to the album or library show up on the next refresh.
+- Albums that another user shared with your account appear under **Albums**
+  tagged "(shared)"; they are fetched by their share passphrase.
+
+> **Use a dedicated account.** Create a normal (non-admin) DSM user, give it
+> access only to the Photos content you want to show, and use that here rather
+> than your admin login.
 
 ---
 

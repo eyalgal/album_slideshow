@@ -98,10 +98,15 @@
       },
       "synology_select": {
         "title": "Synology source",
-        "description": "Pick an album or show the whole library, and choose the image quality.",
+        "description": "Choose what to show. Tick any mix of favorites, albums, people, places, tags and subjects; they are combined into one slideshow. Leave everything empty to show all photos in this space.",
         "data": {
           "album_name": "Album name",
-          "album": "Album",
+          "favorites": "Favorites",
+          "albums": "Albums",
+          "people": "People",
+          "places": "Places",
+          "tags": "Tags",
+          "subjects": "Subjects",
           "synology_image_size": "Image quality"
         }
       },

@@ -246,6 +246,11 @@ class SynologyClient:
         self.device_id = device_id
         self.space = space
         self._sid: str | None = None
+        # CSRF token from an ``enable_syno_token`` login. Some endpoints (e.g.
+        # the ``favorite_only`` listing) reject requests without it, and in a
+        # token session even the thumbnail handler requires it, so it is sent
+        # on every API call and included in ``image_headers``.
+        self._synotoken: str | None = None
         # Set after a successful OTP login so the config flow can persist it.
         self._captured_device_id: str | None = None
 
@@ -259,13 +264,21 @@ class SynologyClient:
 
     @property
     def image_headers(self) -> dict[str, str]:
-        """Auth headers for fetching thumbnail bytes (session cookie)."""
-        return {"Cookie": f"id={self._sid}"} if self._sid else {}
+        """Auth headers for fetching thumbnail bytes (cookie + CSRF token)."""
+        if not self._sid:
+            return {}
+        headers = {"Cookie": f"id={self._sid}"}
+        if self._synotoken:
+            headers["X-SYNO-TOKEN"] = self._synotoken
+        return headers
 
     async def _get(self, params: dict[str, Any]) -> dict[str, Any]:
         session = async_get_clientsession(self.hass)
+        headers = {"X-SYNO-TOKEN": self._synotoken} if self._synotoken else None
         async with async_timeout.timeout(_TIMEOUT):
-            async with session.get(api_url(self.base_url), params=params) as resp:
+            async with session.get(
+                api_url(self.base_url), params=params, headers=headers
+            ) as resp:
                 # Synology sometimes serves JSON as text/plain.
                 return await resp.json(content_type=None)
 
@@ -282,6 +295,9 @@ class SynologyClient:
             "account": self.username,
             "passwd": self.password,
             "format": "sid",
+            # Request a CSRF token; needed for the favorites listing and, in a
+            # token session, for thumbnail fetches.
+            "enable_syno_token": "yes",
         }
         if otp_code:
             params["otp_code"] = otp_code
@@ -298,6 +314,7 @@ class SynologyClient:
 
         payload = data.get("data") or {}
         self._sid = payload.get("sid")
+        self._synotoken = payload.get("synotoken") or payload.get("syno_token")
         did = payload.get("device_id") or payload.get("did")
         if did:
             self._captured_device_id = did
@@ -392,10 +409,20 @@ class SynologyClient:
         return out
 
     async def async_collect_assets(
-        self, album_id: Any = None, passphrase: str | None = None
+        self,
+        album_id: Any = None,
+        passphrase: str | None = None,
+        favorite_only: bool = False,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """List photo items, optionally scoped to an album.
+        """List photo items, optionally scoped to an album, favorites, or a filter.
 
+        - ``favorite_only`` lists only the account's favorited photos via
+          ``SYNO.Foto.Browse.Item`` v7 + ``favorite_only=true`` (Personal
+          space; requires the CSRF token from an ``enable_syno_token`` login).
+        - ``filters`` (e.g. ``{"person_id": 10}``, ``{"geocoding_id": 3}``,
+          ``{"general_tag_id": 1}``, ``{"concept_id": 5}``) scopes the listing
+          to that category via ``SYNO.Foto.Browse.Item`` v7.
         - A ``passphrase`` (album shared with this account) lists that album's
           photos via ``SYNO.Foto.Browse.Item`` + ``passphrase`` - the owning
           user's files are not reachable by ``album_id`` (error 609).
@@ -408,10 +435,17 @@ class SynologyClient:
         accessible (error 801), so callers can show a clear message instead of
         a misleading "no images found".
         """
-        if passphrase or album_id:
+        if favorite_only or filters:
+            # Favorites and category filters are Personal-space concepts and are
+            # only honoured by version 7 of the item API.
             api = "SYNO.Foto.Browse.Item"
+            version = "7"
+        elif passphrase or album_id:
+            api = "SYNO.Foto.Browse.Item"
+            version = "1"
         else:
             api = f"{namespace(self.space)}.Browse.Item"
+            version = "1"
         additional = json.dumps(
             ["thumbnail", "resolution", "gps", "address", "description"]
         )
@@ -420,13 +454,17 @@ class SynologyClient:
         while True:
             params: dict[str, Any] = {
                 "api": api,
-                "version": "1",
+                "version": version,
                 "method": "list",
                 "offset": offset,
                 "limit": _PAGE_SIZE,
                 "additional": additional,
                 "_sid": self._sid,
             }
+            if favorite_only:
+                params["favorite_only"] = "true"
+            if filters:
+                params.update(filters)
             if passphrase:
                 params["passphrase"] = passphrase
             elif album_id:
@@ -450,3 +488,97 @@ class SynologyClient:
             if offset >= _MAX_ASSETS:
                 break
         return items
+
+    async def _list_category(self, api: str, version: str = "1") -> list[dict[str, Any]]:
+        """List entries of a browse category (people, places, tags, subjects)."""
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            data = await self._get(
+                {
+                    "api": api,
+                    "version": version,
+                    "method": "list",
+                    "offset": offset,
+                    "limit": 500,
+                    "_sid": self._sid,
+                }
+            )
+            if not data.get("success"):
+                break
+            lst = (data.get("data") or {}).get("list") or []
+            out.extend(a for a in lst if a.get("id") is not None)
+            if len(lst) < 500:
+                break
+            offset += len(lst)
+            if offset >= _MAX_ASSETS:
+                break
+        return out
+
+    async def async_list_people(self) -> list[dict[str, Any]]:
+        """List named people (face groups) with a name."""
+        people = await self._list_category("SYNO.Foto.Browse.Person", "1")
+        return [p for p in people if (p.get("name") or "").strip()]
+
+    async def async_list_places(self) -> list[dict[str, Any]]:
+        """List reverse-geocoded places."""
+        return await self._list_category("SYNO.Foto.Browse.Geocoding", "1")
+
+    async def async_list_tags(self) -> list[dict[str, Any]]:
+        """List user tags."""
+        tags = await self._list_category("SYNO.Foto.Browse.GeneralTag", "1")
+        return [t for t in tags if (t.get("name") or "").strip()]
+
+    async def async_list_subjects(self) -> list[dict[str, Any]]:
+        """List AI-recognised subjects/concepts (e.g. Animals, Food)."""
+        subjects = await self._list_category("SYNO.Foto.Browse.Concept", "1")
+        return [s for s in subjects if (s.get("name") or "").strip()]
+
+    async def async_collect_composite(
+        self, selection: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Collect the union of every selected source, de-duplicated.
+
+        ``selection`` keys (all optional): ``favorites`` (bool), ``album_ids``,
+        ``passphrases`` (shared-with-me albums), ``person_ids``,
+        ``geocoding_ids``, ``tag_ids``, ``concept_ids``. An empty selection
+        means the whole space. Items pulled from a shared album carry a
+        ``_passphrase`` key so the caller can build their thumbnail URLs.
+        """
+        merged: dict[tuple[str, Any], dict[str, Any]] = {}
+
+        def add(items: list[dict[str, Any]], passphrase: str | None = None) -> None:
+            for it in items:
+                if passphrase:
+                    it["_passphrase"] = passphrase
+                key = (passphrase or "", it.get("id"))
+                merged.setdefault(key, it)
+
+        any_selected = False
+
+        if selection.get("favorites"):
+            any_selected = True
+            add(await self.async_collect_assets(favorite_only=True))
+        for aid in selection.get("album_ids") or []:
+            any_selected = True
+            add(await self.async_collect_assets(album_id=aid))
+        for pp in selection.get("passphrases") or []:
+            any_selected = True
+            add(await self.async_collect_assets(passphrase=pp), passphrase=pp)
+        for pid in selection.get("person_ids") or []:
+            any_selected = True
+            add(await self.async_collect_assets(filters={"person_id": pid}))
+        for gid in selection.get("geocoding_ids") or []:
+            any_selected = True
+            add(await self.async_collect_assets(filters={"geocoding_id": gid}))
+        for tid in selection.get("tag_ids") or []:
+            any_selected = True
+            add(await self.async_collect_assets(filters={"general_tag_id": tid}))
+        for cid in selection.get("concept_ids") or []:
+            any_selected = True
+            add(await self.async_collect_assets(filters={"concept_id": cid}))
+
+        if not any_selected:
+            add(await self.async_collect_assets())
+
+        return list(merged.values())

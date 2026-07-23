@@ -96,6 +96,17 @@ CONF_SYNOLOGY_IMAGE_SIZE = "synology_image_size"
 # only when the chosen source is a shared-with-me album; such albums are
 # reachable by passphrase rather than by album id.
 CONF_SYNOLOGY_PASSPHRASE = "synology_passphrase"
+# When True, the source is the account's Favorites (favorited photos) rather
+# than the whole space or a specific album.
+CONF_SYNOLOGY_FAVORITE = "synology_favorite"
+# Composite selection: a client-side union of any mix of albums, people,
+# places, tags, subjects and favorites. Synology has no OR across categories,
+# so each selected member is queried on its own and the results are merged
+# (see the Immich/PhotoPrism composite). Stored as a JSON object:
+# ``{"favorites": bool, "album_ids": [...], "passphrases": [...],
+#    "person_ids": [...], "geocoding_ids": [...], "tag_ids": [...],
+#    "concept_ids": [...]}``; an empty composite means the whole space.
+CONF_SYNOLOGY_SELECTION = "synology_selection"
 
 # Personal ("My Photos") vs shared ("Shared Space") library.
 SYNOLOGY_SPACE_PERSONAL = "personal"

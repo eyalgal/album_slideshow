@@ -199,6 +199,16 @@ def test_collect_assets_all_personal_uses_foto_item_api():
     assert "album_id" not in calls[0]
 
 
+def test_collect_assets_favorites_uses_v7_favorite_only():
+    c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
+    asyncio.run(c.async_collect_assets(favorite_only=True))
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Item"
+    assert calls[0]["version"] == "7"
+    assert calls[0]["favorite_only"] == "true"
+    assert "album_id" not in calls[0]
+    assert "passphrase" not in calls[0]
+
+
 def test_collect_assets_all_shared_uses_fototeam_item_api():
     c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
     c.space = syn.SPACE_SHARED
@@ -278,6 +288,71 @@ def test_collect_assets_passphrase_uses_foto_item_with_passphrase():
     assert "album_id" not in calls[0]
 
 
+def test_collect_assets_filters_use_v7_with_filter_param():
+    c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
+    asyncio.run(c.async_collect_assets(filters={"person_id": 10}))
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Item"
+    assert calls[0]["version"] == "7"
+    assert calls[0]["person_id"] == 10
+
+
+def test_collect_composite_merges_and_dedupes():
+    # Collect order is favorites -> album_ids -> passphrases -> people -> ...
+    # favorites -> [1,2]; shared album -> [7]; person -> [2,3] (2 overlaps fav).
+    c, _ = _client_with_responses([
+        {"success": True, "data": {"list": [
+            {"id": 1, "type": "photo", "additional": {"thumbnail": {"cache_key": "1_1"}}},
+            {"id": 2, "type": "photo", "additional": {"thumbnail": {"cache_key": "2_1"}}},
+        ]}},
+        {"success": True, "data": {"list": [
+            {"id": 7, "type": "photo", "additional": {"thumbnail": {"cache_key": "7_1"}}},
+        ]}},
+        {"success": True, "data": {"list": [
+            {"id": 2, "type": "photo", "additional": {"thumbnail": {"cache_key": "2_1"}}},
+            {"id": 3, "type": "photo", "additional": {"thumbnail": {"cache_key": "3_1"}}},
+        ]}},
+    ])
+    merged = asyncio.run(c.async_collect_composite({
+        "favorites": True,
+        "passphrases": ["PP"],
+        "person_ids": [10],
+    }))
+    ids = sorted(m["id"] for m in merged)
+    assert ids == [1, 2, 3, 7]
+    # Only the shared-album item carries the passphrase.
+    shared = [m for m in merged if m.get("_passphrase")]
+    assert len(shared) == 1 and shared[0]["id"] == 7
+
+
+def test_collect_composite_empty_lists_all():
+    c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
+    asyncio.run(c.async_collect_composite({}))
+    # A single "all items" call, no filters/passphrase/favorite.
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Item"
+    assert "favorite_only" not in calls[0]
+    assert "person_id" not in calls[0]
+
+
+def test_list_people_filters_unnamed():
+    c, calls = _client_with_responses([
+        {"success": True, "data": {"list": [
+            {"id": 10, "name": "Ellie"}, {"id": 11, "name": ""},
+        ]}},
+    ])
+    people = asyncio.run(c.async_list_people())
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Person"
+    assert [p["name"] for p in people] == ["Ellie"]
+
+
+def test_list_subjects_uses_concept_api():
+    c, calls = _client_with_responses([
+        {"success": True, "data": {"list": [{"id": 5, "name": "Animals"}]}},
+    ])
+    subs = asyncio.run(c.async_list_subjects())
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Concept"
+    assert subs[0]["name"] == "Animals"
+
+
 def test_build_thumbnail_url_includes_passphrase():
     url = syn.build_thumbnail_url(
         "http://nas:5000", 43, "43_1", "xl", syn.SPACE_PERSONAL, passphrase="vTaz7kAka"
@@ -288,5 +363,22 @@ def test_build_thumbnail_url_includes_passphrase():
 def test_build_thumbnail_url_no_passphrase_by_default():
     url = syn.build_thumbnail_url("http://nas:5000", 43, "43_1", "xl")
     assert "passphrase" not in url
+
+
+def test_image_headers_include_synotoken_when_present():
+    c = syn.SynologyClient(None, "http://nas:5000", "u", "p")
+    c._sid = "SID"
+    c._synotoken = "TOK123"
+    headers = c.image_headers
+    assert headers["Cookie"] == "id=SID"
+    assert headers["X-SYNO-TOKEN"] == "TOK123"
+
+
+def test_image_headers_cookie_only_without_token():
+    c = syn.SynologyClient(None, "http://nas:5000", "u", "p")
+    c._sid = "SID"
+    headers = c.image_headers
+    assert headers == {"Cookie": "id=SID"}
+
 
 

@@ -62,6 +62,8 @@ from .const import (
     CONF_SYNOLOGY_ALBUM_ID,
     CONF_SYNOLOGY_IMAGE_SIZE,
     CONF_SYNOLOGY_PASSPHRASE,
+    CONF_SYNOLOGY_FAVORITE,
+    CONF_SYNOLOGY_SELECTION,
     DEFAULT_SYNOLOGY_IMAGE_SIZE,
     SYNOLOGY_SPACE_PERSONAL,
     SYNOLOGY_SPACE_SHARED,
@@ -142,6 +144,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._syn_albums: dict[str, str] = {}
         # option key -> {"album_id": id|None, "passphrase": str|None}
         self._syn_album_meta: dict[str, dict[str, Any]] = {}
+        # id(str) -> name maps for the composite category multi-selects.
+        self._syn_people: dict[str, str] = {}
+        self._syn_places: dict[str, str] = {}
+        self._syn_tags: dict[str, str] = {}
+        self._syn_subjects: dict[str, str] = {}
 
     @staticmethod
     @callback
@@ -718,14 +725,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.async_login(otp_code=otp or None)
-                # Albums live only in the Personal space (there is no Shared
-                # Space album API). For the Shared Space, validate access up
-                # front so a permission problem surfaces here, not later.
+                # Albums and category browsing live only in the Personal space
+                # (there is no Shared Space album/category API). For the Shared
+                # Space, validate access up front so a permission problem
+                # surfaces here, not later.
                 if space == SYNOLOGY_SPACE_SHARED:
-                    albums = []
+                    albums = people = places = tags = subjects = []
                     await client.async_collect_assets(None)
                 else:
                     albums = await client.async_list_albums()
+                    people = await client.async_list_people()
+                    places = await client.async_list_places()
+                    tags = await client.async_list_tags()
+                    subjects = await client.async_list_subjects()
             except syn_api.SynologyOtpRequired:
                 errors["otp_code"] = "synology_otp_required"
             except syn_api.SynologyPermissionError:
@@ -756,6 +768,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "album_id": None if shared else a["id"],
                         "passphrase": a.get("passphrase") if shared else None,
                     }
+                self._syn_people = {
+                    str(p["id"]): p["name"] for p in people if p.get("id") is not None
+                }
+                self._syn_places = {
+                    str(p["id"]): p["name"] for p in places if p.get("id") is not None
+                }
+                self._syn_tags = {
+                    str(t["id"]): t["name"] for t in tags if t.get("id") is not None
+                }
+                self._syn_subjects = {
+                    str(s["id"]): s["name"] for s in subjects if s.get("id") is not None
+                }
                 await client.async_logout()
                 return await self.async_step_synology_select()
 
@@ -784,7 +808,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_synology_select(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Pick a Synology album (or the whole space) and image size."""
+        """Build a composite Synology selection and finish the entry.
+
+        Like the Immich/PhotoPrism providers: tick any mix of favorites,
+        albums, people, places, tags and subjects. Synology has no OR across
+        categories, so each member is queried on its own and merged. An empty
+        selection means the whole space.
+        """
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -792,16 +822,42 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             size = user_input.get(
                 CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
             )
-            choice = user_input.get("album")
-            if choice in (None, "", "__all__") or choice not in self._syn_albums:
-                choice = None
-            meta = self._syn_album_meta.get(choice) if choice else None
-            album_id = meta.get("album_id") if meta else None
-            passphrase = meta.get("passphrase") if meta else None
+            favorites = bool(user_input.get("favorites"))
 
+            album_ids: list[Any] = []
+            passphrases: list[str] = []
+            for key in user_input.get("albums", []) or []:
+                meta = self._syn_album_meta.get(key)
+                if not meta:
+                    continue
+                if meta.get("passphrase"):
+                    passphrases.append(meta["passphrase"])
+                elif meta.get("album_id") is not None:
+                    album_ids.append(meta["album_id"])
+
+            def _ids(field: str, valid: dict[str, str]) -> list[int]:
+                out: list[int] = []
+                for v in user_input.get(field, []) or []:
+                    if v in valid:
+                        try:
+                            out.append(int(v))
+                        except (TypeError, ValueError):
+                            pass
+                return out
+
+            selection = {
+                "favorites": favorites,
+                "album_ids": album_ids,
+                "passphrases": passphrases,
+                "person_ids": _ids("people", self._syn_people),
+                "geocoding_ids": _ids("places", self._syn_places),
+                "tag_ids": _ids("tags", self._syn_tags),
+                "concept_ids": _ids("subjects", self._syn_subjects),
+            }
+            sel_id = json.dumps(selection, sort_keys=True)
             unique = (
                 f"{DOMAIN}:{PROVIDER_SYNOLOGY}:{self._syn_url}:"
-                f"{self._syn_space}:{choice or 'all'}"
+                f"{self._syn_space}:{sel_id}"
             )
             await self.async_set_unique_id(unique)
             self._abort_if_unique_id_configured()
@@ -811,46 +867,56 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_SYNOLOGY_USERNAME: self._syn_username,
                 CONF_SYNOLOGY_PASSWORD: self._syn_password,
                 CONF_SYNOLOGY_SPACE: self._syn_space,
+                CONF_SYNOLOGY_SELECTION: sel_id,
                 CONF_SYNOLOGY_IMAGE_SIZE: size,
                 CONF_ALBUM_NAME: name,
             }
-            if album_id:
-                data[CONF_SYNOLOGY_ALBUM_ID] = album_id
-            if passphrase:
-                data[CONF_SYNOLOGY_PASSPHRASE] = passphrase
             if self._syn_device_id:
                 data[CONF_SYNOLOGY_DEVICE_ID] = self._syn_device_id
             return self.async_create_entry(title=name, data=data)
 
-        album_options = [
-            selector.SelectOptionDict(value="__all__", label="All photos in this space")
-        ] + [
-            selector.SelectOptionDict(value=aid, label=aname)
-            for aid, aname in self._syn_albums.items()
-        ]
-        schema = vol.Schema(
+        def _multi(options: dict[str, str]):
+            return selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(value=v, label=l)
+                        for v, l in options.items()
+                    ],
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    custom_value=False,
+                )
+            )
+
+        fields: dict[Any, Any] = {vol.Required(CONF_ALBUM_NAME): str}
+        # Favorites, albums and subjects are Personal-space concepts.
+        if self._syn_space == SYNOLOGY_SPACE_PERSONAL:
+            fields[vol.Optional("favorites", default=False)] = (
+                selector.BooleanSelector()
+            )
+        if self._syn_albums:
+            fields[vol.Optional("albums")] = _multi(self._syn_albums)
+        if self._syn_people:
+            fields[vol.Optional("people")] = _multi(self._syn_people)
+        if self._syn_places:
+            fields[vol.Optional("places")] = _multi(self._syn_places)
+        if self._syn_tags:
+            fields[vol.Optional("tags")] = _multi(self._syn_tags)
+        if self._syn_subjects:
+            fields[vol.Optional("subjects")] = _multi(self._syn_subjects)
+        fields[
+            vol.Optional(
+                CONF_SYNOLOGY_IMAGE_SIZE, default=DEFAULT_SYNOLOGY_IMAGE_SIZE
+            )
+        ] = vol.In(
             {
-                vol.Required(CONF_ALBUM_NAME): str,
-                vol.Optional("album", default="__all__"): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=album_options,
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                        custom_value=False,
-                    )
-                ),
-                vol.Optional(
-                    CONF_SYNOLOGY_IMAGE_SIZE, default=DEFAULT_SYNOLOGY_IMAGE_SIZE
-                ): vol.In(
-                    {
-                        SYNOLOGY_IMAGE_LARGE: "Large (best for slideshow)",
-                        SYNOLOGY_IMAGE_MEDIUM: "Medium",
-                        SYNOLOGY_IMAGE_SMALL: "Small (thumbnail, fastest)",
-                    }
-                ),
+                SYNOLOGY_IMAGE_LARGE: "Large (best for slideshow)",
+                SYNOLOGY_IMAGE_MEDIUM: "Medium",
+                SYNOLOGY_IMAGE_SMALL: "Small (thumbnail, fastest)",
             }
         )
         return self.async_show_form(
-            step_id="synology_select", data_schema=schema, errors=errors
+            step_id="synology_select", data_schema=vol.Schema(fields), errors=errors
         )
 
     async def async_step_nextcloud(

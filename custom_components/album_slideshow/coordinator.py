@@ -52,6 +52,8 @@ from .const import (
     CONF_SYNOLOGY_ALBUM_ID,
     CONF_SYNOLOGY_IMAGE_SIZE,
     CONF_SYNOLOGY_PASSPHRASE,
+    CONF_SYNOLOGY_FAVORITE,
+    CONF_SYNOLOGY_SELECTION,
     DEFAULT_SYNOLOGY_IMAGE_SIZE,
     SYNOLOGY_SPACE_PERSONAL,
     CONF_NEXTCLOUD_URL,
@@ -1597,6 +1599,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         space = self.entry.data.get(CONF_SYNOLOGY_SPACE, SYNOLOGY_SPACE_PERSONAL)
         album_id = self.entry.data.get(CONF_SYNOLOGY_ALBUM_ID)
         passphrase = self.entry.data.get(CONF_SYNOLOGY_PASSPHRASE)
+        favorite_only = bool(self.entry.data.get(CONF_SYNOLOGY_FAVORITE))
+        selection_raw = self.entry.data.get(CONF_SYNOLOGY_SELECTION)
         size = self.entry.data.get(
             CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
         )
@@ -1613,9 +1617,21 @@ class AlbumCoordinator(DataUpdateCoordinator):
         )
         try:
             await client.async_login()
-            photos = await client.async_collect_assets(
-                album_id or None, passphrase=passphrase or None
-            )
+            if selection_raw:
+                # Composite selection (albums + people + places + tags +
+                # subjects + favorites), merged client-side.
+                try:
+                    selection = json.loads(selection_raw)
+                except (TypeError, ValueError):
+                    selection = {}
+                photos = await client.async_collect_composite(selection)
+            else:
+                # Legacy single-source entries (favorites / one album / all).
+                photos = await client.async_collect_assets(
+                    album_id or None,
+                    passphrase=passphrase or None,
+                    favorite_only=favorite_only,
+                )
         except syn_api.SynologyPermissionError as err:
             raise UpdateFailed(str(err)) from err
         except Exception as err:
@@ -1637,6 +1653,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 continue
             unit_id, cache_key = ref
             meta = syn_api.parse_photo_meta(p)
+            # Items pulled from a shared-with-me album carry their own
+            # passphrase (composite path); fall back to the single-album
+            # passphrase for legacy entries.
+            item_pp = p.get("_passphrase") or passphrase or None
             items.append(
                 MediaItem(
                     url=syn_api.build_thumbnail_url(
@@ -1645,7 +1665,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         cache_key,
                         size,
                         space,
-                        passphrase=passphrase or None,
+                        passphrase=item_pp,
                     ),
                     width=meta.get("width"),
                     height=meta.get("height"),
