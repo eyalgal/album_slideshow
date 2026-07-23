@@ -1612,6 +1612,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         try:
             await client.async_login()
             photos = await client.async_collect_assets(album_id or None)
+        except syn_api.SynologyPermissionError as err:
+            raise UpdateFailed(str(err)) from err
         except Exception as err:
             raise UpdateFailed(f"Error querying Synology Photos: {err}") from err
 

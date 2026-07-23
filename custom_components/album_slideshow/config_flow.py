@@ -715,9 +715,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.async_login(otp_code=otp or None)
-                albums = await client.async_list_albums()
+                # Albums live only in the Personal space (there is no Shared
+                # Space album API). For the Shared Space, validate access up
+                # front so a permission problem surfaces here, not later.
+                if space == SYNOLOGY_SPACE_SHARED:
+                    albums = []
+                    await client.async_collect_assets(None)
+                else:
+                    albums = await client.async_list_albums()
             except syn_api.SynologyOtpRequired:
                 errors["otp_code"] = "synology_otp_required"
+            except syn_api.SynologyPermissionError:
+                errors["base"] = "synology_shared_unavailable"
             except Exception:  # noqa: BLE001 - any failure means bad URL/creds
                 errors["base"] = "synology_cannot_connect"
             else:
@@ -729,7 +738,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # store it so future logins skip the 2FA prompt.
                 self._syn_device_id = client.captured_device_id
                 self._syn_albums = {
-                    str(a["id"]): (a.get("name") or str(a["id"]))
+                    str(a["id"]): (
+                        f"{a.get('name') or a['id']} (shared)"
+                        if a.get("shared")
+                        else (a.get("name") or str(a["id"]))
+                    )
                     for a in albums
                     if a.get("id") is not None
                 }

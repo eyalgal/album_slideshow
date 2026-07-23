@@ -87,7 +87,7 @@
       },
       "synology": {
         "title": "Synology Photos",
-        "description": "Connect to the Photos package on your Synology NAS. Enter the DSM address (e.g. http://192.168.1.10:5000 or your HTTPS/QuickConnect URL) and an account. If the account has two-factor authentication, also enter a current 6-digit code once; a trusted-device token is then stored so future refreshes do not need a code. Tip: use a dedicated read-only Photos account rather than an admin login.",
+        "description": "Connect to the Photos package on your Synology NAS. Enter the DSM address (e.g. http://192.168.1.10:5000 or your HTTPS/QuickConnect URL) and an account. If the account has two-factor authentication, also enter a current 6-digit code once; a trusted-device token is then stored so future refreshes do not need a code. Choose Personal for your own photos and albums (this is also where albums shared with you appear); choose Shared Space only if your NAS has the shared team library enabled. Tip: use a dedicated Photos account rather than an admin login.",
         "data": {
           "synology_url": "DSM URL",
           "synology_username": "Username",
@@ -136,6 +136,7 @@
       "icloud_cannot_connect": "Could not reach that album. Check the link is a current public share.",
       "synology_cannot_connect": "Could not connect to Synology. Check the URL, username and password.",
       "synology_otp_required": "This account needs a two-factor code. Enter a current 6-digit code to continue.",
+      "synology_shared_unavailable": "Could not access the Shared Space. Enable Shared Space in Synology Photos and make sure this account has access to it, or choose Personal instead.",
       "nextcloud_cannot_connect": "Could not connect to Nextcloud. Check the URL, username, app password and folder path."
     }
   },

@@ -67,6 +67,15 @@ class SynologyAuthError(Exception):
     """Raised when login fails for a non-OTP reason (bad creds, host, etc.)."""
 
 
+class SynologyPermissionError(Exception):
+    """Raised when the account cannot access the requested space.
+
+    Most commonly this is the Shared Space (``SYNO.FotoTeam``) returning error
+    801 because the Shared Space feature is not enabled on the NAS or the
+    account has not been granted access to it.
+    """
+
+
 def normalize_base_url(url: str) -> str:
     """Strip trailing slashes and a trailing ``/webapi/entry.cgi`` from a URL."""
     u = (url or "").strip().rstrip("/")
@@ -306,14 +315,21 @@ class SynologyClient:
         self._sid = None
 
     async def async_list_albums(self) -> list[dict[str, Any]]:
-        """List albums in the active space. Returns [] if none / no access."""
-        ns = namespace(self.space)
+        """List the account's albums, including albums shared with it.
+
+        Albums are a Personal-space concept in Synology Photos - there is no
+        ``SYNO.FotoTeam.Browse.Album`` API, so albums are always listed via
+        ``SYNO.Foto.Browse.Album`` regardless of the configured space. The
+        Shared Space is a flat library with no albums of its own. Each returned
+        album carries a ``shared`` flag so callers can mark albums that were
+        shared with this account. Returns [] if none / no access.
+        """
         out: list[dict[str, Any]] = []
         offset = 0
         while True:
             data = await self._get(
                 {
-                    "api": f"{ns}.Browse.Album",
+                    "api": "SYNO.Foto.Browse.Album",
                     "version": "2",
                     "method": "list",
                     "offset": offset,
@@ -335,8 +351,22 @@ class SynologyClient:
     async def async_collect_assets(
         self, album_id: Any = None
     ) -> list[dict[str, Any]]:
-        """List photo items in the active space, optionally scoped to an album."""
-        ns = namespace(self.space)
+        """List photo items, optionally scoped to an album.
+
+        - An ``album_id`` always resolves through ``SYNO.Foto.Browse.Item``
+          (albums live in the Personal space, even shared-with-me ones).
+        - Otherwise the whole space is listed: ``SYNO.Foto.Browse.Item`` for
+          the Personal space, ``SYNO.FotoTeam.Browse.Item`` for the Shared
+          Space.
+
+        Raises :class:`SynologyPermissionError` when the Shared Space is not
+        accessible (error 801), so callers can show a clear message instead of
+        a misleading "no images found".
+        """
+        if album_id:
+            api = "SYNO.Foto.Browse.Item"
+        else:
+            api = f"{namespace(self.space)}.Browse.Item"
         additional = json.dumps(
             ["thumbnail", "resolution", "gps", "address", "description"]
         )
@@ -344,7 +374,7 @@ class SynologyClient:
         offset = 0
         while True:
             params: dict[str, Any] = {
-                "api": f"{ns}.Browse.Item",
+                "api": api,
                 "version": "1",
                 "method": "list",
                 "offset": offset,
@@ -356,8 +386,14 @@ class SynologyClient:
                 params["album_id"] = album_id
             data = await self._get(params)
             if not data.get("success"):
+                err = data.get("error") or {}
+                if err.get("code") in (801, 105, 119):
+                    raise SynologyPermissionError(
+                        "Synology Shared Space is not enabled or this account "
+                        f"cannot access it (error {err.get('code')})."
+                    )
                 raise SynologyAuthError(
-                    f"Synology item list failed: {data.get('error')}"
+                    f"Synology item list failed: {err}"
                 )
             lst = (data.get("data") or {}).get("list") or []
             items.extend(x for x in lst if is_image(x))

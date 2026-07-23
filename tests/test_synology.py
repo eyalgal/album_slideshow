@@ -171,3 +171,75 @@ def test_is_otp_error_via_token_payload():
 def test_is_otp_error_false_for_plain_failure():
     assert syn._is_otp_error({"code": 400}) is False
     assert syn._is_otp_error(None) is False
+
+
+# ── async_collect_assets: API selection + permission errors ────────────────
+
+import asyncio
+
+
+def _client_with_responses(responses):
+    """Build a client whose ``_get`` returns queued responses and records calls."""
+    c = syn.SynologyClient(None, "http://nas:5000", "u", "p", space=syn.SPACE_PERSONAL)
+    c._sid = "SID"
+    calls = []
+
+    async def fake_get(params):
+        calls.append(params)
+        return responses.pop(0)
+
+    c._get = fake_get  # type: ignore[assignment]
+    return c, calls
+
+
+def test_collect_assets_all_personal_uses_foto_item_api():
+    c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
+    asyncio.run(c.async_collect_assets(None))
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Item"
+    assert "album_id" not in calls[0]
+
+
+def test_collect_assets_all_shared_uses_fototeam_item_api():
+    c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
+    c.space = syn.SPACE_SHARED
+    asyncio.run(c.async_collect_assets(None))
+    assert calls[0]["api"] == "SYNO.FotoTeam.Browse.Item"
+
+
+def test_collect_assets_album_always_uses_foto_item_api_even_in_shared():
+    c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
+    c.space = syn.SPACE_SHARED
+    asyncio.run(c.async_collect_assets(5))
+    # Albums live in the personal space, so an album id must use SYNO.Foto.
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Item"
+    assert calls[0]["album_id"] == 5
+
+
+def test_collect_assets_permission_error_raises_specific_exception():
+    c, _ = _client_with_responses([{"success": False, "error": {"code": 801}}])
+    c.space = syn.SPACE_SHARED
+    try:
+        asyncio.run(c.async_collect_assets(None))
+    except syn.SynologyPermissionError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected SynologyPermissionError")
+
+
+def test_collect_assets_other_error_raises_auth_error():
+    c, _ = _client_with_responses([{"success": False, "error": {"code": 400}}])
+    try:
+        asyncio.run(c.async_collect_assets(None))
+    except syn.SynologyAuthError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected SynologyAuthError")
+
+
+def test_list_albums_always_uses_foto_album_api():
+    c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
+    c.space = syn.SPACE_SHARED
+    asyncio.run(c.async_list_albums())
+    # There is no SYNO.FotoTeam.Browse.Album; albums always come from SYNO.Foto.
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Album"
+
