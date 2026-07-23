@@ -107,7 +107,7 @@
       },
       "nextcloud": {
         "title": "Nextcloud folder",
-        "description": "Connect to a folder in your Nextcloud files over WebDAV. Enter the server address (e.g. https://cloud.example.com), your username, and an app password (create one under Settings > Security > Devices and sessions - not your main login password). Point it at a folder path (e.g. Photos/Family), or leave the folder blank for your whole files root. Turn on recursive to include subfolders.",
+        "description": "Connect to a folder in your Nextcloud files over WebDAV. Enter the server address (e.g. http://192.168.1.10, or your Nextcloud domain over HTTPS), your username, and an app password (create one under Settings > Security > Devices and sessions - not your main login password). Point it at a folder path (e.g. Photos/Family), or leave the folder blank for your whole files root. Turn on recursive to include subfolders.",
         "data": {
           "album_name": "Album name",
           "nextcloud_url": "Server URL",
