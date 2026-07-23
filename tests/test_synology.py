@@ -236,10 +236,57 @@ def test_collect_assets_other_error_raises_auth_error():
         raise AssertionError("expected SynologyAuthError")
 
 
-def test_list_albums_always_uses_foto_album_api():
+def test_list_albums_queries_own_then_shared_with_me():
+    # Own albums come from SYNO.Foto.Browse.Album; shared-with-me albums come
+    # from SYNO.Foto.Sharing.Misc and are merged in with their passphrase.
+    c, calls = _client_with_responses([
+        {"success": True, "data": {"list": [
+            {"id": 1, "name": "Mine", "shared": False},
+        ]}},
+        {"success": True, "data": {"list": [
+            {"id": 2, "name": "backyard", "passphrase": "vTaz7kAka"},
+        ]}},
+    ])
+    c.space = syn.SPACE_SHARED
+    albums = asyncio.run(c.async_list_albums())
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Album"
+    assert calls[1]["api"] == "SYNO.Foto.Sharing.Misc"
+    assert calls[1]["method"] == "list_shared_with_me_album"
+    names = {a["name"]: a for a in albums}
+    assert names["Mine"].get("shared") is not True
+    assert names["backyard"]["shared"] is True
+    assert names["backyard"]["passphrase"] == "vTaz7kAka"
+
+
+def test_list_albums_drops_shared_without_passphrase():
+    c, _ = _client_with_responses([
+        {"success": True, "data": {"list": []}},
+        {"success": True, "data": {"list": [
+            {"id": 9, "name": "no-pass"},  # missing passphrase -> skipped
+        ]}},
+    ])
+    albums = asyncio.run(c.async_list_albums())
+    assert albums == []
+
+
+def test_collect_assets_passphrase_uses_foto_item_with_passphrase():
     c, calls = _client_with_responses([{"success": True, "data": {"list": []}}])
     c.space = syn.SPACE_SHARED
-    asyncio.run(c.async_list_albums())
-    # There is no SYNO.FotoTeam.Browse.Album; albums always come from SYNO.Foto.
-    assert calls[0]["api"] == "SYNO.Foto.Browse.Album"
+    asyncio.run(c.async_collect_assets(None, passphrase="vTaz7kAka"))
+    assert calls[0]["api"] == "SYNO.Foto.Browse.Item"
+    assert calls[0]["passphrase"] == "vTaz7kAka"
+    assert "album_id" not in calls[0]
+
+
+def test_build_thumbnail_url_includes_passphrase():
+    url = syn.build_thumbnail_url(
+        "http://nas:5000", 43, "43_1", "xl", syn.SPACE_PERSONAL, passphrase="vTaz7kAka"
+    )
+    assert "passphrase=vTaz7kAka" in url
+
+
+def test_build_thumbnail_url_no_passphrase_by_default():
+    url = syn.build_thumbnail_url("http://nas:5000", 43, "43_1", "xl")
+    assert "passphrase" not in url
+
 

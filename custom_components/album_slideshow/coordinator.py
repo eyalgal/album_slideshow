@@ -51,6 +51,7 @@ from .const import (
     CONF_SYNOLOGY_SPACE,
     CONF_SYNOLOGY_ALBUM_ID,
     CONF_SYNOLOGY_IMAGE_SIZE,
+    CONF_SYNOLOGY_PASSPHRASE,
     DEFAULT_SYNOLOGY_IMAGE_SIZE,
     SYNOLOGY_SPACE_PERSONAL,
     CONF_NEXTCLOUD_URL,
@@ -1595,6 +1596,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         device_id = self.entry.data.get(CONF_SYNOLOGY_DEVICE_ID)
         space = self.entry.data.get(CONF_SYNOLOGY_SPACE, SYNOLOGY_SPACE_PERSONAL)
         album_id = self.entry.data.get(CONF_SYNOLOGY_ALBUM_ID)
+        passphrase = self.entry.data.get(CONF_SYNOLOGY_PASSPHRASE)
         size = self.entry.data.get(
             CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
         )
@@ -1611,7 +1613,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         )
         try:
             await client.async_login()
-            photos = await client.async_collect_assets(album_id or None)
+            photos = await client.async_collect_assets(
+                album_id or None, passphrase=passphrase or None
+            )
         except syn_api.SynologyPermissionError as err:
             raise UpdateFailed(str(err)) from err
         except Exception as err:
@@ -1636,7 +1640,12 @@ class AlbumCoordinator(DataUpdateCoordinator):
             items.append(
                 MediaItem(
                     url=syn_api.build_thumbnail_url(
-                        client.base_url, unit_id, cache_key, size, space
+                        client.base_url,
+                        unit_id,
+                        cache_key,
+                        size,
+                        space,
+                        passphrase=passphrase or None,
                     ),
                     width=meta.get("width"),
                     height=meta.get("height"),

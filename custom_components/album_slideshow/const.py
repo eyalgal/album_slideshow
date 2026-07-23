@@ -92,6 +92,10 @@ CONF_SYNOLOGY_DEVICE_ID = "synology_device_id"
 CONF_SYNOLOGY_SPACE = "synology_space"
 CONF_SYNOLOGY_ALBUM_ID = "synology_album_id"
 CONF_SYNOLOGY_IMAGE_SIZE = "synology_image_size"
+# Passphrase for an album that was shared with the configured account. Present
+# only when the chosen source is a shared-with-me album; such albums are
+# reachable by passphrase rather than by album id.
+CONF_SYNOLOGY_PASSPHRASE = "synology_passphrase"
 
 # Personal ("My Photos") vs shared ("Shared Space") library.
 SYNOLOGY_SPACE_PERSONAL = "personal"

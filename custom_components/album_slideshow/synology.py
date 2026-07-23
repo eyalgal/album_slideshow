@@ -101,6 +101,7 @@ def build_thumbnail_url(
     cache_key: Any,
     size: str,
     space: str = SPACE_PERSONAL,
+    passphrase: str | None = None,
 ) -> str:
     """Build the thumbnail ``entry.cgi`` URL for a photo unit.
 
@@ -108,6 +109,10 @@ def build_thumbnail_url(
     JSON-encoded (wrapped in literal double quotes): ``type="unit"``,
     ``size="xl"``, ``cache_key="<id>_<ts>"``. The SID is not in the URL; the
     caller supplies it via the session cookie header (see ``image_headers``).
+
+    For an album that was shared with the account, the owning user's files are
+    only reachable with the album's ``passphrase``; without it the thumbnail
+    handler returns 404.
     """
     params = {
         "api": f"{namespace(space)}.Thumbnail",
@@ -118,6 +123,8 @@ def build_thumbnail_url(
         "type": json.dumps("unit"),
         "size": json.dumps(size if size in THUMB_SIZE_OPTIONS else DEFAULT_THUMB_SIZE),
     }
+    if passphrase:
+        params["passphrase"] = passphrase
     return f"{api_url(base_url)}?{urlencode(params)}"
 
 
@@ -315,16 +322,24 @@ class SynologyClient:
         self._sid = None
 
     async def async_list_albums(self) -> list[dict[str, Any]]:
-        """List the account's albums, including albums shared with it.
+        """List the account's own albums plus albums shared with it.
 
         Albums are a Personal-space concept in Synology Photos - there is no
         ``SYNO.FotoTeam.Browse.Album`` API, so albums are always listed via
         ``SYNO.Foto.Browse.Album`` regardless of the configured space. The
-        Shared Space is a flat library with no albums of its own. Each returned
-        album carries a ``shared`` flag so callers can mark albums that were
-        shared with this account. Returns [] if none / no access.
+        Shared Space is a flat library with no albums of its own.
+
+        Albums that another user shared with this account do NOT appear in
+        ``SYNO.Foto.Browse.Album``; they come from a separate sharing API
+        (``SYNO.Foto.Sharing.Misc`` / ``list_shared_with_me_album``) and their
+        photos are reachable only via the album's ``passphrase`` (not its id).
+        Both kinds are merged here; shared-with-me albums keep their non-empty
+        ``passphrase`` and ``shared`` flag so callers can fetch them correctly.
+        Returns [] if none / no access.
         """
         out: list[dict[str, Any]] = []
+
+        # 1) The account's own albums.
         offset = 0
         while True:
             data = await self._get(
@@ -346,15 +361,45 @@ class SynologyClient:
             offset += len(lst)
             if offset >= _MAX_ASSETS:
                 break
+
+        # 2) Albums shared with this account (separate API, passphrase-based).
+        offset = 0
+        while True:
+            data = await self._get(
+                {
+                    "api": "SYNO.Foto.Sharing.Misc",
+                    "version": "2",
+                    "method": "list_shared_with_me_album",
+                    "offset": offset,
+                    "limit": 100,
+                    "_sid": self._sid,
+                }
+            )
+            if not data.get("success"):
+                break
+            lst = (data.get("data") or {}).get("list") or []
+            for a in lst:
+                if a.get("id") is None or not a.get("passphrase"):
+                    continue
+                a["shared"] = True
+                out.append(a)
+            if len(lst) < 100:
+                break
+            offset += len(lst)
+            if offset >= _MAX_ASSETS:
+                break
+
         return out
 
     async def async_collect_assets(
-        self, album_id: Any = None
+        self, album_id: Any = None, passphrase: str | None = None
     ) -> list[dict[str, Any]]:
         """List photo items, optionally scoped to an album.
 
-        - An ``album_id`` always resolves through ``SYNO.Foto.Browse.Item``
-          (albums live in the Personal space, even shared-with-me ones).
+        - A ``passphrase`` (album shared with this account) lists that album's
+          photos via ``SYNO.Foto.Browse.Item`` + ``passphrase`` - the owning
+          user's files are not reachable by ``album_id`` (error 609).
+        - An ``album_id`` (own album) resolves through ``SYNO.Foto.Browse.Item``.
         - Otherwise the whole space is listed: ``SYNO.Foto.Browse.Item`` for
           the Personal space, ``SYNO.FotoTeam.Browse.Item`` for the Shared
           Space.
@@ -363,7 +408,7 @@ class SynologyClient:
         accessible (error 801), so callers can show a clear message instead of
         a misleading "no images found".
         """
-        if album_id:
+        if passphrase or album_id:
             api = "SYNO.Foto.Browse.Item"
         else:
             api = f"{namespace(self.space)}.Browse.Item"
@@ -382,7 +427,9 @@ class SynologyClient:
                 "additional": additional,
                 "_sid": self._sid,
             }
-            if album_id:
+            if passphrase:
+                params["passphrase"] = passphrase
+            elif album_id:
                 params["album_id"] = album_id
             data = await self._get(params)
             if not data.get("success"):

@@ -61,6 +61,7 @@ from .const import (
     CONF_SYNOLOGY_SPACE,
     CONF_SYNOLOGY_ALBUM_ID,
     CONF_SYNOLOGY_IMAGE_SIZE,
+    CONF_SYNOLOGY_PASSPHRASE,
     DEFAULT_SYNOLOGY_IMAGE_SIZE,
     SYNOLOGY_SPACE_PERSONAL,
     SYNOLOGY_SPACE_SHARED,
@@ -139,6 +140,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._syn_device_id: str | None = None
         self._syn_space: str = SYNOLOGY_SPACE_PERSONAL
         self._syn_albums: dict[str, str] = {}
+        # option key -> {"album_id": id|None, "passphrase": str|None}
+        self._syn_album_meta: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     @callback
@@ -737,15 +740,22 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # A trusted-device token is captured only on the OTP login;
                 # store it so future logins skip the 2FA prompt.
                 self._syn_device_id = client.captured_device_id
-                self._syn_albums = {
-                    str(a["id"]): (
-                        f"{a.get('name') or a['id']} (shared)"
-                        if a.get("shared")
-                        else (a.get("name") or str(a["id"]))
-                    )
-                    for a in albums
-                    if a.get("id") is not None
-                }
+                # Key each album by a synthetic value so an own album and a
+                # shared-with-me album that happen to share a numeric id don't
+                # collide. Track album_id + passphrase per option.
+                self._syn_albums = {}
+                self._syn_album_meta = {}
+                for a in albums:
+                    if a.get("id") is None:
+                        continue
+                    shared = bool(a.get("shared"))
+                    key = f"{'shared' if shared else 'own'}:{a['id']}"
+                    label = a.get("name") or str(a["id"])
+                    self._syn_albums[key] = f"{label} (shared)" if shared else label
+                    self._syn_album_meta[key] = {
+                        "album_id": None if shared else a["id"],
+                        "passphrase": a.get("passphrase") if shared else None,
+                    }
                 await client.async_logout()
                 return await self.async_step_synology_select()
 
@@ -782,13 +792,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             size = user_input.get(
                 CONF_SYNOLOGY_IMAGE_SIZE, DEFAULT_SYNOLOGY_IMAGE_SIZE
             )
-            album_id = user_input.get("album")
-            if album_id in (None, "", "__all__") or album_id not in self._syn_albums:
-                album_id = ""
+            choice = user_input.get("album")
+            if choice in (None, "", "__all__") or choice not in self._syn_albums:
+                choice = None
+            meta = self._syn_album_meta.get(choice) if choice else None
+            album_id = meta.get("album_id") if meta else None
+            passphrase = meta.get("passphrase") if meta else None
 
             unique = (
                 f"{DOMAIN}:{PROVIDER_SYNOLOGY}:{self._syn_url}:"
-                f"{self._syn_space}:{album_id or 'all'}"
+                f"{self._syn_space}:{choice or 'all'}"
             )
             await self.async_set_unique_id(unique)
             self._abort_if_unique_id_configured()
@@ -803,6 +816,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
             if album_id:
                 data[CONF_SYNOLOGY_ALBUM_ID] = album_id
+            if passphrase:
+                data[CONF_SYNOLOGY_PASSPHRASE] = passphrase
             if self._syn_device_id:
                 data[CONF_SYNOLOGY_DEVICE_ID] = self._syn_device_id
             return self.async_create_entry(title=name, data=data)
