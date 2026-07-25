@@ -725,26 +725,35 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.async_login(otp_code=otp or None)
-                # Albums and category browsing live only in the Personal space
-                # (there is no Shared Space album/category API). For the Shared
-                # Space, validate access up front so a permission problem
-                # surfaces here, not later.
-                if space == SYNOLOGY_SPACE_SHARED:
-                    albums = people = places = tags = subjects = []
-                    await client.async_collect_assets(None)
-                else:
-                    albums = await client.async_list_albums()
-                    people = await client.async_list_people()
-                    places = await client.async_list_places()
-                    tags = await client.async_list_tags()
-                    subjects = await client.async_list_subjects()
             except syn_api.SynologyOtpRequired:
                 errors["otp_code"] = "synology_otp_required"
-            except syn_api.SynologyPermissionError:
-                errors["base"] = "synology_shared_unavailable"
             except Exception:  # noqa: BLE001 - any failure means bad URL/creds
                 errors["base"] = "synology_cannot_connect"
-            else:
+
+            if not errors:
+                # Login worked, so the URL and credentials are fine. Albums and
+                # category browsing live only in the Personal space (there is no
+                # Shared Space album/category API). For the Shared Space we just
+                # validate access up front; any failure here means the Shared
+                # Space is not enabled or this account cannot reach it, not a
+                # credentials problem.
+                try:
+                    if space == SYNOLOGY_SPACE_SHARED:
+                        albums = people = places = tags = subjects = []
+                        await client.async_collect_assets(None)
+                    else:
+                        albums = await client.async_list_albums()
+                        people = await client.async_list_people()
+                        places = await client.async_list_places()
+                        tags = await client.async_list_tags()
+                        subjects = await client.async_list_subjects()
+                except Exception:  # noqa: BLE001
+                    if space == SYNOLOGY_SPACE_SHARED:
+                        errors["base"] = "synology_shared_unavailable"
+                    else:
+                        errors["base"] = "synology_cannot_connect"
+
+            if not errors:
                 self._syn_url = client.base_url
                 self._syn_username = username
                 self._syn_password = password
