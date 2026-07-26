@@ -113,10 +113,44 @@ def test_is_image_false_for_video():
 
 
 def test_is_image_true_for_live_photo():
-    # iPhone Live Photos come back as type "live_photo" and have a still
-    # thumbnail; they should be shown, not filtered out.
-    live = {"type": "live_photo", "additional": {"thumbnail": {"cache_key": "x_1"}}}
+    # iPhone Live Photos come back as type "live" and have a still thumbnail;
+    # they should be shown, not filtered out.
+    live = {"type": "live", "additional": {"thumbnail": {"cache_key": "x_1"}}}
     assert syn.is_image(live) is True
+
+
+def test_is_image_false_when_thumbnail_not_generated():
+    # HEIC/HEVC items whose thumbnail could not be generated (ame_defect /
+    # broken) must be skipped so the slideshow never loads a 404 image.
+    defect = {
+        "type": "live",
+        "additional": {
+            "thumbnail": {
+                "cache_key": "9_1",
+                "sm": "ame_defect",
+                "m": "ame_defect",
+                "xl": "ame_defect",
+                "preview": "broken",
+            }
+        },
+    }
+    assert syn.is_image(defect) is False
+
+
+def test_is_image_true_when_any_size_ready():
+    partial = {
+        "type": "photo",
+        "additional": {
+            "thumbnail": {
+                "cache_key": "9_1",
+                "sm": "ready",
+                "m": "broken",
+                "xl": "broken",
+            }
+        },
+    }
+    assert syn.is_image(partial) is True
+
 
 
 def test_is_image_false_without_thumbnail():

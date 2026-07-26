@@ -151,18 +151,32 @@ def location_label(address: Any) -> str | None:
 
 
 def is_image(item: Any) -> bool:
-    """True for items that render as a still image (skip videos).
+    """True for items that render as a still image with a usable thumbnail.
 
-    Synology types include ``photo`` and ``live_photo`` (an iPhone Live Photo:
-    a still image plus a short motion clip). Both have a normal still thumbnail,
-    so both are shown; ``video`` items are skipped.
+    Synology types include ``photo`` and ``live`` (an iPhone Live Photo: a still
+    image plus a short motion clip). Both have a normal still thumbnail, so both
+    are shown; plain ``video`` items are skipped. ``live_photo`` is accepted too
+    as a defensive alias in case some DSM versions use it.
+
+    Items whose thumbnail has not been generated are skipped so the slideshow
+    never tries to load a broken image. Synology reports a per-size status
+    (``ready`` / ``broken`` / ``ame_defect`` - the last means the Advanced Media
+    Extensions could not decode the file, common for HEIC/HEVC when the codec
+    pack is missing); an item is only usable if at least one of the ``sm`` /
+    ``m`` / ``xl`` sizes is ``ready``. If no per-size status is present (older
+    DSM), fall back to requiring a ``cache_key``.
     """
     if not isinstance(item, dict):
         return False
-    if str(item.get("type", "photo")).lower() not in ("photo", "live_photo"):
+    if str(item.get("type", "photo")).lower() not in ("photo", "live", "live_photo"):
         return False
     thumb = (item.get("additional") or {}).get("thumbnail")
-    return isinstance(thumb, dict) and bool(thumb.get("cache_key"))
+    if not isinstance(thumb, dict) or not thumb.get("cache_key"):
+        return False
+    statuses = [thumb.get(size) for size in ("sm", "m", "xl") if size in thumb]
+    if statuses:
+        return any(s == "ready" for s in statuses)
+    return True
 
 
 def thumbnail_ref(item: dict[str, Any]) -> tuple[Any, Any] | None:
