@@ -151,10 +151,15 @@ def location_label(address: Any) -> str | None:
 
 
 def is_image(item: Any) -> bool:
-    """True for photo items that render as a still image (skip videos)."""
+    """True for items that render as a still image (skip videos).
+
+    Synology types include ``photo`` and ``live_photo`` (an iPhone Live Photo:
+    a still image plus a short motion clip). Both have a normal still thumbnail,
+    so both are shown; ``video`` items are skipped.
+    """
     if not isinstance(item, dict):
         return False
-    if str(item.get("type", "photo")).lower() != "photo":
+    if str(item.get("type", "photo")).lower() not in ("photo", "live_photo"):
         return False
     thumb = (item.get("additional") or {}).get("thumbnail")
     return isinstance(thumb, dict) and bool(thumb.get("cache_key"))

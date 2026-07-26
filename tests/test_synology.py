@@ -112,6 +112,13 @@ def test_is_image_false_for_video():
     assert syn.is_image(video) is False
 
 
+def test_is_image_true_for_live_photo():
+    # iPhone Live Photos come back as type "live_photo" and have a still
+    # thumbnail; they should be shown, not filtered out.
+    live = {"type": "live_photo", "additional": {"thumbnail": {"cache_key": "x_1"}}}
+    assert syn.is_image(live) is True
+
+
 def test_is_image_false_without_thumbnail():
     assert syn.is_image({"type": "photo", "additional": {}}) is False
 
