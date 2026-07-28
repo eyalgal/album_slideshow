@@ -219,7 +219,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not ALBUM_URL_RE.match(url):
                 errors[CONF_ALBUM_URL] = "invalid_album_url"
             else:
-                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_GOOGLE_SHARED}:{url}")
+                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_GOOGLE_SHARED}:{url}:{name}")
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=name,
@@ -249,7 +249,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not path:
                 errors[CONF_LOCAL_PATH] = "invalid_path"
             else:
-                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_LOCAL_FOLDER}:{path}")
+                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_LOCAL_FOLDER}:{path}:{name}")
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=name,
@@ -283,7 +283,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[CONF_MEDIA_CONTENT_ID] = "invalid_media_source"
             else:
                 await self.async_set_unique_id(
-                    f"{DOMAIN}:{PROVIDER_MEDIA_SOURCE}:{content_id}"
+                    f"{DOMAIN}:{PROVIDER_MEDIA_SOURCE}:{content_id}:{name}"
                 )
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
@@ -395,7 +395,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 sel_id = json.dumps(selection, sort_keys=True)
                 unique = (
                     f"{DOMAIN}:{PROVIDER_IMMICH}:{self._immich_url}:"
-                    f"composite:{sel_id}:{raw_filter}"
+                    f"composite:{sel_id}:{raw_filter}:{name}"
                 )
                 await self.async_set_unique_id(unique)
                 self._abort_if_unique_id_configured()
@@ -574,7 +574,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             sel_id = json.dumps(selection, sort_keys=True)
             unique = (
                 f"{DOMAIN}:{PROVIDER_PHOTOPRISM}:{self._pp_url}:"
-                f"composite:{sel_id}:{raw_filter}"
+                f"composite:{sel_id}:{raw_filter}:{name}"
             )
             await self.async_set_unique_id(unique)
             self._abort_if_unique_id_configured()
@@ -670,7 +670,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "icloud_cannot_connect"
                 else:
                     await self.async_set_unique_id(
-                        f"{DOMAIN}:{PROVIDER_ICLOUD}:{token}"
+                        f"{DOMAIN}:{PROVIDER_ICLOUD}:{token}:{name}"
                     )
                     self._abort_if_unique_id_configured()
                     return self.async_create_entry(
@@ -866,7 +866,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             sel_id = json.dumps(selection, sort_keys=True)
             unique = (
                 f"{DOMAIN}:{PROVIDER_SYNOLOGY}:{self._syn_url}:"
-                f"{self._syn_space}:{sel_id}"
+                f"{self._syn_space}:{sel_id}:{name}"
             )
             await self.async_set_unique_id(unique)
             self._abort_if_unique_id_configured()
@@ -957,7 +957,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 await self.async_set_unique_id(
                     f"{DOMAIN}:{PROVIDER_NEXTCLOUD}:{client.base_url}:"
-                    f"{username}:{client.folder}"
+                    f"{username}:{client.folder}:{name}"
                 )
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
