@@ -129,6 +129,17 @@ CONF_ICLOUD_URL = "icloud_url"
 CONF_ICLOUD_TOKEN = "icloud_token"
 CONF_ICLOUD_IMAGE_SIZE = "icloud_image_size"
 
+# Which iCloud backend serves the album. Older share links
+# (``www.icloud.com/sharedalbum/#TOKEN``) use the legacy "shared streams" web
+# API; iOS 26/macOS 26 and newer links
+# (``photos.icloud.com/shared/album/TOKEN``) use CloudKit Web Services. Both are
+# public and need no account. Entries created before this option existed default
+# to the legacy backend.
+CONF_ICLOUD_BACKEND = "icloud_backend"
+ICLOUD_BACKEND_SHAREDSTREAMS = "sharedstreams"
+ICLOUD_BACKEND_CLOUDKIT = "cloudkit"
+DEFAULT_ICLOUD_BACKEND = ICLOUD_BACKEND_SHAREDSTREAMS
+
 # ``full`` picks the largest derivative Apple generated (best for a slideshow,
 # usually ~2048px); ``preview`` picks the smallest (a thumbnail; fastest).
 ICLOUD_IMAGE_FULL = "full"

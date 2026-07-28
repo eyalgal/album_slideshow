@@ -52,6 +52,7 @@ from .const import (
     CONF_ICLOUD_TOKEN,
     CONF_ICLOUD_IMAGE_SIZE,
     DEFAULT_ICLOUD_IMAGE_SIZE,
+    CONF_ICLOUD_BACKEND,
     ICLOUD_IMAGE_FULL,
     ICLOUD_IMAGE_PREVIEW,
     CONF_SYNOLOGY_URL,
@@ -659,11 +660,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             from . import icloud as icloud_api
 
-            token = icloud_api.parse_share_link(raw_url)
-            if not token:
+            parsed = icloud_api.parse_share(raw_url)
+            if not parsed:
                 errors[CONF_ICLOUD_URL] = "invalid_icloud_url"
             else:
-                client = icloud_api.IcloudClient(self.hass, token)
+                token, backend = parsed
+                if backend == icloud_api.BACKEND_CLOUDKIT:
+                    client = icloud_api.IcloudCloudKitClient(self.hass, token)
+                else:
+                    client = icloud_api.IcloudClient(self.hass, token)
                 try:
                     await client.async_validate()
                 except Exception:  # noqa: BLE001 - any failure means bad/expired link
@@ -678,6 +683,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data={
                             CONF_PROVIDER: PROVIDER_ICLOUD,
                             CONF_ICLOUD_TOKEN: token,
+                            CONF_ICLOUD_BACKEND: backend,
                             CONF_ICLOUD_IMAGE_SIZE: size,
                             CONF_ALBUM_NAME: name,
                         },

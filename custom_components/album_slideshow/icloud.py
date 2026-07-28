@@ -1,11 +1,11 @@
 """iCloud Shared Album client and pure parsing helpers.
 
-Talks to Apple's public "shared streams" web API for a shared photo album -
-the same undocumented JSON endpoints the iCloud web album viewer uses. No
-account or password is involved; the album's share token (the part after
-``#`` in the share link) is the only credential.
+Reads a public iCloud shared photo album. No account or password is involved;
+the album's share token (from the share link) is the only credential. Apple
+serves shared albums through two different public backends depending on when
+the album was created, and this module speaks both:
 
-API shape (POST, ``Content-Type: text/plain``, ``Origin: https://www.icloud.com``):
+Legacy "shared streams" backend (``www.icloud.com/sharedalbum/#TOKEN``):
 - ``POST {base}/webstream`` ``{"streamCtag": null}`` -> ``{streamName, photos:
     [{photoGuid, derivatives:{<height>:{checksum,width,height,fileSize}},
     dateCreated, caption, width, height}]}``. May first answer with a
@@ -16,13 +16,24 @@ API shape (POST, ``Content-Type: text/plain``, ``Origin: https://www.icloud.com`
     as ``https://{url_location}{url_path}``; it is a signed CDN link that
     expires after roughly a day, so it is refreshed on every album refresh.
 
-Metadata: capture date (``dateCreated``) and caption are inline. Apple strips
-GPS from shared-album web data, so there is no location.
+CloudKit backend (``photos.icloud.com/shared/album/TOKEN``, iOS 26/macOS 26+):
+- ``POST ckdatabasews.icloud.com/.../public/records/resolve?shortGUID=TOKEN``
+    resolves the short link to a shared CloudKit zone and hands back an
+    anonymous ``publicAccessAuthToken`` plus the partition host to talk to.
+- ``POST {partition}/.../shared/records/query`` with the anonymous token and
+    ``sharing_url_key`` returns ``CPLMaster``/``CPLAsset`` records; each
+    ``CPLMaster`` carries signed ``downloadURL`` derivatives directly.
+
+Both backends are POST with ``Content-Type: text/plain`` and
+``Origin: https://www.icloud.com``. Metadata (capture date, caption) is inline;
+Apple strips GPS from shared-album web data, so there is no location.
 """
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import async_timeout
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -35,12 +46,49 @@ _URL_BATCH = 25
 
 _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
+# Which iCloud backend serves an album. These string values match the
+# ``ICLOUD_BACKEND_*`` constants in ``const.py``; they are duplicated here to
+# keep this module free of a hard dependency on ``const``.
+BACKEND_SHAREDSTREAMS = "sharedstreams"
+BACKEND_CLOUDKIT = "cloudkit"
+
 # Headers Apple's web endpoints expect for the shared-streams API.
 _API_HEADERS = {
     "Content-Type": "text/plain",
     "Origin": "https://www.icloud.com",
     "Accept": "application/json",
 }
+
+# --- CloudKit backend constants -------------------------------------------
+_CK_RESOLVE_HOST = "https://ckdatabasews.icloud.com"
+_CK_CONTAINER = "com.apple.photos.cloud"
+_CK_BUILD = "2626"
+# Sorted, non-hidden, non-deleted assets. Returns both CPLMaster (image
+# resources) and CPLAsset (metadata) records in one query.
+_CK_RECORD_TYPE = "CPLAssetAndMasterByAssetDateWithoutHiddenOrDeleted"
+_CK_PAGE = 200
+
+_CK_HEADERS = {
+    "Content-Type": "text/plain",
+    "Origin": "https://www.icloud.com",
+    "Referer": "https://www.icloud.com/",
+    "Accept": "application/json",
+}
+
+# Image resource fields on a CPLMaster, in ascending size order, paired with
+# their width/height sibling fields.
+_CK_IMAGE_RES = (
+    ("resJPEGThumbRes", "resJPEGThumbWidth", "resJPEGThumbHeight"),
+    ("resJPEGMedRes", "resJPEGMedWidth", "resJPEGMedHeight"),
+    ("resJPEGLargeRes", "resJPEGLargeWidth", "resJPEGLargeHeight"),
+    ("resOriginalRes", "resOriginalWidth", "resOriginalHeight"),
+)
+# Original item types a browser can display directly. The JPEG derivatives are
+# always browser-safe; the original is only used as a fallback when it is one
+# of these.
+_CK_BROWSER_SAFE_ORIGINAL = {"public.jpeg", "public.png"}
+# itemType substrings that mark a master as a video (skipped in a slideshow).
+_CK_VIDEO_HINTS = ("movie", "video", "mpeg-4", "quicktime")
 
 
 def _base62_to_int(value: str) -> int:
@@ -53,21 +101,49 @@ def _base62_to_int(value: str) -> int:
 def parse_share_link(url: str) -> str | None:
     """Extract the album share token from a pasted iCloud link.
 
-    Accepts a full ``https://www.icloud.com/sharedalbum/#TOKEN`` link or a
-    bare token. Returns ``None`` if nothing token-like is found.
+    Accepts a legacy ``https://www.icloud.com/sharedalbum/#TOKEN`` link, a new
+    ``https://photos.icloud.com/shared/album/TOKEN`` link, or a bare token.
+    Returns ``None`` if nothing token-like is found.
     """
     if not url:
         return None
     text = url.strip()
+    # Legacy links carry the token in the fragment; new links carry it as the
+    # last path segment.
     if "#" in text:
         text = text.rsplit("#", 1)[1]
     elif "/" in text:
         text = text.rstrip("/").rsplit("/", 1)[1]
-    # Tokens are base62 and start with an uppercase letter (A, B, ...).
+    # Drop any leftover query string.
+    text = text.split("?", 1)[0]
     token = text.strip()
+    # Tokens are base62. Legacy tokens start with an uppercase letter; the new
+    # CloudKit short GUIDs may start with a digit, so no leading-char check.
     if token and all(ch in _BASE62 for ch in token):
         return token
     return None
+
+
+def detect_backend(url: str) -> str:
+    """Return which iCloud backend a pasted share link belongs to.
+
+    New ``photos.icloud.com/shared/album/...`` links use the CloudKit backend;
+    everything else (including bare tokens) defaults to the legacy shared
+    streams backend, preserving behaviour for links created before CloudKit.
+    """
+    text = (url or "").lower()
+    if "/shared/album/" in text or "photos.icloud.com" in text:
+        return BACKEND_CLOUDKIT
+    return BACKEND_SHAREDSTREAMS
+
+
+def parse_share(url: str) -> tuple[str, str] | None:
+    """Parse a share link into ``(token, backend)`` or ``None`` if invalid."""
+    token = parse_share_link(url)
+    if not token:
+        return None
+    return token, detect_backend(url)
+
 
 
 def partition_host(token: str) -> str:
@@ -250,3 +326,248 @@ class IcloudClient:
             raise RuntimeError(f"iCloud webstream failed: HTTP {status}")
         payload = _json.loads(raw)
         return payload.get("streamName") if isinstance(payload, dict) else None
+
+
+# --- CloudKit backend helpers ---------------------------------------------
+
+
+def _ck_value(fields: dict[str, Any], name: str) -> Any:
+    """Return the inner ``value`` of a CloudKit field, or ``None``."""
+    field = fields.get(name) if isinstance(fields, dict) else None
+    return field.get("value") if isinstance(field, dict) else None
+
+
+def _ck_decode_filename(fields: dict[str, Any]) -> str | None:
+    """Decode the (base64) ``filenameEnc`` field of a CPLMaster, if present."""
+    raw = _ck_value(fields, "filenameEnc")
+    if isinstance(raw, str) and raw:
+        try:
+            return base64.b64decode(raw).decode("utf-8", "replace")
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _ck_is_video(master_fields: dict[str, Any]) -> bool:
+    """Return ``True`` when a CPLMaster describes a video (not a still image).
+
+    Only the ``itemType`` is used: Live Photos keep an image ``itemType`` (and
+    carry a non-zero asset duration), so they are treated as stills and shown.
+    """
+    item_type = _ck_value(master_fields, "itemType")
+    if isinstance(item_type, str):
+        lowered = item_type.lower()
+        return any(hint in lowered for hint in _CK_VIDEO_HINTS)
+    return False
+
+
+def pick_ck_resource(
+    master_fields: dict[str, Any], size: str
+) -> tuple[str, Any, Any] | None:
+    """Pick a downloadable image derivative for the requested display ``size``.
+
+    Returns ``(download_url, width, height)``. ``full`` selects the largest
+    available derivative (best for a slideshow); ``preview`` selects the
+    smallest. JPEG derivatives are always browser-safe; the original is only
+    considered when it is itself a browser-displayable format.
+    """
+    if not isinstance(master_fields, dict):
+        return None
+    item_type = _ck_value(master_fields, "itemType")
+    item_type = item_type.lower() if isinstance(item_type, str) else ""
+    original_safe = item_type in _CK_BROWSER_SAFE_ORIGINAL
+
+    candidates: list[tuple[int, str, Any, Any]] = []
+    for res_key, w_key, h_key in _CK_IMAGE_RES:
+        res = master_fields.get(res_key)
+        if not isinstance(res, dict):
+            continue
+        val = res.get("value")
+        if not isinstance(val, dict):
+            continue
+        download_url = val.get("downloadURL")
+        if not download_url:
+            continue
+        if res_key == "resOriginalRes" and not original_safe:
+            continue
+        width = _ck_value(master_fields, w_key)
+        height = _ck_value(master_fields, h_key)
+        try:
+            rank = int(width)
+        except (TypeError, ValueError):
+            rank = 0
+        candidates.append((rank, download_url, width, height))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])
+    _rank, download_url, width, height = candidates[0 if size == "preview" else -1]
+    return download_url, width, height
+
+
+def build_ck_image_url(download_url: str | None, filename: str | None = None) -> str | None:
+    """Fill the ``${f}`` filename placeholder in a CloudKit download URL."""
+    if not download_url:
+        return None
+    return download_url.replace("${f}", quote(filename or "image", safe=""))
+
+
+def _ck_share_title(resolve_result: dict[str, Any]) -> str | None:
+    """Return the album title from a resolve result's share record, if any."""
+    share = resolve_result.get("share") if isinstance(resolve_result, dict) else None
+    fields = share.get("fields") if isinstance(share, dict) else None
+    title = _ck_value(fields, "cloudkit.title") if isinstance(fields, dict) else None
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return None
+
+
+def _to_int(value: Any) -> int | None:
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def parse_ck_records(records: list[Any], size: str) -> list[dict[str, Any]]:
+    """Join CPLMaster + CPLAsset records into normalized photo dicts.
+
+    Each returned dict has ``source_id``, ``url``, ``width``, ``height``,
+    ``captured_at`` (epoch ms) and ``description``.
+    """
+    masters: dict[str, dict[str, Any]] = {}
+    assets: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("recordType") == "CPLMaster":
+            masters[rec.get("recordName")] = rec.get("fields") or {}
+        elif rec.get("recordType") == "CPLAsset":
+            assets.append(rec)
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for asset in assets:
+        af = asset.get("fields") or {}
+        if _ck_value(af, "isHidden") or _ck_value(af, "trashReason"):
+            continue
+        ref = af.get("masterRef")
+        ref_val = ref.get("value") if isinstance(ref, dict) else None
+        master_name = ref_val.get("recordName") if isinstance(ref_val, dict) else None
+        master_fields = masters.get(master_name)
+        if not master_fields or _ck_is_video(master_fields):
+            continue
+        picked = pick_ck_resource(master_fields, size)
+        if not picked:
+            continue
+        download_url, width, height = picked
+        url = build_ck_image_url(download_url, _ck_decode_filename(master_fields))
+        if not url:
+            continue
+        source_id = master_name or asset.get("recordName")
+        if not source_id or source_id in seen:
+            continue
+        seen.add(source_id)
+        out.append(
+            {
+                "source_id": source_id,
+                "url": url,
+                "width": _to_int(width),
+                "height": _to_int(height),
+                "captured_at": _to_int(_ck_value(af, "assetDate")),
+                "description": None,
+            }
+        )
+    return out
+
+
+class IcloudCloudKitClient:
+    """Async client for the CloudKit-backed iCloud shared album backend.
+
+    Everything is anonymous: a ``resolve`` call turns the short share token
+    into a shared CloudKit zone plus a short-lived anonymous access token, and
+    a ``records/query`` call returns the album's photos with signed image URLs
+    already embedded.
+    """
+
+    def __init__(self, hass, token: str) -> None:
+        self.hass = hass
+        self.token = token
+        # Cached (zone, base_url, access_token, title) from the resolve call.
+        self._resolved: tuple[dict[str, Any], str, str, str | None] | None = None
+
+    async def _post(self, url: str, body: dict[str, Any]) -> tuple[int, bytes]:
+        session = async_get_clientsession(self.hass)
+        async with async_timeout.timeout(_TIMEOUT):
+            async with session.post(url, json=body, headers=_CK_HEADERS) as resp:
+                return resp.status, await resp.read()
+
+    async def _resolve(self) -> tuple[dict[str, Any], str, str, str | None]:
+        if self._resolved is not None:
+            return self._resolved
+        import json as _json
+
+        url = (
+            f"{_CK_RESOLVE_HOST}/database/1/{_CK_CONTAINER}/production"
+            f"/public/records/resolve?ckjsBuildVersion={_CK_BUILD}"
+            f"&shortGUID={self.token}"
+        )
+        status, raw = await self._post(url, {"shortGUIDs": [{"value": self.token}]})
+        if status != 200:
+            raise RuntimeError(f"iCloud resolve failed: HTTP {status}")
+        payload = _json.loads(raw)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not results:
+            raise RuntimeError("iCloud share link did not resolve to an album")
+        result = results[0]
+        zone = result.get("zoneID")
+        access = result.get("anonymousPublicAccess") or {}
+        access_token = access.get("token")
+        partition = access.get("databasePartition")
+        if not zone or not access_token or not partition:
+            raise RuntimeError("iCloud shared album is not publicly accessible")
+        base = f"{partition}/database/1/{_CK_CONTAINER}/production"
+        self._resolved = (zone, base, access_token, _ck_share_title(result))
+        return self._resolved
+
+    def _query_url(self, base: str, access_token: str) -> str:
+        query = urlencode(
+            {
+                "remapEnums": "true",
+                "getCurrentSyncToken": "true",
+                "sharing_url_key": self.token,
+                "publicAccessAuthToken": access_token,
+            }
+        )
+        return f"{base}/shared/records/query?{query}"
+
+    async def async_validate(self) -> str | None:
+        """Return the album title if the share link resolves, else raise."""
+        _zone, _base, _token, title = await self._resolve()
+        return title
+
+    async def async_get_items(self, size: str) -> list[dict[str, Any]]:
+        """Return normalized photo dicts for the album (see ``parse_ck_records``)."""
+        import json as _json
+
+        zone, base, access_token, _title = await self._resolve()
+        url = self._query_url(base, access_token)
+        records: list[Any] = []
+        continuation: str | None = None
+        while len(records) < _MAX_ASSETS:
+            body: dict[str, Any] = {
+                "zoneID": zone,
+                "query": {"recordType": _CK_RECORD_TYPE},
+                "resultsLimit": _CK_PAGE,
+            }
+            if continuation:
+                body["continuationMarker"] = continuation
+            status, raw = await self._post(url, body)
+            if status != 200:
+                raise RuntimeError(f"iCloud records query failed: HTTP {status}")
+            payload = _json.loads(raw)
+            batch = payload.get("records") if isinstance(payload, dict) else None
+            if not batch:
+                break
+            records.extend(batch)
+            continuation = payload.get("continuationMarker") if isinstance(payload, dict) else None
+            if not continuation:
+                break
+        return parse_ck_records(records, size)

@@ -44,6 +44,9 @@ from .const import (
     CONF_ICLOUD_TOKEN,
     CONF_ICLOUD_IMAGE_SIZE,
     DEFAULT_ICLOUD_IMAGE_SIZE,
+    CONF_ICLOUD_BACKEND,
+    DEFAULT_ICLOUD_BACKEND,
+    ICLOUD_BACKEND_CLOUDKIT,
     CONF_SYNOLOGY_URL,
     CONF_SYNOLOGY_USERNAME,
     CONF_SYNOLOGY_PASSWORD,
@@ -1523,17 +1526,22 @@ class AlbumCoordinator(DataUpdateCoordinator):
     async def _update_icloud(self) -> dict[str, Any]:
         """Fetch photos from a public iCloud Shared Album.
 
-        The webstream response carries capture date and caption inline, so
-        there is no enrichment pass. Signed image URLs are resolved up front
-        and expire after roughly a day, so they are refreshed on every album
-        refresh (like Google Photos).
+        Two public backends are supported: the legacy "shared streams" API and
+        the newer CloudKit backend used by iOS 26/macOS 26 share links. Both
+        carry capture date and caption inline, so there is no enrichment pass.
+        Signed image URLs are resolved up front and expire after a while, so
+        they are refreshed on every album refresh (like Google Photos).
         """
         from . import icloud as icloud_api
 
         token = self.entry.data.get(CONF_ICLOUD_TOKEN)
         size = self.entry.data.get(CONF_ICLOUD_IMAGE_SIZE, DEFAULT_ICLOUD_IMAGE_SIZE)
+        backend = self.entry.data.get(CONF_ICLOUD_BACKEND, DEFAULT_ICLOUD_BACKEND)
         if not token:
             raise UpdateFailed("iCloud provider is missing the album token")
+
+        if backend == ICLOUD_BACKEND_CLOUDKIT:
+            return await self._update_icloud_cloudkit(icloud_api, token, size)
 
         client = icloud_api.IcloudClient(self.hass, token)
         try:
@@ -1572,6 +1580,43 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     exif_scanned=True,
                 )
             )
+
+        if not items:
+            raise UpdateFailed("Could not resolve any iCloud image URLs")
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def _update_icloud_cloudkit(
+        self, icloud_api, token: str, size: str
+    ) -> dict[str, Any]:
+        """Fetch photos from a CloudKit-backed iCloud shared album."""
+        client = icloud_api.IcloudCloudKitClient(self.hass, token)
+        try:
+            photos = await client.async_get_items(size)
+        except Exception as err:
+            raise UpdateFailed(f"Error querying iCloud album: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the iCloud album")
+
+        items: list[MediaItem] = [
+            MediaItem(
+                url=p["url"],
+                width=p.get("width"),
+                height=p.get("height"),
+                mime_type=None,
+                filename=None,
+                captured_at=p.get("captured_at"),
+                description=p.get("description"),
+                source_id=p.get("source_id"),
+                exif_scanned=True,
+            )
+            for p in photos
+            if p.get("url")
+        ]
 
         if not items:
             raise UpdateFailed("Could not resolve any iCloud image URLs")

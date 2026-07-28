@@ -78,7 +78,7 @@
       },
       "icloud": {
         "title": "iCloud Shared Album",
-        "description": "Paste the public link to an iCloud Shared Album (in Photos, open the album, tap the share icon, and copy the Public Website link). No Apple ID or password is needed - the link itself is the credential. Capture date and captions come through; Apple does not include location in shared albums.",
+        "description": "Paste the public link to an iCloud Shared Album (in Photos, open the album, tap the share icon, and copy the Public Website link). Both the older icloud.com/sharedalbum links and the newer photos.icloud.com/shared/album links work. No Apple ID or password is needed - the link itself is the credential. Capture date comes through; Apple does not include location in shared albums.",
         "data": {
           "album_name": "Album name",
           "icloud_url": "Shared album link",
