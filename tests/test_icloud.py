@@ -153,6 +153,13 @@ def test_parse_share_link_new_url_with_query():
     ) == "0c8RHcRtNHGlSsmr5YxG3JhqQ"
 
 
+def test_parse_share_link_new_token_with_dash_underscore():
+    # CloudKit short GUIDs use a URL-safe alphabet and may contain - and _.
+    assert ic.parse_share_link(
+        "https://photos.icloud.com/shared/album/045YeI20-8u3X31bBPD5z9B_A/"
+    ) == "045YeI20-8u3X31bBPD5z9B_A"
+
+
 def test_detect_backend_new_vs_legacy():
     assert ic.detect_backend(
         "https://photos.icloud.com/shared/album/0c8RHcRtNHGlSsmr5YxG3JhqQ"

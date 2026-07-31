@@ -45,6 +45,10 @@ _MAX_ASSETS = 20_000
 _URL_BATCH = 25
 
 _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+# Characters allowed in a share token. Legacy shared-streams tokens are base62;
+# the newer CloudKit short GUIDs use a URL-safe base64 alphabet, so they may
+# also contain ``-`` and ``_`` (e.g. ``045YeI20-8u3X31bBPD5z9B_A``).
+_TOKEN_CHARS = frozenset(_BASE62 + "-_")
 
 # Which iCloud backend serves an album. These string values match the
 # ``ICLOUD_BACKEND_*`` constants in ``const.py``; they are duplicated here to
@@ -117,9 +121,10 @@ def parse_share_link(url: str) -> str | None:
     # Drop any leftover query string.
     text = text.split("?", 1)[0]
     token = text.strip()
-    # Tokens are base62. Legacy tokens start with an uppercase letter; the new
-    # CloudKit short GUIDs may start with a digit, so no leading-char check.
-    if token and all(ch in _BASE62 for ch in token):
+    # Legacy tokens are base62 and start with an uppercase letter; the newer
+    # CloudKit short GUIDs may start with a digit and can contain ``-``/``_``,
+    # so accept the wider URL-safe alphabet without a leading-char check.
+    if token and all(ch in _TOKEN_CHARS for ch in token):
         return token
     return None
 
