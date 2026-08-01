@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import logging
 import random
 from pathlib import Path
@@ -45,6 +45,12 @@ _ACCEPTED_IMAGE_PREFIX = ("image/",)
 # (no metadata available) are expensive.
 _PAIR_SEARCH_LIMIT = 12
 _SKIP_SEARCH_LIMIT = 30
+
+# How many recently shown slides to remember for the "previous slide" button.
+# Navigation walks backward and forward through this list; new slides are only
+# drawn when at the head, so back/forward is a true history even in random
+# order. Bounded so a long-running slideshow does not grow without limit.
+_HISTORY_MAX = 500
 
 
 def _ts_to_iso(ts_ms: int | None) -> str | None:
@@ -155,12 +161,27 @@ class AlbumSlideshowCamera(Camera):
         self._frame_id: int = 0
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
-        self._force_next: bool = False
+        # Pending user navigation. Each button/service press appends +1 (next)
+        # or -1 (previous); the render loop drains one per cycle so rapid
+        # presses are never swallowed. Replaces the old boolean force-next flag.
+        self._nav_requests: deque[int] = deque()
+        # Navigation history of shown indices, with a cursor into it. Lets
+        # "previous slide" walk backward and "next" redo forward, including in
+        # random order. New slides are only drawn at the head of history.
+        self._history: list[int] = []
+        self._history_pos: int = -1
+        # Set when the effective playlist changes (data/settings update) so the
+        # loop rebuilds history from the new current index instead of pointing
+        # at stale positions.
+        self._history_dirty: bool = False
+        # Whether the next committed frame should be appended to history.
+        self._record_history: bool = False
         self._consecutive_failures: int = 0
         self._render_task: asyncio.Task | None = None
 
         def _on_coordinator_update() -> None:
             self._effective_cache = None
+            self._history_dirty = True
             self._interrupt_event.set()
             self.async_write_ha_state()
 
@@ -169,6 +190,7 @@ class AlbumSlideshowCamera(Camera):
         def _on_store_change() -> None:
             self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
             self._effective_cache = None
+            self._history_dirty = True
             self._interrupt_event.set()
             self.async_write_ha_state()
 
@@ -331,7 +353,14 @@ class AlbumSlideshowCamera(Camera):
         return ordered
 
     async def async_force_next(self) -> None:
-        self._force_next = True
+        """Queue a "next slide" navigation and wake the render loop."""
+        self._nav_requests.append(1)
+        self._interrupt_event.set()
+        self.async_write_ha_state()
+
+    async def async_force_prev(self) -> None:
+        """Queue a "previous slide" navigation and wake the render loop."""
+        self._nav_requests.append(-1)
         self._interrupt_event.set()
         self.async_write_ha_state()
 
@@ -378,14 +407,14 @@ class AlbumSlideshowCamera(Camera):
 
         Does NOT clear ``_interrupt_event`` - the render loop clears it once
         per cycle, before rendering, so a signal that arrives while we're
-        rendering (a "next slide" press, a coordinator/store change) survives
+        rendering (a navigation press, a coordinator/store change) survives
         until we get here instead of being wiped.
 
-        A force-next that's already pending is honored immediately without
-        sleeping, so a press that landed during the last render (or right at
-        the loop boundary) isn't held until the full slide interval elapses.
+        Pending navigation is honored immediately without sleeping, so a press
+        that landed during the last render (or right at the loop boundary)
+        isn't held until the full slide interval elapses.
         """
-        if self._force_next:
+        if self._nav_requests:
             return True
         try:
             await asyncio.wait_for(self._interrupt_event.wait(), timeout=timeout)
@@ -400,15 +429,18 @@ class AlbumSlideshowCamera(Camera):
                 await asyncio.sleep(initial_delay)
             except asyncio.CancelledError:
                 raise
-        should_advance = False  # Don't advance on the very first render
+        # The first frame shows the current index without drawing a new one;
+        # record it as the start of navigation history.
+        advance, record = False, True
         while True:
             # Clear the wake signal before rendering. Anything that happens
-            # from here on (a "next slide" press, a coordinator/store change)
+            # from here on (a navigation press, a coordinator/store change)
             # re-sets it and is picked up after this frame commits, so no
             # wake is lost while we're mid-render.
             self._interrupt_event.clear()
+            self._record_history = record
             try:
-                await self._render_cycle(advance=should_advance)
+                await self._render_cycle(advance=advance)
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
@@ -423,22 +455,60 @@ class AlbumSlideshowCamera(Camera):
                     await asyncio.sleep(backoff)
                 except asyncio.CancelledError:
                     raise
-                should_advance = True  # Skip the broken image on retry
+                advance, record = True, True  # Skip the broken image on retry
                 continue
 
             interrupted = await self._wait_or_interrupt(float(int(self.store.slide_interval)))
-            if self._force_next:
-                # Explicit "next slide" request: always advance.
-                should_advance = True
-                self._force_next = False
-            elif interrupted:
-                # A coordinator/store change woke us: re-render the current
-                # frame (new data or settings) without skipping ahead.
-                should_advance = False
-            else:
-                # Paused slideshows hold the current frame until the user
-                # un-pauses or hits "next slide" explicitly.
-                should_advance = not bool(self.store.paused)
+            advance, record = self._plan_next(interrupted)
+
+    def _plan_next(self, interrupted: bool) -> tuple[bool, bool]:
+        """Decide the next render step, returning ``(advance, record)``.
+
+        ``advance`` asks ``_render_cycle`` to draw a fresh next slide and
+        ``record`` asks the commit to append the shown index to history. For
+        backward/redo steps this sets ``self._index`` from history directly and
+        returns ``(False, False)`` so the cycle just re-composes it.
+        """
+        self._reset_history_if_dirty()
+        if self._nav_requests:
+            direction = self._nav_requests.popleft()
+            return self._plan_forward() if direction > 0 else self._plan_back()
+        if interrupted:
+            # A data/settings change woke us: re-render the current slide.
+            # Re-seed history with it when a reset just emptied the history.
+            return (False, self._history_pos < 0)
+        if self.store.paused:
+            return (False, self._history_pos < 0)
+        return self._plan_forward()
+
+    def _plan_forward(self) -> tuple[bool, bool]:
+        """Step forward: redo through history if rewound, else draw a new slide."""
+        if 0 <= self._history_pos < len(self._history) - 1:
+            self._history_pos += 1
+            self._index = self._history[self._history_pos]
+            return (False, False)
+        return (True, True)
+
+    def _plan_back(self) -> tuple[bool, bool]:
+        """Step backward through history, holding on the oldest remembered slide."""
+        if self._history_pos > 0:
+            self._history_pos -= 1
+            self._index = self._history[self._history_pos]
+        return (False, False)
+
+    def _reset_history_if_dirty(self) -> None:
+        """Drop stale history after the effective playlist changed."""
+        if self._history_dirty:
+            self._history_dirty = False
+            self._history = []
+            self._history_pos = -1
+
+    def _append_history(self, index: int) -> None:
+        """Record a freshly shown slide at the head of history."""
+        self._history.append(index)
+        if len(self._history) > _HISTORY_MAX:
+            del self._history[: len(self._history) - _HISTORY_MAX]
+        self._history_pos = len(self._history) - 1
 
     async def _render_cycle(self, advance: bool) -> None:
         """Render one frame.
@@ -458,6 +528,10 @@ class AlbumSlideshowCamera(Camera):
         count = len(items)
         if advance:
             self._do_advance(count, items)
+        # Guard against a history index left over from a larger playlist so a
+        # backward/redo step can never read out of range.
+        if not 0 <= self._index < count:
+            self._index %= count
 
         async with self._compose_semaphore:
             composed, meta = await self._compose_for_index(items)
@@ -481,6 +555,8 @@ class AlbumSlideshowCamera(Camera):
         self._framebuffer = encoded
         self.store.last_frame = encoded
         self._frame_id += 1
+        if self._record_history:
+            self._append_history(self._index)
         if meta:
             self._last_is_portrait = meta.get("is_portrait")
         else:

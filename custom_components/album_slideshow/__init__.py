@@ -10,7 +10,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN, SERVICE_NEXT_SLIDE, SERVICE_REFRESH_ALBUM, ATTR_ENTRY_ID
+from .const import DOMAIN, SERVICE_NEXT_SLIDE, SERVICE_PREVIOUS_SLIDE, SERVICE_REFRESH_ALBUM, ATTR_ENTRY_ID
 from .store import SlideshowStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -392,6 +392,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if cam:
             await cam.async_force_next()
 
+    async def _previous_slide(call) -> None:
+        entry_id = call.data.get(ATTR_ENTRY_ID)
+        if not entry_id:
+            return
+        data = hass.data.get(DOMAIN, {}).get(entry_id)
+        if not data:
+            return
+        cam = data.get("camera")
+        if cam:
+            await cam.async_force_prev()
+
     async def _refresh_album(call) -> None:
         entry_id = call.data.get(ATTR_ENTRY_ID)
         if not entry_id:
@@ -405,6 +416,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.services.has_service(DOMAIN, SERVICE_NEXT_SLIDE):
         hass.services.async_register(DOMAIN, SERVICE_NEXT_SLIDE, _next_slide)
+
+    if not hass.services.has_service(DOMAIN, SERVICE_PREVIOUS_SLIDE):
+        hass.services.async_register(DOMAIN, SERVICE_PREVIOUS_SLIDE, _previous_slide)
 
     if not hass.services.has_service(DOMAIN, SERVICE_REFRESH_ALBUM):
         hass.services.async_register(DOMAIN, SERVICE_REFRESH_ALBUM, _refresh_album)

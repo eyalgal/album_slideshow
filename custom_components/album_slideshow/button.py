@@ -5,7 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, SERVICE_NEXT_SLIDE, SERVICE_REFRESH_ALBUM, ATTR_ENTRY_ID
+from .const import DOMAIN, SERVICE_NEXT_SLIDE, SERVICE_PREVIOUS_SLIDE, SERVICE_REFRESH_ALBUM, ATTR_ENTRY_ID
 from .coordinator import AlbumCoordinator
 
 
@@ -13,6 +13,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator: AlbumCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     async_add_entities(
         [
+            PreviousSlideButton(hass, entry, coordinator),
             NextSlideButton(hass, entry, coordinator),
             RefreshAlbumButton(hass, entry, coordinator),
         ]
@@ -34,6 +35,22 @@ class _BaseButton(ButtonEntity):
             "name": f"Album Slideshow {self.entry.title}",
             "manufacturer": "Album Slideshow",
         }
+
+
+class PreviousSlideButton(_BaseButton):
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: AlbumCoordinator) -> None:
+        super().__init__(hass, entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_previous_button"
+        self._attr_name = "Previous slide"
+        self._attr_icon = "mdi:skip-previous"
+
+    async def async_press(self) -> None:
+        await self.hass.services.async_call(
+            DOMAIN,
+            SERVICE_PREVIOUS_SLIDE,
+            {ATTR_ENTRY_ID: self.entry.entry_id},
+            blocking=False,
+        )
 
 
 class NextSlideButton(_BaseButton):
