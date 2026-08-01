@@ -356,12 +356,20 @@ class AlbumSlideshowCamera(Camera):
         """Queue a "next slide" navigation and wake the render loop."""
         self._nav_requests.append(1)
         self._interrupt_event.set()
+        _LOGGER.debug(
+            "Album Slideshow %s: next-slide press queued (queue=%d, index=%d)",
+            self.entry.title, len(self._nav_requests), self._index,
+        )
         self.async_write_ha_state()
 
     async def async_force_prev(self) -> None:
         """Queue a "previous slide" navigation and wake the render loop."""
         self._nav_requests.append(-1)
         self._interrupt_event.set()
+        _LOGGER.debug(
+            "Album Slideshow %s: previous-slide press queued (queue=%d, index=%d)",
+            self.entry.title, len(self._nav_requests), self._index,
+        )
         self.async_write_ha_state()
 
     async def async_force_refresh(self) -> None:
@@ -460,6 +468,12 @@ class AlbumSlideshowCamera(Camera):
 
             interrupted = await self._wait_or_interrupt(float(int(self.store.slide_interval)))
             advance, record = self._plan_next(interrupted)
+            _LOGGER.debug(
+                "Album Slideshow %s: loop step interrupted=%s advance=%s record=%s "
+                "index=%d queue=%d history_pos=%d",
+                self.entry.title, interrupted, advance, record,
+                self._index, len(self._nav_requests), self._history_pos,
+            )
 
     def _plan_next(self, interrupted: bool) -> tuple[bool, bool]:
         """Decide the next render step, returning ``(advance, record)``.
@@ -533,6 +547,10 @@ class AlbumSlideshowCamera(Camera):
         if not 0 <= self._index < count:
             self._index %= count
 
+        _LOGGER.debug(
+            "Album Slideshow %s: render cycle start advance=%s index=%d",
+            self.entry.title, advance, self._index,
+        )
         async with self._compose_semaphore:
             composed, meta = await self._compose_for_index(items)
             if composed is None:
@@ -565,6 +583,10 @@ class AlbumSlideshowCamera(Camera):
         self._last_pair_frames = meta.get("pair_frames") if meta else None
         self._last_pair_orientation = meta.get("pair_orientation") if meta else None
 
+        _LOGGER.debug(
+            "Album Slideshow %s: committed frame_id=%d index=%d",
+            self.entry.title, self._frame_id, self._index,
+        )
         self.async_write_ha_state()
 
     @property
