@@ -35,7 +35,7 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 ### 📷 Slideshow Camera
 - Auto advancing camera entity
 - Configurable slide interval
-- Manual next slide button
+- Manual previous / next slide buttons
 - Album refresh control
 
 ### 🖼 Image Sources
@@ -61,7 +61,8 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 
 ### ⏯ Pause / Resume
 - Pause switch holds the current slide indefinitely
-- Manual "Next slide" button still works while paused
+- Manual "Previous slide" and "Next slide" buttons still work while paused
+- Previous steps back through recently shown images (even in random order)
 - Survives Home Assistant restarts
 
 ### ✨ Transitions
@@ -547,6 +548,7 @@ Each album you configure creates the following entities in Home Assistant.
 
 | Entity | Description |
 |--------|------------|
+| Previous slide | Steps back to the previously shown image |
 | Next slide | Immediately advances to the next image |
 | Refresh album | Re-fetches album contents |
 

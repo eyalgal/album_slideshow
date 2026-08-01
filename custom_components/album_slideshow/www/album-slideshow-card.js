@@ -974,6 +974,7 @@ const LIVE_SUFFIX = {
   slide_interval: "_interval",
   pair_divider_px: "_pair_divider_px",
   pair_divider_color: "_pair_divider_color",
+  previous_button: "_previous_button",
   next_button: "_next_button",
   refresh_button: "_refresh_button",
 };
@@ -1092,7 +1093,9 @@ function createAlbumSlideshowCardEditorClass(Base) {
   _hasActions() {
     return !!(
       this._siblings &&
-      (this._siblings.next_button || this._siblings.refresh_button)
+      (this._siblings.previous_button ||
+        this._siblings.next_button ||
+        this._siblings.refresh_button)
     );
   }
 
@@ -1543,13 +1546,19 @@ function createAlbumSlideshowCardEditorClass(Base) {
     wrap.innerHTML = `
       <div class="actions-title">Actions</div>
       <div class="actions-row">
+        ${s.previous_button ? `<button class="act" data-act="previous">Previous slide</button>` : ""}
         ${s.next_button ? `<button class="act" data-act="next">Next slide</button>` : ""}
         ${s.refresh_button ? `<button class="act" data-act="refresh">Refresh album</button>` : ""}
       </div>
     `;
+    const actionEntities = {
+      previous: s.previous_button,
+      next: s.next_button,
+      refresh: s.refresh_button,
+    };
     wrap.querySelectorAll("button.act").forEach((b) => {
       b.addEventListener("click", () => {
-        const id = b.dataset.act === "next" ? s.next_button : s.refresh_button;
+        const id = actionEntities[b.dataset.act];
         if (id && this._hass) {
           this._hass.callService("button", "press", { entity_id: id });
         }
