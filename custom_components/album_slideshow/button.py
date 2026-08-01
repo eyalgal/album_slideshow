@@ -5,7 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, SERVICE_NEXT_SLIDE, SERVICE_PREVIOUS_SLIDE, SERVICE_REFRESH_ALBUM, ATTR_ENTRY_ID
+from .const import DOMAIN, SERVICE_REFRESH_ALBUM, ATTR_ENTRY_ID
 from .coordinator import AlbumCoordinator
 
 
@@ -45,12 +45,9 @@ class PreviousSlideButton(_BaseButton):
         self._attr_icon = "mdi:skip-previous"
 
     async def async_press(self) -> None:
-        await self.hass.services.async_call(
-            DOMAIN,
-            SERVICE_PREVIOUS_SLIDE,
-            {ATTR_ENTRY_ID: self.entry.entry_id},
-            blocking=False,
-        )
+        camera = self.hass.data[DOMAIN][self.entry.entry_id].get("camera")
+        if camera is not None:
+            await camera.async_force_prev()
 
 
 class NextSlideButton(_BaseButton):
@@ -61,12 +58,9 @@ class NextSlideButton(_BaseButton):
         self._attr_icon = "mdi:skip-next"
 
     async def async_press(self) -> None:
-        await self.hass.services.async_call(
-            DOMAIN,
-            SERVICE_NEXT_SLIDE,
-            {ATTR_ENTRY_ID: self.entry.entry_id},
-            blocking=False,
-        )
+        camera = self.hass.data[DOMAIN][self.entry.entry_id].get("camera")
+        if camera is not None:
+            await camera.async_force_next()
 
 
 class RefreshAlbumButton(_BaseButton):

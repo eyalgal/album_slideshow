@@ -15,13 +15,17 @@ def _make_cam(paused: bool = False):
     """
     cam = camera.AlbumSlideshowCamera.__new__(camera.AlbumSlideshowCamera)
     cam._interrupt_event = asyncio.Event()
+    cam._navigation_event = asyncio.Event()
     cam._nav_requests = deque()
     cam._history = []
     cam._history_pos = -1
     cam._history_dirty = False
     cam._record_history = False
+    cam._last_nav_started_at = None
+    cam._nav_commit_pending = False
     cam._index = 0
     cam.store = types.SimpleNamespace(paused=paused)
+    cam.async_write_ha_state = lambda: None
     return cam
 
 
@@ -73,6 +77,39 @@ def test_signal_set_during_render_survives_until_wait():
         return await cam._wait_or_interrupt(timeout=30)
 
     assert asyncio.run(run()) is True
+
+
+def test_navigation_preempts_slow_http_fetch():
+    cam = _make_cam()
+
+    async def slow_fetch(_url):
+        await asyncio.sleep(30)
+        return b"late"
+
+    cam._http_get_uninterrupted = slow_fetch
+
+    async def run():
+        fetch = asyncio.create_task(cam._http_get("https://example.test/image.jpg"))
+        await asyncio.sleep(0)
+        cam._navigation_event.set()
+        try:
+            await fetch
+        except camera._NavigationInterrupted:
+            return
+        raise AssertionError("navigation did not preempt the image fetch")
+
+    asyncio.run(run())
+
+
+def test_completed_http_fetch_wins_without_navigation():
+    cam = _make_cam()
+
+    async def fast_fetch(_url):
+        return b"image"
+
+    cam._http_get_uninterrupted = fast_fetch
+
+    assert asyncio.run(cam._http_get("https://example.test/image.jpg")) == b"image"
 
 
 # ── history append ─────────────────────────────────────────────────────────
@@ -145,6 +182,8 @@ def test_plan_next_consumes_one_nav_request():
     assert (advance, record) == (True, True)
     # Only one request consumed per cycle so none are lost.
     assert list(cam._nav_requests) == [1]
+    assert cam._last_nav_started_at is not None
+    assert cam._nav_commit_pending is True
 
 
 def test_plan_next_prev_walks_back():

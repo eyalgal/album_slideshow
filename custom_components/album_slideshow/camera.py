@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, deque
+from datetime import datetime, timezone
 import logging
 import random
 from pathlib import Path
@@ -53,15 +54,23 @@ _SKIP_SEARCH_LIMIT = 30
 _HISTORY_MAX = 500
 
 
+class _NavigationInterrupted(Exception):
+    """Internal signal used to preempt a stalled render for navigation."""
+
+
 def _ts_to_iso(ts_ms: int | None) -> str | None:
     """Convert epoch milliseconds to an ISO-8601 string in UTC, or None."""
     if not isinstance(ts_ms, int):
         return None
-    from datetime import datetime, timezone
     try:
         return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def _utc_now_iso() -> str:
+    """Return the current time as an ISO-8601 UTC string."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class _DownloadCache:
@@ -161,6 +170,10 @@ class AlbumSlideshowCamera(Camera):
         self._frame_id: int = 0
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
+        # Separate from the general interrupt event so navigation can preempt
+        # a slow in-flight HTTP image download. Store/coordinator refreshes
+        # still wait for the current render to finish normally.
+        self._navigation_event: asyncio.Event = asyncio.Event()
         # Pending user navigation. Each button/service press appends +1 (next)
         # or -1 (previous); the render loop drains one per cycle so rapid
         # presses are never swallowed. Replaces the old boolean force-next flag.
@@ -176,6 +189,14 @@ class AlbumSlideshowCamera(Camera):
         self._history_dirty: bool = False
         # Whether the next committed frame should be appended to history.
         self._record_history: bool = False
+        # Visible navigation diagnostics. These are state attributes rather
+        # than debug-only log messages so they remain observable when Home
+        # Assistant's UI filters debug logs.
+        self._last_nav_direction: str | None = None
+        self._last_nav_requested_at: str | None = None
+        self._last_nav_started_at: str | None = None
+        self._last_nav_committed_at: str | None = None
+        self._nav_commit_pending: bool = False
         self._consecutive_failures: int = 0
         self._render_task: asyncio.Task | None = None
 
@@ -280,6 +301,11 @@ class AlbumSlideshowCamera(Camera):
             "pair_divider_px": int(self.store.pair_divider_px),
             "pair_divider_color": self.store.pair_divider_color,
             "frame_id": self._frame_id,
+            "navigation_queue_size": len(self._nav_requests),
+            "last_navigation_direction": self._last_nav_direction,
+            "last_navigation_requested_at": self._last_nav_requested_at,
+            "last_navigation_started_at": self._last_nav_started_at,
+            "last_navigation_committed_at": self._last_nav_committed_at,
             "pagination_debug": data.get("pagination_debug"),
         }
 
@@ -355,7 +381,10 @@ class AlbumSlideshowCamera(Camera):
     async def async_force_next(self) -> None:
         """Queue a "next slide" navigation and wake the render loop."""
         self._nav_requests.append(1)
+        self._last_nav_direction = "next"
+        self._last_nav_requested_at = _utc_now_iso()
         self._interrupt_event.set()
+        self._navigation_event.set()
         _LOGGER.debug(
             "Album Slideshow %s: next-slide press queued (queue=%d, index=%d)",
             self.entry.title, len(self._nav_requests), self._index,
@@ -365,7 +394,10 @@ class AlbumSlideshowCamera(Camera):
     async def async_force_prev(self) -> None:
         """Queue a "previous slide" navigation and wake the render loop."""
         self._nav_requests.append(-1)
+        self._last_nav_direction = "previous"
+        self._last_nav_requested_at = _utc_now_iso()
         self._interrupt_event.set()
+        self._navigation_event.set()
         _LOGGER.debug(
             "Album Slideshow %s: previous-slide press queued (queue=%d, index=%d)",
             self.entry.title, len(self._nav_requests), self._index,
@@ -446,12 +478,24 @@ class AlbumSlideshowCamera(Camera):
             # re-sets it and is picked up after this frame commits, so no
             # wake is lost while we're mid-render.
             self._interrupt_event.clear()
+            # The event that caused the currently planned navigation has been
+            # consumed. Keep it set when more clicks remain queued so those
+            # clicks skip directly to their target instead of waiting for an
+            # unnecessary intermediate image download.
+            if not self._nav_requests:
+                self._navigation_event.clear()
             self._record_history = record
             try:
                 await self._render_cycle(advance=advance)
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
+            except _NavigationInterrupted:
+                # A user pressed Previous/Next during a slow HTTP fetch.
+                # Consume the request and restart immediately without treating
+                # the intentional cancellation as a render failure/backoff.
+                advance, record = self._plan_next(interrupted=True)
+                continue
             except Exception as err:
                 self._consecutive_failures += 1
                 backoff = min(2 ** self._consecutive_failures, 60)
@@ -486,6 +530,9 @@ class AlbumSlideshowCamera(Camera):
         self._reset_history_if_dirty()
         if self._nav_requests:
             direction = self._nav_requests.popleft()
+            self._last_nav_started_at = _utc_now_iso()
+            self._nav_commit_pending = True
+            self.async_write_ha_state()
             return self._plan_forward() if direction > 0 else self._plan_back()
         if interrupted:
             # A data/settings change woke us: re-render the current slide.
@@ -575,6 +622,9 @@ class AlbumSlideshowCamera(Camera):
         self._frame_id += 1
         if self._record_history:
             self._append_history(self._index)
+        if self._nav_commit_pending:
+            self._last_nav_committed_at = _utc_now_iso()
+            self._nav_commit_pending = False
         if meta:
             self._last_is_portrait = meta.get("is_portrait")
         else:
@@ -947,6 +997,39 @@ class AlbumSlideshowCamera(Camera):
         return None
 
     async def _http_get(self, url: str) -> bytes | None:
+        """Fetch an image while allowing navigation to preempt the request."""
+        request_task = asyncio.create_task(self._http_get_uninterrupted(url))
+        navigation_task = asyncio.create_task(self._navigation_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {request_task, navigation_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Prefer a completed response if both became ready in the same
+            # event-loop turn. Otherwise stop waiting on the stale image.
+            if request_task in done:
+                return await request_task
+            request_task.cancel()
+            try:
+                await request_task
+            except asyncio.CancelledError:
+                pass
+            raise _NavigationInterrupted
+        finally:
+            navigation_task.cancel()
+            if not request_task.done():
+                request_task.cancel()
+            try:
+                await navigation_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await request_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _http_get_uninterrupted(self, url: str) -> bytes | None:
+        """Fetch one remote image with validation and a hard timeout."""
         session = async_get_clientsession(self.hass)
         try:
             async with async_timeout.timeout(30):
