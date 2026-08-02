@@ -184,9 +184,11 @@ class AlbumSlideshowCamera(Camera):
         self._frame_id: int = 0
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
-        # Pending user navigation. The loop consumes commands in order, but a
-        # buffered command only swaps bytes and metadata, with no I/O or PIL.
-        self._nav_requests: deque[int] = deque()
+        # Navigation runs directly in the button/service coroutine. The lock
+        # serialises rapid presses while buffered swaps remain independent of
+        # the background timer loop.
+        self._navigation_lock: asyncio.Lock = asyncio.Lock()
+        self._navigation_pending: int = 0
         # Rendered timeline around the current frame. Previous frames and future
         # frames are final encoded JPEGs, so both navigation directions are an
         # O(1) deque swap. The future deque is replenished in the background.
@@ -204,6 +206,8 @@ class AlbumSlideshowCamera(Camera):
         self._last_nav_requested_at: str | None = None
         self._last_nav_started_at: str | None = None
         self._last_nav_committed_at: str | None = None
+        self._last_nav_outcome: str | None = None
+        self._last_nav_error: str | None = None
         self._consecutive_failures: int = 0
         self._render_task: asyncio.Task | None = None
 
@@ -317,11 +321,13 @@ class AlbumSlideshowCamera(Camera):
             "navigation_preloading": bool(
                 self._preload_task is not None and not self._preload_task.done()
             ),
-            "navigation_queue_size": len(self._nav_requests),
+            "navigation_queue_size": self._navigation_pending,
             "last_navigation_direction": self._last_nav_direction,
             "last_navigation_requested_at": self._last_nav_requested_at,
             "last_navigation_started_at": self._last_nav_started_at,
             "last_navigation_committed_at": self._last_nav_committed_at,
+            "last_navigation_outcome": self._last_nav_outcome,
+            "last_navigation_error": self._last_nav_error,
             "pagination_debug": data.get("pagination_debug"),
         }
 
@@ -395,28 +401,52 @@ class AlbumSlideshowCamera(Camera):
         return ordered
 
     async def async_force_next(self) -> None:
-        """Queue a "next slide" navigation and wake the render loop."""
-        self._nav_requests.append(1)
-        self._last_nav_direction = "next"
-        self._last_nav_requested_at = _utc_now_iso()
-        self._interrupt_event.set()
-        _LOGGER.debug(
-            "Album Slideshow %s: next-slide press queued (queue=%d, index=%d)",
-            self.entry.title, len(self._nav_requests), self._index,
-        )
-        self.async_write_ha_state()
+        """Display the next buffered slide immediately."""
+        await self._async_navigate(1)
 
     async def async_force_prev(self) -> None:
-        """Queue a "previous slide" navigation and wake the render loop."""
-        self._nav_requests.append(-1)
-        self._last_nav_direction = "previous"
+        """Display the previous retained slide immediately."""
+        await self._async_navigate(-1)
+
+    async def _async_navigate(self, direction: int) -> None:
+        """Serialise a manual navigation request and execute it directly."""
+        direction_name = "next" if direction > 0 else "previous"
+        self._navigation_pending += 1
+        self._last_nav_direction = direction_name
         self._last_nav_requested_at = _utc_now_iso()
+        self._last_nav_outcome = "pending"
+        self._last_nav_error = None
+        # Wake the timer loop so the manual frame starts a fresh interval.
         self._interrupt_event.set()
-        _LOGGER.debug(
-            "Album Slideshow %s: previous-slide press queued (queue=%d, index=%d)",
-            self.entry.title, len(self._nav_requests), self._index,
-        )
         self.async_write_ha_state()
+
+        try:
+            async with self._navigation_lock:
+                self._last_nav_started_at = _utc_now_iso()
+                if self._timeline_dirty:
+                    await self._rebuild_current_frame()
+                changed = (
+                    await self._show_next_frame()
+                    if direction > 0
+                    else await self._show_previous_frame()
+                )
+                if changed:
+                    self._last_nav_committed_at = _utc_now_iso()
+                    self._last_nav_outcome = "displayed"
+                else:
+                    self._last_nav_outcome = "not_available"
+        except Exception as err:
+            self._last_nav_outcome = "error"
+            self._last_nav_error = str(err)
+            _LOGGER.warning(
+                "Album Slideshow %s: manual %s navigation failed: %s",
+                self.entry.title,
+                direction_name,
+                err,
+            )
+        finally:
+            self._navigation_pending -= 1
+            self.async_write_ha_state()
 
     async def async_force_refresh(self) -> None:
         await self.coordinator.async_request_refresh()
@@ -763,12 +793,12 @@ class AlbumSlideshowCamera(Camera):
 
     async def _wait_or_interrupt(self, timeout: float) -> bool:
         """Wait for configuration/navigation or for the slide timer to expire."""
-        if self._nav_requests or self._timeline_dirty:
+        if self._timeline_dirty:
             return True
         self._interrupt_event.clear()
         # Close the clear/wait race: callbacks cannot run between these two
         # synchronous statements without setting the event again.
-        if self._nav_requests or self._timeline_dirty:
+        if self._timeline_dirty:
             return True
         try:
             if self.store.paused:
@@ -789,7 +819,10 @@ class AlbumSlideshowCamera(Camera):
 
         while self._current_frame is None:
             try:
-                if await self._rebuild_current_frame():
+                async with self._navigation_lock:
+                    if self._current_frame is None:
+                        await self._rebuild_current_frame()
+                if self._current_frame is not None:
                     self._consecutive_failures = 0
                     break
             except asyncio.CancelledError:
@@ -812,28 +845,18 @@ class AlbumSlideshowCamera(Camera):
         while True:
             try:
                 if self._timeline_dirty:
-                    await self._rebuild_current_frame()
-                    continue
-
-                if self._nav_requests:
-                    direction = self._nav_requests.popleft()
-                    self._last_nav_started_at = _utc_now_iso()
-                    self.async_write_ha_state()
-                    changed = (
-                        await self._show_next_frame()
-                        if direction > 0
-                        else await self._show_previous_frame()
-                    )
-                    if changed:
-                        self._last_nav_committed_at = _utc_now_iso()
-                        self.async_write_ha_state()
+                    async with self._navigation_lock:
+                        if self._timeline_dirty:
+                            await self._rebuild_current_frame()
                     continue
 
                 interrupted = await self._wait_or_interrupt(
                     float(int(self.store.slide_interval))
                 )
                 if not interrupted and not self.store.paused:
-                    await self._show_next_frame()
+                    async with self._navigation_lock:
+                        if not self._timeline_dirty:
+                            await self._show_next_frame()
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise

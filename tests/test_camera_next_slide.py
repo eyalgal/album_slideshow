@@ -76,7 +76,8 @@ def _make_cam(depth: int = 2, paused: bool = False):
     cam._current_frame = None
     cam._previous_frames = deque()
     cam._next_frames = deque()
-    cam._nav_requests = deque()
+    cam._navigation_lock = asyncio.Lock()
+    cam._navigation_pending = 0
     cam._interrupt_event = asyncio.Event()
     cam._next_ready_event = asyncio.Event()
     cam._timeline_generation = 0
@@ -411,9 +412,9 @@ def test_real_scheduler_can_restart_after_invalidating_inflight_preload():
 # ── wake-up and request behavior ───────────────────────────────────────────
 
 
-def test_wait_returns_immediately_when_navigation_is_pending():
+def test_wait_returns_immediately_when_timeline_is_dirty():
     cam = _make_cam()
-    cam._nav_requests.append(1)
+    cam._timeline_dirty = True
     assert asyncio.run(cam._wait_or_interrupt(timeout=30)) is True
 
 
@@ -428,28 +429,47 @@ def test_paused_wait_wakes_for_manual_navigation():
     async def run():
         waiter = asyncio.create_task(cam._wait_or_interrupt(timeout=30))
         await asyncio.sleep(0)
-        cam._nav_requests.append(1)
         cam._interrupt_event.set()
         return await waiter
 
     assert asyncio.run(run()) is True
 
 
-def test_force_navigation_queues_every_press():
-    cam = _make_cam()
+def test_force_navigation_executes_rapid_presses_in_order():
+    cam = _make_cam(depth=2)
+    a, b, c = _frame(0), _frame(1), _frame(2)
+    cam._current_frame = a
+    cam._next_frames.extend([b, c])
 
     async def run():
-        await cam.async_force_next()
-        await cam.async_force_next()
-        await cam.async_force_prev()
+        await asyncio.gather(
+            cam.async_force_next(),
+            cam.async_force_next(),
+            cam.async_force_prev(),
+        )
 
     asyncio.run(run())
-    assert list(cam._nav_requests) == [1, 1, -1]
+    assert cam._current_frame is b
+    assert cam._navigation_pending == 0
     assert cam._last_nav_direction == "previous"
     assert cam._last_nav_requested_at is not None
+    assert cam._last_nav_committed_at is not None
+    assert cam._last_nav_outcome == "displayed"
+    assert cam._last_nav_error is None
 
 
-def test_render_loop_processes_buffered_next_and_previous_requests():
+def test_force_previous_reports_when_no_frame_is_available():
+    cam = _make_cam()
+    cam._current_frame = _frame(0)
+
+    asyncio.run(cam.async_force_prev())
+
+    assert cam._current_frame.cursor.index == 0
+    assert cam._last_nav_outcome == "not_available"
+    assert cam._navigation_pending == 0
+
+
+def test_direct_navigation_operates_while_render_loop_is_waiting():
     cam = _make_cam(depth=2)
     a, b = _frame(0), _frame(1)
     ready = asyncio.Event()

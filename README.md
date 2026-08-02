@@ -597,6 +597,8 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `previous_frames_cached` | int | Previous rendered frames currently available for immediate navigation |
 | `next_frames_preloaded` | int | Upcoming rendered frames currently available for immediate navigation |
 | `navigation_preloading` | bool | Whether the background worker is currently filling the upcoming-frame buffer |
+| `last_navigation_outcome` | string \| null | Result of the latest manual action: `pending`, `displayed`, `not_available`, or `error` |
+| `last_navigation_error` | string \| null | Error from the latest manual navigation attempt, when present |
 
 ---
 
