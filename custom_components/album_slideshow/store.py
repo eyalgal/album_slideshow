@@ -13,6 +13,7 @@ from .const import (
     DEFAULT_PAIR_DIVIDER_PX,
     DEFAULT_PAIR_DIVIDER_COLOR,
     DEFAULT_IMAGE_CACHE_MB,
+    DEFAULT_NAVIGATION_BUFFER_SIZE,
     DEFAULT_MAX_RESOLUTION,
     DEFAULT_DATE_FILTER,
     DEFAULT_MISSING_DATE_MODE,
@@ -33,6 +34,7 @@ class SlideshowStore:
     pair_divider_px: int = DEFAULT_PAIR_DIVIDER_PX
     pair_divider_color: str = DEFAULT_PAIR_DIVIDER_COLOR
     image_cache_mb: int = DEFAULT_IMAGE_CACHE_MB
+    navigation_buffer_size: int = DEFAULT_NAVIGATION_BUFFER_SIZE
     max_resolution: str = DEFAULT_MAX_RESOLUTION
 
     # Date filter mode (preset windows like this_year / on_this_day).

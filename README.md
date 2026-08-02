@@ -62,7 +62,8 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 ### ⏯ Pause / Resume
 - Pause switch holds the current slide indefinitely
 - Manual "Previous slide" and "Next slide" buttons still work while paused
-- Previous steps back through recently shown images (even in random order)
+- Previous and Next swap pre-rendered frames for immediate navigation
+- A configurable navigation buffer retains previous frames and pre-renders upcoming frames (even in random order)
 - Survives Home Assistant restarts
 
 ### ✨ Transitions
@@ -106,6 +107,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Slide interval | 60 | Any positive integer (seconds) | Time between slides |
 | Number | Album refresh | 24 | Any positive integer (hours) | How often album contents refresh |
 | Number | Pair divider size | 8 | 0-64 (px) | Width of divider between paired images |
+| Number | Navigation buffer | 2 | 0-10 (slides) | Fully rendered slides cached before and after the current frame for immediate Previous/Next navigation |
 | Number | Image cache size | 75 | 50-1000 (MB) | Memory budget for downloaded image data (per album) |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
@@ -591,6 +593,10 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `paused` | bool | Whether the slideshow is paused |
 | `date_filter` | string | Active date filter mode |
 | `frame_id` | int | Monotonic counter incremented on every committed slide. Used by the [card](#-album-slideshow-card) to detect new frames |
+| `navigation_buffer_size` | int | Configured number of fully rendered slides retained in each direction |
+| `previous_frames_cached` | int | Previous rendered frames currently available for immediate navigation |
+| `next_frames_preloaded` | int | Upcoming rendered frames currently available for immediate navigation |
+| `navigation_preloading` | bool | Whether the background worker is currently filling the upcoming-frame buffer |
 
 ---
 

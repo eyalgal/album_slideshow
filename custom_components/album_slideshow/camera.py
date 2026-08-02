@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import random
 from pathlib import Path
+from typing import Any
 
 import async_timeout
 from PIL import Image
@@ -47,15 +49,27 @@ _ACCEPTED_IMAGE_PREFIX = ("image/",)
 _PAIR_SEARCH_LIMIT = 12
 _SKIP_SEARCH_LIMIT = 30
 
-# How many recently shown slides to remember for the "previous slide" button.
-# Navigation walks backward and forward through this list; new slides are only
-# drawn when at the head, so back/forward is a true history even in random
-# order. Bounded so a long-running slideshow does not grow without limit.
-_HISTORY_MAX = 500
+_MAX_RENDER_ATTEMPTS = 10
 
 
-class _NavigationInterrupted(Exception):
-    """Internal signal used to preempt a stalled render for navigation."""
+@dataclass(frozen=True, slots=True)
+class _NavigationCursor:
+    """All mutable ordering state needed to render the following slide."""
+
+    index: int
+    random_order: tuple[int, ...]
+    random_pos: int
+    recent_urls: tuple[str, ...]
+    rng_state: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedFrame:
+    """A complete slide that can be displayed without any further work."""
+
+    data: bytes
+    cursor: _NavigationCursor
+    meta: dict
 
 
 def _ts_to_iso(ts_ms: int | None) -> str | None:
@@ -170,25 +184,19 @@ class AlbumSlideshowCamera(Camera):
         self._frame_id: int = 0
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
-        # Separate from the general interrupt event so navigation can preempt
-        # a slow in-flight HTTP image download. Store/coordinator refreshes
-        # still wait for the current render to finish normally.
-        self._navigation_event: asyncio.Event = asyncio.Event()
-        # Pending user navigation. Each button/service press appends +1 (next)
-        # or -1 (previous); the render loop drains one per cycle so rapid
-        # presses are never swallowed. Replaces the old boolean force-next flag.
+        # Pending user navigation. The loop consumes commands in order, but a
+        # buffered command only swaps bytes and metadata, with no I/O or PIL.
         self._nav_requests: deque[int] = deque()
-        # Navigation history of shown indices, with a cursor into it. Lets
-        # "previous slide" walk backward and "next" redo forward, including in
-        # random order. New slides are only drawn at the head of history.
-        self._history: list[int] = []
-        self._history_pos: int = -1
-        # Set when the effective playlist changes (data/settings update) so the
-        # loop rebuilds history from the new current index instead of pointing
-        # at stale positions.
-        self._history_dirty: bool = False
-        # Whether the next committed frame should be appended to history.
-        self._record_history: bool = False
+        # Rendered timeline around the current frame. Previous frames and future
+        # frames are final encoded JPEGs, so both navigation directions are an
+        # O(1) deque swap. The future deque is replenished in the background.
+        self._current_frame: _RenderedFrame | None = None
+        self._previous_frames: deque[_RenderedFrame] = deque()
+        self._next_frames: deque[_RenderedFrame] = deque()
+        self._timeline_generation: int = 0
+        self._timeline_dirty: bool = False
+        self._next_ready_event: asyncio.Event = asyncio.Event()
+        self._preload_task: asyncio.Task | None = None
         # Visible navigation diagnostics. These are state attributes rather
         # than debug-only log messages so they remain observable when Home
         # Assistant's UI filters debug logs.
@@ -196,24 +204,19 @@ class AlbumSlideshowCamera(Camera):
         self._last_nav_requested_at: str | None = None
         self._last_nav_started_at: str | None = None
         self._last_nav_committed_at: str | None = None
-        self._nav_commit_pending: bool = False
         self._consecutive_failures: int = 0
         self._render_task: asyncio.Task | None = None
 
         def _on_coordinator_update() -> None:
             self._effective_cache = None
-            self._history_dirty = True
-            self._interrupt_event.set()
-            self.async_write_ha_state()
+            self._invalidate_timeline()
 
         coordinator.async_add_listener(_on_coordinator_update)
 
         def _on_store_change() -> None:
             self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
             self._effective_cache = None
-            self._history_dirty = True
-            self._interrupt_event.set()
-            self.async_write_ha_state()
+            self._invalidate_timeline()
 
         store.add_listener(_on_store_change)
 
@@ -236,10 +239,17 @@ class AlbumSlideshowCamera(Camera):
         )
 
     async def async_will_remove_from_hass(self) -> None:
+        preload_task = self._preload_task
+        self._cancel_preload()
         if self._render_task is not None:
             self._render_task.cancel()
             try:
                 await self._render_task
+            except asyncio.CancelledError:
+                pass
+        if preload_task is not None:
+            try:
+                await preload_task
             except asyncio.CancelledError:
                 pass
 
@@ -301,6 +311,12 @@ class AlbumSlideshowCamera(Camera):
             "pair_divider_px": int(self.store.pair_divider_px),
             "pair_divider_color": self.store.pair_divider_color,
             "frame_id": self._frame_id,
+            "navigation_buffer_size": self._buffer_depth,
+            "previous_frames_cached": len(self._previous_frames),
+            "next_frames_preloaded": len(self._next_frames),
+            "navigation_preloading": bool(
+                self._preload_task is not None and not self._preload_task.done()
+            ),
             "navigation_queue_size": len(self._nav_requests),
             "last_navigation_direction": self._last_nav_direction,
             "last_navigation_requested_at": self._last_nav_requested_at,
@@ -384,7 +400,6 @@ class AlbumSlideshowCamera(Camera):
         self._last_nav_direction = "next"
         self._last_nav_requested_at = _utc_now_iso()
         self._interrupt_event.set()
-        self._navigation_event.set()
         _LOGGER.debug(
             "Album Slideshow %s: next-slide press queued (queue=%d, index=%d)",
             self.entry.title, len(self._nav_requests), self._index,
@@ -397,7 +412,6 @@ class AlbumSlideshowCamera(Camera):
         self._last_nav_direction = "previous"
         self._last_nav_requested_at = _utc_now_iso()
         self._interrupt_event.set()
-        self._navigation_event.set()
         _LOGGER.debug(
             "Album Slideshow %s: previous-slide press queued (queue=%d, index=%d)",
             self.entry.title, len(self._nav_requests), self._index,
@@ -442,202 +456,394 @@ class AlbumSlideshowCamera(Camera):
     async def async_handle_async_mjpeg_stream(self, request):
         return await self.handle_async_mjpeg_stream(request)
 
-    async def _wait_or_interrupt(self, timeout: float) -> bool:
-        """Wait up to ``timeout`` seconds, returning True if interrupted.
+    @property
+    def _buffer_depth(self) -> int:
+        """Configured number of rendered frames retained in each direction."""
+        return min(10, max(0, int(self.store.navigation_buffer_size)))
 
-        Does NOT clear ``_interrupt_event`` - the render loop clears it once
-        per cycle, before rendering, so a signal that arrives while we're
-        rendering (a navigation press, a coordinator/store change) survives
-        until we get here instead of being wiped.
+    def _capture_cursor(self, source=None) -> _NavigationCursor:
+        """Snapshot ordering state from this camera or a private renderer."""
+        source = source or self
+        return _NavigationCursor(
+            index=int(source._index),
+            random_order=tuple(source._random_order),
+            random_pos=int(source._random_pos),
+            recent_urls=tuple(source._recent_urls),
+            rng_state=source._rng.getstate(),
+        )
 
-        Pending navigation is honored immediately without sleeping, so a press
-        that landed during the last render (or right at the loop boundary)
-        isn't held until the full slide interval elapses.
+    def _make_renderer(self, cursor: _NavigationCursor):
+        """Create an isolated render context sharing only immutable services/cache.
+
+        Composition helpers historically operate on ``self._index`` and random
+        ordering fields. A private camera-shaped context lets background
+        preloading reuse those mature helpers without ever mutating the live
+        entity's current frame or navigation cursor.
         """
-        if self._nav_requests:
+        renderer = AlbumSlideshowCamera.__new__(AlbumSlideshowCamera)
+        renderer.hass = self.hass
+        renderer.entry = self.entry
+        renderer.coordinator = self.coordinator
+        renderer.store = self.store
+        renderer._download_cache = self._download_cache
+        renderer._index = cursor.index
+        renderer._random_order = list(cursor.random_order)
+        renderer._random_pos = cursor.random_pos
+        renderer._recent_urls = list(cursor.recent_urls)
+        renderer._rng = random.Random()
+        renderer._rng.setstate(cursor.rng_state)
+        return renderer
+
+    async def _render_available_frame(
+        self,
+        cursor: _NavigationCursor,
+        items: list[MediaItem],
+        *,
+        advance: bool,
+    ) -> _RenderedFrame:
+        """Render the current or next usable slide from ``cursor``.
+
+        Broken candidates are skipped, matching the old loop's retry behavior.
+        All state mutations occur on a private renderer. The returned JPEG and
+        cursor are therefore safe to place in the future buffer.
+        """
+        if not items:
+            raise RuntimeError("No media available")
+
+        attempts = min(len(items), _MAX_RENDER_ATTEMPTS)
+        last_error: Exception | None = None
+        should_advance = advance
+
+        for _ in range(attempts):
+            renderer = self._make_renderer(cursor)
+            renderer._index %= len(items)
+            if should_advance:
+                renderer._do_advance(len(items), items)
+
+            composed: Image.Image | None = None
+            try:
+                async with self._compose_semaphore:
+                    composed, meta = await renderer._compose_for_index(items)
+                    cursor = self._capture_cursor(renderer)
+                    if composed is None:
+                        raise RuntimeError("Image composition returned no frame")
+                    encoded = await self.hass.async_add_executor_job(
+                        ip.encode_image, composed
+                    )
+                return _RenderedFrame(encoded, cursor, meta or {})
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                last_error = err
+                cursor = self._capture_cursor(renderer)
+                should_advance = True
+                _LOGGER.debug(
+                    "Album Slideshow %s: skipping unrenderable buffered slide: %s",
+                    self.entry.title,
+                    err,
+                )
+            finally:
+                ip.safe_close(composed)
+
+        raise RuntimeError(
+            f"Could not render a usable slide after {attempts} attempts: {last_error}"
+        )
+
+    def _apply_frame(self, frame: _RenderedFrame) -> None:
+        """Make a rendered frame current and publish it to Home Assistant."""
+        self._current_frame = frame
+        self._framebuffer = frame.data
+        self.store.last_frame = frame.data
+        self._index = frame.cursor.index
+        self._random_order = list(frame.cursor.random_order)
+        self._random_pos = frame.cursor.random_pos
+        self._recent_urls = list(frame.cursor.recent_urls)
+        self._rng.setstate(frame.cursor.rng_state)
+
+        meta = frame.meta
+        self._last_is_portrait = meta.get("is_portrait")
+        self._last_captured_at_pair = meta.get("captured_at_pair")
+        self._last_pair_frames = meta.get("pair_frames")
+        self._last_pair_orientation = meta.get("pair_orientation")
+        self._frame_id += 1
+
+        _LOGGER.debug(
+            "Album Slideshow %s: displayed buffered frame_id=%d index=%d "
+            "previous=%d next=%d",
+            self.entry.title,
+            self._frame_id,
+            self._index,
+            len(self._previous_frames),
+            len(self._next_frames),
+        )
+        self.async_write_ha_state()
+
+    def _trim_timeline(self) -> None:
+        """Enforce the configured frame count on both sides of current."""
+        depth = self._buffer_depth
+        while len(self._previous_frames) > depth:
+            self._previous_frames.popleft()
+        while len(self._next_frames) > depth:
+            self._next_frames.pop()
+
+    def _cancel_preload(self) -> None:
+        task = self._preload_task
+        self._preload_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        self._next_ready_event.set()
+
+    def _invalidate_timeline(self) -> None:
+        """Drop frames rendered from stale media/settings and wake the loop."""
+        self._timeline_generation += 1
+        self._timeline_dirty = True
+        self._previous_frames.clear()
+        self._next_frames.clear()
+        self._cancel_preload()
+        self._interrupt_event.set()
+        self.async_write_ha_state()
+
+    def _schedule_preload(self) -> None:
+        """Start the single per-camera worker that fills future frames."""
+        self._trim_timeline()
+        if (
+            self._buffer_depth <= 0
+            or self._current_frame is None
+            or len(self._next_frames) >= self._buffer_depth
+        ):
+            return
+        if self._preload_task is not None and not self._preload_task.done():
+            return
+
+        generation = self._timeline_generation
+        self._preload_task = self.hass.async_create_background_task(
+            self._preload_loop(generation),
+            name="album_slideshow_preload",
+        )
+
+    async def _preload_loop(self, generation: int) -> None:
+        """Render future slides sequentially until the configured buffer is full."""
+        this_task = asyncio.current_task()
+        try:
+            while generation == self._timeline_generation:
+                self._trim_timeline()
+                if len(self._next_frames) >= self._buffer_depth:
+                    return
+
+                base = self._next_frames[-1] if self._next_frames else self._current_frame
+                if base is None:
+                    return
+                items = self._effective_items()
+                if not items:
+                    return
+
+                frame = await self._render_available_frame(
+                    base.cursor,
+                    items,
+                    advance=True,
+                )
+                if generation != self._timeline_generation:
+                    return
+
+                # Navigation may have moved the base from future to current or
+                # vice versa while rendering. It is still valid if it remains
+                # the last frame in the known timeline.
+                current_tail = (
+                    self._next_frames[-1]
+                    if self._next_frames
+                    else self._current_frame
+                )
+                if current_tail is not base:
+                    continue
+                if len(self._next_frames) < self._buffer_depth:
+                    self._next_frames.append(frame)
+                    self._next_ready_event.set()
+                    self.async_write_ha_state()
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            _LOGGER.warning(
+                "Album Slideshow %s: could not fill navigation buffer: %s",
+                self.entry.title,
+                err,
+            )
+        finally:
+            if self._preload_task is this_task:
+                self._preload_task = None
+            self._next_ready_event.set()
+            self.async_write_ha_state()
+
+    async def _await_preloaded_frame(self) -> bool:
+        """Wait for the in-flight worker's first frame, without waiting for all X."""
+        if self._next_frames:
+            return True
+        if self._buffer_depth <= 0:
+            return False
+
+        self._schedule_preload()
+        while not self._next_frames:
+            task = self._preload_task
+            if task is None or task.done():
+                return False
+            self._next_ready_event.clear()
+            if self._next_frames:
+                return True
+            waiter = asyncio.create_task(self._next_ready_event.wait())
+            try:
+                await asyncio.wait(
+                    {task, waiter},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                waiter.cancel()
+                try:
+                    await waiter
+                except asyncio.CancelledError:
+                    pass
+        return True
+
+    async def _show_next_frame(self) -> bool:
+        """Display the next buffered frame, rendering on demand only if empty."""
+        if self._current_frame is None:
+            return await self._rebuild_current_frame()
+
+        await self._await_preloaded_frame()
+        if self._next_frames:
+            frame = self._next_frames.popleft()
+        else:
+            items = self._effective_items()
+            frame = await self._render_available_frame(
+                self._current_frame.cursor,
+                items,
+                advance=True,
+            )
+
+        if self._buffer_depth > 0:
+            self._previous_frames.append(self._current_frame)
+        self._trim_timeline()
+        self._apply_frame(frame)
+        self._schedule_preload()
+        return True
+
+    async def _show_previous_frame(self) -> bool:
+        """Restore the most recent retained frame without I/O or composition."""
+        if not self._previous_frames:
+            return False
+
+        frame = self._previous_frames.pop()
+        if self._current_frame is not None and self._buffer_depth > 0:
+            self._next_frames.appendleft(self._current_frame)
+        self._trim_timeline()
+        self._apply_frame(frame)
+        self._schedule_preload()
+        return True
+
+    async def _rebuild_current_frame(self) -> bool:
+        """Render the current cursor after startup or playlist/settings changes."""
+        generation = self._timeline_generation
+        self._timeline_dirty = False
+        items = self._effective_items()
+        if not items:
+            return False
+
+        cursor = (
+            self._current_frame.cursor
+            if self._current_frame is not None
+            else self._capture_cursor()
+        )
+        frame = await self._render_available_frame(cursor, items, advance=False)
+        if generation != self._timeline_generation:
+            return False
+        self._previous_frames.clear()
+        self._next_frames.clear()
+        self._apply_frame(frame)
+        self._schedule_preload()
+        return True
+
+    async def _wait_or_interrupt(self, timeout: float) -> bool:
+        """Wait for configuration/navigation or for the slide timer to expire."""
+        if self._nav_requests or self._timeline_dirty:
+            return True
+        self._interrupt_event.clear()
+        # Close the clear/wait race: callbacks cannot run between these two
+        # synchronous statements without setting the event again.
+        if self._nav_requests or self._timeline_dirty:
             return True
         try:
-            await asyncio.wait_for(self._interrupt_event.wait(), timeout=timeout)
+            if self.store.paused:
+                await self._interrupt_event.wait()
+            else:
+                await asyncio.wait_for(
+                    self._interrupt_event.wait(),
+                    timeout=timeout,
+                )
             return True
         except asyncio.TimeoutError:
             return False
 
     async def _render_loop(self, initial_delay: float = 0.0) -> None:
-        """Background task: render slides into _framebuffer, advance on timer or interrupt."""
+        """Display buffered frames on command/timer and refill them in the background."""
         if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+
+        while self._current_frame is None:
             try:
-                await asyncio.sleep(initial_delay)
+                if await self._rebuild_current_frame():
+                    self._consecutive_failures = 0
+                    break
             except asyncio.CancelledError:
                 raise
-        # The first frame shows the current index without drawing a new one;
-        # record it as the start of navigation history.
-        advance, record = False, True
-        while True:
-            # Clear the wake signal before rendering. Anything that happens
-            # from here on (a navigation press, a coordinator/store change)
-            # re-sets it and is picked up after this frame commits, so no
-            # wake is lost while we're mid-render.
-            self._interrupt_event.clear()
-            # The event that caused the currently planned navigation has been
-            # consumed. Keep it set when more clicks remain queued so those
-            # clicks skip directly to their target instead of waiting for an
-            # unnecessary intermediate image download.
-            if not self._nav_requests:
-                self._navigation_event.clear()
-            self._record_history = record
-            try:
-                await self._render_cycle(advance=advance)
-                self._consecutive_failures = 0
-            except asyncio.CancelledError:
-                raise
-            except _NavigationInterrupted:
-                # A user pressed Previous/Next during a slow HTTP fetch.
-                # Consume the request and restart immediately without treating
-                # the intentional cancellation as a render failure/backoff.
-                advance, record = self._plan_next(interrupted=True)
-                continue
             except Exception as err:
                 self._consecutive_failures += 1
                 backoff = min(2 ** self._consecutive_failures, 60)
                 _LOGGER.warning(
-                    "Album Slideshow: render cycle failed (attempt %d), retrying in %ds: %s",
-                    self._consecutive_failures, backoff, err,
+                    "Album Slideshow: initial render failed (attempt %d), retrying in %ds: %s",
+                    self._consecutive_failures,
+                    backoff,
+                    err,
                 )
-                try:
-                    await asyncio.sleep(backoff)
-                except asyncio.CancelledError:
-                    raise
-                advance, record = True, True  # Skip the broken image on retry
-                continue
+                await asyncio.sleep(backoff)
+            if not self._effective_items():
+                self._interrupt_event.clear()
+                if not self._effective_items():
+                    await self._interrupt_event.wait()
 
-            interrupted = await self._wait_or_interrupt(float(int(self.store.slide_interval)))
-            advance, record = self._plan_next(interrupted)
-            _LOGGER.debug(
-                "Album Slideshow %s: loop step interrupted=%s advance=%s record=%s "
-                "index=%d queue=%d history_pos=%d",
-                self.entry.title, interrupted, advance, record,
-                self._index, len(self._nav_requests), self._history_pos,
-            )
-
-    def _plan_next(self, interrupted: bool) -> tuple[bool, bool]:
-        """Decide the next render step, returning ``(advance, record)``.
-
-        ``advance`` asks ``_render_cycle`` to draw a fresh next slide and
-        ``record`` asks the commit to append the shown index to history. For
-        backward/redo steps this sets ``self._index`` from history directly and
-        returns ``(False, False)`` so the cycle just re-composes it.
-        """
-        self._reset_history_if_dirty()
-        if self._nav_requests:
-            direction = self._nav_requests.popleft()
-            self._last_nav_started_at = _utc_now_iso()
-            self._nav_commit_pending = True
-            self.async_write_ha_state()
-            return self._plan_forward() if direction > 0 else self._plan_back()
-        if interrupted:
-            # A data/settings change woke us: re-render the current slide.
-            # Re-seed history with it when a reset just emptied the history.
-            return (False, self._history_pos < 0)
-        if self.store.paused:
-            return (False, self._history_pos < 0)
-        return self._plan_forward()
-
-    def _plan_forward(self) -> tuple[bool, bool]:
-        """Step forward: redo through history if rewound, else draw a new slide."""
-        if 0 <= self._history_pos < len(self._history) - 1:
-            self._history_pos += 1
-            self._index = self._history[self._history_pos]
-            return (False, False)
-        return (True, True)
-
-    def _plan_back(self) -> tuple[bool, bool]:
-        """Step backward through history, holding on the oldest remembered slide."""
-        if self._history_pos > 0:
-            self._history_pos -= 1
-            self._index = self._history[self._history_pos]
-        return (False, False)
-
-    def _reset_history_if_dirty(self) -> None:
-        """Drop stale history after the effective playlist changed."""
-        if self._history_dirty:
-            self._history_dirty = False
-            self._history = []
-            self._history_pos = -1
-
-    def _append_history(self, index: int) -> None:
-        """Record a freshly shown slide at the head of history."""
-        self._history.append(index)
-        if len(self._history) > _HISTORY_MAX:
-            del self._history[: len(self._history) - _HISTORY_MAX]
-        self._history_pos = len(self._history) - 1
-
-    async def _render_cycle(self, advance: bool) -> None:
-        """Render one frame.
-
-        The slideshow is just "advance index, compose, encode, broadcast".
-        Visible transitions are handled by the Lovelace card client-side,
-        so this path stays minimal: at most one PIL decode + encode per
-        slide change.
-
-        Compose work is serialised across all albums via a domain-wide
-        semaphore so 4 cameras don't all decode + encode at once.
-        """
-        items: list[MediaItem] = self._effective_items()
-        if not items:
-            return
-
-        count = len(items)
-        if advance:
-            self._do_advance(count, items)
-        # Guard against a history index left over from a larger playlist so a
-        # backward/redo step can never read out of range.
-        if not 0 <= self._index < count:
-            self._index %= count
-
-        _LOGGER.debug(
-            "Album Slideshow %s: render cycle start advance=%s index=%d",
-            self.entry.title, advance, self._index,
-        )
-        async with self._compose_semaphore:
-            composed, meta = await self._compose_for_index(items)
-            if composed is None:
-                return
+        while True:
             try:
-                await self._commit_composed(composed, meta)
-            finally:
-                ip.safe_close(composed)
+                if self._timeline_dirty:
+                    await self._rebuild_current_frame()
+                    continue
 
-    async def _commit_composed(self, composed: Image.Image, meta: dict) -> None:
-        """Encode the composed slide into the framebuffer and broadcast.
+                if self._nav_requests:
+                    direction = self._nav_requests.popleft()
+                    self._last_nav_started_at = _utc_now_iso()
+                    self.async_write_ha_state()
+                    changed = (
+                        await self._show_next_frame()
+                        if direction > 0
+                        else await self._show_previous_frame()
+                    )
+                    if changed:
+                        self._last_nav_committed_at = _utc_now_iso()
+                        self.async_write_ha_state()
+                    continue
 
-        Encodes off the loop so the JPEG encode (30-80 ms at 1080p, more
-        at 4K) doesn't block HA.
-        """
-        encoded = await self.hass.async_add_executor_job(
-            ip.encode_image, composed
-        )
-
-        self._framebuffer = encoded
-        self.store.last_frame = encoded
-        self._frame_id += 1
-        if self._record_history:
-            self._append_history(self._index)
-        if self._nav_commit_pending:
-            self._last_nav_committed_at = _utc_now_iso()
-            self._nav_commit_pending = False
-        if meta:
-            self._last_is_portrait = meta.get("is_portrait")
-        else:
-            self._last_is_portrait = None
-        self._last_captured_at_pair = meta.get("captured_at_pair") if meta else None
-        self._last_pair_frames = meta.get("pair_frames") if meta else None
-        self._last_pair_orientation = meta.get("pair_orientation") if meta else None
-
-        _LOGGER.debug(
-            "Album Slideshow %s: committed frame_id=%d index=%d",
-            self.entry.title, self._frame_id, self._index,
-        )
-        self.async_write_ha_state()
+                interrupted = await self._wait_or_interrupt(
+                    float(int(self.store.slide_interval))
+                )
+                if not interrupted and not self.store.paused:
+                    await self._show_next_frame()
+                self._consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self._consecutive_failures += 1
+                _LOGGER.warning(
+                    "Album Slideshow: buffered navigation/render failed (attempt %d): %s",
+                    self._consecutive_failures,
+                    err,
+                )
 
     @property
     def _compose_semaphore(self) -> asyncio.Semaphore:
@@ -997,38 +1203,6 @@ class AlbumSlideshowCamera(Camera):
         return None
 
     async def _http_get(self, url: str) -> bytes | None:
-        """Fetch an image while allowing navigation to preempt the request."""
-        request_task = asyncio.create_task(self._http_get_uninterrupted(url))
-        navigation_task = asyncio.create_task(self._navigation_event.wait())
-        try:
-            done, _ = await asyncio.wait(
-                {request_task, navigation_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            # Prefer a completed response if both became ready in the same
-            # event-loop turn. Otherwise stop waiting on the stale image.
-            if request_task in done:
-                return await request_task
-            request_task.cancel()
-            try:
-                await request_task
-            except asyncio.CancelledError:
-                pass
-            raise _NavigationInterrupted
-        finally:
-            navigation_task.cancel()
-            if not request_task.done():
-                request_task.cancel()
-            try:
-                await navigation_task
-            except asyncio.CancelledError:
-                pass
-            try:
-                await request_task
-            except asyncio.CancelledError:
-                pass
-
-    async def _http_get_uninterrupted(self, url: str) -> bytes | None:
         """Fetch one remote image with validation and a hard timeout."""
         session = async_get_clientsession(self.hass)
         try:

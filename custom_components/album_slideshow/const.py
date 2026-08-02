@@ -254,6 +254,10 @@ DEFAULT_RECURSIVE = True
 # path. Users with one album and lots of RAM can bump this via the
 # Image cache size number entity.
 DEFAULT_IMAGE_CACHE_MB = 75
+# Number of fully rendered slides retained on each side of the current frame.
+# Previous/Next can swap these JPEGs immediately without downloading,
+# composing, or encoding during the button press.
+DEFAULT_NAVIGATION_BUFFER_SIZE = 2
 
 MAX_RESOLUTION_OPTIONS = ["480p", "720p", "1080p", "1440p", "4K (2160p)", "original"]
 DEFAULT_MAX_RESOLUTION = "1080p"

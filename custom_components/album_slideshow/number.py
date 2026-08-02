@@ -20,6 +20,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             SlideIntervalNumber(entry, store),
             RefreshHoursNumber(entry, store, coordinator),
             PairDividerWidthNumber(entry, store),
+            NavigationBufferSizeNumber(entry, store),
             ImageCacheMbNumber(entry, store),
         ]
     )
@@ -138,6 +139,38 @@ class PairDividerWidthNumber(_BaseNumber):
         if old and old.state not in (None, "unknown", "unavailable"):
             try:
                 self.store.pair_divider_px = max(0, int(float(old.state)))
+                self.store.notify()
+            except Exception:
+                return
+
+
+class NavigationBufferSizeNumber(_BaseNumber):
+    _attr_icon = "mdi:page-previous-outline"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 10
+    _attr_native_step = 1
+
+    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
+        super().__init__(entry, store)
+        self._attr_unique_id = f"{entry.entry_id}_navigation_buffer_size"
+        self._attr_name = "Navigation buffer (slides)"
+
+    @property
+    def native_value(self):
+        return int(self.store.navigation_buffer_size)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.store.navigation_buffer_size = min(10, max(0, int(value)))
+        self.store.notify()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        old = await self.async_get_last_state()
+        if old and old.state not in (None, "unknown", "unavailable"):
+            try:
+                self.store.navigation_buffer_size = min(
+                    10, max(0, int(float(old.state)))
+                )
                 self.store.notify()
             except Exception:
                 return
