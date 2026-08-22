@@ -162,3 +162,102 @@ def test_parse_propfind_empty_returns_empty():
         '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
     )
     assert nc.parse_propfind_response(empty, _ROOT) == []
+
+
+# ── parse_share_link (public album link) ───────────────────────────────────
+
+def test_parse_share_link_pretty_url():
+    out = nc.parse_share_link("https://cloud.example.com/apps/photos/public/AbC123")
+    assert out == ("https://cloud.example.com", "AbC123")
+
+
+def test_parse_share_link_trailing_slash():
+    out = nc.parse_share_link("https://cloud.example.com/apps/photos/public/AbC123/")
+    assert out == ("https://cloud.example.com", "AbC123")
+
+
+def test_parse_share_link_index_php_form():
+    out = nc.parse_share_link(
+        "https://cloud.example.com/index.php/apps/photos/public/AbC123"
+    )
+    assert out == ("https://cloud.example.com", "AbC123")
+
+
+def test_parse_share_link_subdirectory_install():
+    out = nc.parse_share_link(
+        "https://example.com/nextcloud/apps/photos/public/AbC123"
+    )
+    assert out == ("https://example.com/nextcloud", "AbC123")
+
+
+def test_parse_share_link_with_query_string():
+    out = nc.parse_share_link(
+        "https://cloud.example.com/apps/photos/public/AbC123?foo=bar"
+    )
+    assert out == ("https://cloud.example.com", "AbC123")
+
+
+def test_parse_share_link_rejects_non_matching_url():
+    assert nc.parse_share_link("https://cloud.example.com/s/AbC123") is None
+    assert nc.parse_share_link("not a url") is None
+    assert nc.parse_share_link("") is None
+    assert nc.parse_share_link(None) is None
+
+
+# ── dav_root_public / build_image_url_public / build_preview_url_public ────
+
+def test_dav_root_public():
+    assert nc.dav_root_public("https://cloud.example.com", "AbC123") == (
+        "https://cloud.example.com/remote.php/dav/photospublic/AbC123/"
+    )
+
+
+def test_build_image_url_public():
+    url = nc.build_image_url_public(
+        "https://cloud.example.com", "AbC123", "photo one.jpg"
+    )
+    assert url == (
+        "https://cloud.example.com/remote.php/dav/photospublic/AbC123/photo%20one.jpg"
+    )
+
+
+def test_build_preview_url_public_default_size():
+    url = nc.build_preview_url_public("https://cloud.example.com", "AbC123", "456")
+    assert url == (
+        "https://cloud.example.com/index.php/apps/photos/api/v1/publicPreview/456"
+        "?token=AbC123&x=1024&y=1024"
+    )
+
+
+def test_build_preview_url_public_custom_size():
+    url = nc.build_preview_url_public(
+        "https://cloud.example.com", "AbC123", "456", px=256
+    )
+    assert "x=256&y=256" in url
+
+
+# ── parse_propfind_response: real-server multi-propstat root regression ────
+# Shape verified against a real Nextcloud server (28.x-era): the root
+# collection's <d:response> carries *two* propstats - one 200 with just
+# resourcetype, and a second 404 Not Found for props a folder can't answer
+# (getcontenttype/getcontentlength/getlastmodified/oc:fileid). A parser that
+# naively grabs the first <d:prop> it finds per response (instead of picking
+# the 200 propstat) would silently work for this shape too, but one that
+# grabs the *last* prop block, or merges both, would not - this pins the real
+# multi-propstat structure so a regression stays caught. Exercises the shared
+# parse_propfind_response, so it protects both auth modes.
+
+_REAL_SHAPE_MULTISTATUS = """<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><d:response><d:href>/remote.php/dav/photospublic/AbC123/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><d:getcontenttype/><d:getcontentlength/><d:getlastmodified/><oc:fileid/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response><d:response><d:href>/remote.php/dav/photospublic/AbC123/12345-20260518_190350.jpg</d:href><d:propstat><d:prop><d:getcontenttype>image/jpeg</d:getcontenttype><d:getcontentlength>4424803</d:getcontentlength><d:getlastmodified>Mon, 18 May 2026 17:03:51 GMT</d:getlastmodified><d:resourcetype/><oc:fileid>12345</oc:fileid></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>
+"""
+
+
+def test_parse_propfind_real_server_shape_multi_propstat_root():
+    root = "https://cloud.example.com/remote.php/dav/photospublic/AbC123/"
+    items = nc.parse_propfind_response(_REAL_SHAPE_MULTISTATUS, root)
+    assert len(items) == 1
+    photo = items[0]
+    assert photo["filename"] == "12345-20260518_190350.jpg"
+    assert photo["content_type"] == "image/jpeg"
+    assert photo["size"] == 4424803
+    assert photo["file_id"] == "12345"

@@ -65,6 +65,10 @@ from .const import (
     CONF_NEXTCLOUD_FOLDER,
     CONF_NEXTCLOUD_RECURSIVE,
     CONF_NEXTCLOUD_IMAGE_SIZE,
+    CONF_NEXTCLOUD_SHARE_TOKEN,
+    CONF_NEXTCLOUD_AUTH_MODE,
+    NEXTCLOUD_AUTH_MODE_PUBLIC,
+    DEFAULT_NEXTCLOUD_AUTH_MODE,
     DEFAULT_NEXTCLOUD_IMAGE_SIZE,
     NEXTCLOUD_IMAGE_ORIGINAL,
     NEXTCLOUD_PREVIEW_PX,
@@ -1736,6 +1740,15 @@ class AlbumCoordinator(DataUpdateCoordinator):
         }
 
     async def _update_nextcloud(self) -> dict[str, Any]:
+        """List photos from Nextcloud, dispatching on the configured auth mode."""
+        mode = self.entry.data.get(
+            CONF_NEXTCLOUD_AUTH_MODE, DEFAULT_NEXTCLOUD_AUTH_MODE
+        )
+        if mode == NEXTCLOUD_AUTH_MODE_PUBLIC:
+            return await self._update_nextcloud_public()
+        return await self._update_nextcloud_folder()
+
+    async def _update_nextcloud_folder(self) -> dict[str, Any]:
         """List photos from an authenticated Nextcloud WebDAV folder.
 
         The PROPFIND listing carries filename/size/content-type/mtime but no
@@ -1799,39 +1812,83 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "items": items,
         }
 
+    async def _update_nextcloud_public(self) -> dict[str, Any]:
+        """List photos from a Nextcloud Photos public collaborative album.
+
+        The PROPFIND listing carries filename/size/content-type/mtime but no
+        EXIF, so capture date, GPS and description are filled in afterwards
+        by the background enrichment worker (one original-file download per
+        photo - Nextcloud has no metadata-only endpoint the way Immich does).
+        No credentials are involved - the share token is embedded in the URL.
+        """
+        from . import nextcloud as nc_api
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        token = self.entry.data.get(CONF_NEXTCLOUD_SHARE_TOKEN)
+        size = self.entry.data.get(
+            CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+        )
+        if not url or not token:
+            raise UpdateFailed("Nextcloud provider is missing the URL or share token")
+
+        client = nc_api.NextcloudPublicClient(self.hass, url, token)
+        try:
+            photos = await client.async_list_photos()
+        except Exception as err:
+            raise UpdateFailed(f"Error listing Nextcloud album: {err}") from err
+
+        if not photos:
+            raise UpdateFailed("No images found in the Nextcloud album")
+
+        items: list[MediaItem] = []
+        for p in photos:
+            href = p.get("href")
+            if not href:
+                continue
+            if size != NEXTCLOUD_IMAGE_ORIGINAL and p.get("file_id"):
+                display_url = nc_api.build_preview_url_public(
+                    client.base_url, token, p["file_id"], NEXTCLOUD_PREVIEW_PX
+                )
+            else:
+                display_url = href
+            items.append(
+                MediaItem(
+                    url=display_url,
+                    width=None,
+                    height=None,
+                    mime_type=p.get("content_type"),
+                    filename=p.get("filename"),
+                    uploaded_at=p.get("mtime_ms"),
+                    byte_size=p.get("size"),
+                    source_id=p.get("file_id") or href,
+                )
+            )
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
     async def _enrich_nextcloud_item(self, item: MediaItem) -> None:
         """Download one Nextcloud photo's original bytes and read its EXIF.
 
-        Nextcloud's WebDAV folder has no metadata-only endpoint (unlike
+        Nextcloud has no metadata-only endpoint for either auth mode (unlike
         Immich's per-asset detail call), so enrichment costs one full-file
         download per photo regardless of the display quality configured.
+        Dispatches on the configured auth mode to build the right download
+        URL/headers; the download-and-parse tail is identical either way.
         """
-        from . import nextcloud as nc_api
-        from urllib.parse import quote
-
-        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
-        username = self.entry.data.get(CONF_NEXTCLOUD_USERNAME)
-        password = self.entry.data.get(CONF_NEXTCLOUD_PASSWORD)
-        folder = self.entry.data.get(CONF_NEXTCLOUD_FOLDER) or ""
-        if not username or not password or not url:
-            item.exif_scanned = True
-            return
-
-        # Reconstruct the original-file URL: for preview items the display url
-        # is the preview endpoint, so fall back to the folder href by filename.
-        original_url = None
-        if isinstance(item.url, str) and "/remote.php/dav/files/" in item.url:
-            original_url = item.url
-        elif item.filename:
-            client = nc_api.NextcloudClient(self.hass, url, username, password, folder)
-            original_url = client.dav_root + quote(item.filename)
+        mode = self.entry.data.get(
+            CONF_NEXTCLOUD_AUTH_MODE, DEFAULT_NEXTCLOUD_AUTH_MODE
+        )
+        if mode == NEXTCLOUD_AUTH_MODE_PUBLIC:
+            original_url, headers = self._nextcloud_public_original(item)
+        else:
+            original_url, headers = self._nextcloud_folder_original(item)
         if not original_url:
             item.exif_scanned = True
             return
 
-        headers = {
-            "Authorization": nc_api.basic_auth_header(username, password)
-        }
         session = async_get_clientsession(self.hass)
         try:
             async with async_timeout.timeout(30):
@@ -1871,6 +1928,54 @@ class AlbumCoordinator(DataUpdateCoordinator):
             item.latitude = info["latitude"]
             item.longitude = info["longitude"]
         item.exif_scanned = True
+
+    def _nextcloud_folder_original(
+        self, item: MediaItem
+    ) -> tuple[str | None, dict[str, str]]:
+        """Return ``(original_url, headers)`` for a folder-mode item, or (None, {})."""
+        from . import nextcloud as nc_api
+        from urllib.parse import quote
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        username = self.entry.data.get(CONF_NEXTCLOUD_USERNAME)
+        password = self.entry.data.get(CONF_NEXTCLOUD_PASSWORD)
+        folder = self.entry.data.get(CONF_NEXTCLOUD_FOLDER) or ""
+        if not username or not password or not url:
+            return None, {}
+
+        # Reconstruct the original-file URL: for preview items the display url
+        # is the preview endpoint, so fall back to the folder href by filename.
+        original_url = None
+        if isinstance(item.url, str) and "/remote.php/dav/files/" in item.url:
+            original_url = item.url
+        elif item.filename:
+            client = nc_api.NextcloudClient(self.hass, url, username, password, folder)
+            original_url = client.dav_root + quote(item.filename)
+        if not original_url:
+            return None, {}
+        return original_url, {"Authorization": nc_api.basic_auth_header(username, password)}
+
+    def _nextcloud_public_original(
+        self, item: MediaItem
+    ) -> tuple[str | None, dict[str, str]]:
+        """Return ``(original_url, headers)`` for a public-link item, or (None, {})."""
+        from . import nextcloud as nc_api
+
+        url = self.entry.data.get(CONF_NEXTCLOUD_URL)
+        token = self.entry.data.get(CONF_NEXTCLOUD_SHARE_TOKEN)
+        if not url or not token:
+            return None, {}
+
+        # Reconstruct the original-file URL: for preview items the display url
+        # is the preview endpoint, so fall back to the album href by filename.
+        original_url = None
+        if isinstance(item.url, str) and "/remote.php/dav/photospublic/" in item.url:
+            original_url = item.url
+        elif item.filename:
+            original_url = nc_api.build_image_url_public(url, token, item.filename)
+        if not original_url:
+            return None, {}
+        return original_url, {}
 
     async def _enrich_immich_item(self, item: MediaItem) -> None:
         """Fetch one Immich asset's detail and fill location/description."""

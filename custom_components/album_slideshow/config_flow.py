@@ -77,6 +77,11 @@ from .const import (
     CONF_NEXTCLOUD_FOLDER,
     CONF_NEXTCLOUD_RECURSIVE,
     CONF_NEXTCLOUD_IMAGE_SIZE,
+    CONF_NEXTCLOUD_SHARE_TOKEN,
+    CONF_NEXTCLOUD_AUTH_MODE,
+    NEXTCLOUD_AUTH_MODE_FOLDER,
+    NEXTCLOUD_AUTH_MODE_PUBLIC,
+    DEFAULT_NEXTCLOUD_AUTH_MODE,
     DEFAULT_NEXTCLOUD_IMAGE_SIZE,
     NEXTCLOUD_IMAGE_PREVIEW,
     NEXTCLOUD_IMAGE_ORIGINAL,
@@ -203,7 +208,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     PROVIDER_PHOTOPRISM: "PhotoPrism (direct API, full metadata)",
                     PROVIDER_ICLOUD: "iCloud Shared Album",
                     PROVIDER_SYNOLOGY: "Synology Photos (direct API, full metadata)",
-                    PROVIDER_NEXTCLOUD: "Nextcloud (WebDAV folder, full metadata)",
+                    PROVIDER_NEXTCLOUD: "Nextcloud (WebDAV folder or public album link)",
                     PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
                 })
             }
@@ -937,6 +942,29 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_nextcloud(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Pick between an authenticated WebDAV folder and a public album link."""
+        if user_input is not None:
+            if user_input[CONF_NEXTCLOUD_AUTH_MODE] == NEXTCLOUD_AUTH_MODE_PUBLIC:
+                return await self.async_step_nextcloud_public()
+            return await self.async_step_nextcloud_folder()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_NEXTCLOUD_AUTH_MODE, default=DEFAULT_NEXTCLOUD_AUTH_MODE
+                ): vol.In(
+                    {
+                        NEXTCLOUD_AUTH_MODE_FOLDER: "Authenticated WebDAV folder",
+                        NEXTCLOUD_AUTH_MODE_PUBLIC: "Public album link",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(step_id="nextcloud", data_schema=schema)
+
+    async def async_step_nextcloud_folder(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Collect and validate a Nextcloud WebDAV folder + app password."""
         errors: dict[str, str] = {}
 
@@ -970,6 +998,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title=name,
                     data={
                         CONF_PROVIDER: PROVIDER_NEXTCLOUD,
+                        CONF_NEXTCLOUD_AUTH_MODE: NEXTCLOUD_AUTH_MODE_FOLDER,
                         CONF_NEXTCLOUD_URL: client.base_url,
                         CONF_NEXTCLOUD_USERNAME: username,
                         CONF_NEXTCLOUD_PASSWORD: password,
@@ -1003,7 +1032,67 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
         return self.async_show_form(
-            step_id="nextcloud", data_schema=schema, errors=errors
+            step_id="nextcloud_folder", data_schema=schema, errors=errors
+        )
+
+    async def async_step_nextcloud_public(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate a Nextcloud Photos public album link."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            raw_url = user_input[CONF_NEXTCLOUD_URL].strip()
+            size = user_input.get(
+                CONF_NEXTCLOUD_IMAGE_SIZE, DEFAULT_NEXTCLOUD_IMAGE_SIZE
+            )
+
+            from . import nextcloud as nc_api
+
+            parsed = nc_api.parse_share_link(raw_url)
+            if parsed is None:
+                errors[CONF_NEXTCLOUD_URL] = "invalid_nextcloud_url"
+            else:
+                base_url, token = parsed
+                client = nc_api.NextcloudPublicClient(self.hass, base_url, token)
+                try:
+                    await client.async_validate()
+                except Exception:  # noqa: BLE001 - any failure means bad/expired link
+                    errors["base"] = "nextcloud_public_cannot_connect"
+                else:
+                    await self.async_set_unique_id(
+                        f"{DOMAIN}:{PROVIDER_NEXTCLOUD}:{base_url}:{token}:{name}"
+                    )
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=name,
+                        data={
+                            CONF_PROVIDER: PROVIDER_NEXTCLOUD,
+                            CONF_NEXTCLOUD_AUTH_MODE: NEXTCLOUD_AUTH_MODE_PUBLIC,
+                            CONF_NEXTCLOUD_URL: base_url,
+                            CONF_NEXTCLOUD_SHARE_TOKEN: token,
+                            CONF_NEXTCLOUD_IMAGE_SIZE: size,
+                            CONF_ALBUM_NAME: name,
+                        },
+                    )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_NEXTCLOUD_URL): str,
+                vol.Optional(
+                    CONF_NEXTCLOUD_IMAGE_SIZE, default=DEFAULT_NEXTCLOUD_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        NEXTCLOUD_IMAGE_PREVIEW: "Preview (smoothest slideshow)",
+                        NEXTCLOUD_IMAGE_ORIGINAL: "Original (full quality, slower)",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="nextcloud_public", data_schema=schema, errors=errors
         )
 
 
