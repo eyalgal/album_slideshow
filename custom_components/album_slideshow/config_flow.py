@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -115,6 +116,15 @@ def _normalize_local_path(hass, path: str) -> str:
 
 
 ALBUM_URL_RE = re.compile(r"^https?://photos\.app\.goo\.gl/[^/]+/?$")
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _describe_error(err: BaseException) -> str:
+    """Render an exception for the log, including an HTTP status when known."""
+    status = getattr(err, "status", None)
+    detail = str(err) or type(err).__name__
+    return f"HTTP {status}: {detail}" if status else f"{type(err).__name__}: {detail}"
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -318,13 +328,43 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             from . import immich as immich_api
 
             client = immich_api.ImmichClient(self.hass, url, key)
+            albums: list[dict[str, Any]] = []
+            people: list[dict[str, Any]] = []
             try:
                 await client.async_validate()
-                albums = await client.async_list_albums()
-                people = await client.async_list_people()
-            except Exception:  # noqa: BLE001 - any failure means bad URL/key
-                errors["base"] = "immich_cannot_connect"
+            except Exception as err:  # noqa: BLE001 - any failure means bad URL/key
+                _LOGGER.warning(
+                    "Immich validation failed for %s: %s",
+                    client.base_url,
+                    _describe_error(err),
+                )
+                errors["base"] = (
+                    "immich_invalid_auth"
+                    if getattr(err, "status", None) in (401, 403)
+                    else "immich_cannot_connect"
+                )
             else:
+                # A key with limited permissions can read the server but not
+                # albums or people; keep going with whatever it can see.
+                for label, call in (
+                    ("albums", client.async_list_albums),
+                    ("people", client.async_list_people),
+                ):
+                    try:
+                        result = await call()
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Immich %s listing failed for %s: %s",
+                            label,
+                            client.base_url,
+                            _describe_error(err),
+                        )
+                    else:
+                        if label == "albums":
+                            albums = result
+                        else:
+                            people = result
+
                 self._immich_url = client.base_url
                 self._immich_key = key
                 # id -> name maps for the two multi-select pickers.

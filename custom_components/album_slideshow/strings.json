@@ -129,6 +129,7 @@
       "invalid_path": "Path is empty or invalid.",
       "invalid_media_source": "That does not look like a Media Source id (should start with media-source://).",
       "immich_cannot_connect": "Could not connect to Immich. Check the URL and API key.",
+      "immich_invalid_auth": "Immich rejected the API key. Check that it is valid and that its permissions include server.about, album.read and person.read.",
       "immich_no_content": "No albums or named people were found on this Immich server.",
       "immich_filter_required": "Custom search needs a JSON filter.",
       "immich_filter_invalid": "The filter must be a valid JSON object. See the README for examples.",

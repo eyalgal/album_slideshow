@@ -251,6 +251,59 @@ def test_batchexecute_filters_videos():
     assert items[0].url.startswith("https://lh3.googleusercontent.com/p=")
 
 
+def test_batchexecute_filters_videos_when_duration_is_not_last():
+    # The duration dict does not always sit at the end of the item (see #26).
+    photo = ["mk1", ["https://lh3.googleusercontent.com/p", 100, 100], 0, "d1"]
+    video = [
+        "mk2",
+        ["https://lh3.googleusercontent.com/v", 100, 100],
+        0,
+        "d2",
+        {"76647426": [12345]},
+        None,
+        ["trailing", 1],
+    ]
+    body = _make_batchexecute_response([photo, video], None)
+    items, _ = gs._parse_batchexecute_album_page(body)
+    assert len(items) == 1
+    assert items[0].url.startswith("https://lh3.googleusercontent.com/p=")
+
+
+def test_batchexecute_filters_videos_with_nested_duration():
+    photo = ["mk1", ["https://lh3.googleusercontent.com/p", 100, 100], 0, "d1"]
+    video = [
+        "mk2",
+        ["https://lh3.googleusercontent.com/v", 100, 100],
+        0,
+        "d2",
+        [None, {"76647426": [9000]}],
+    ]
+    body = _make_batchexecute_response([photo, video], None)
+    items, _ = gs._parse_batchexecute_album_page(body)
+    assert len(items) == 1
+
+
+def test_batchexecute_accepts_integer_duration_key():
+    photo = ["mk1", ["https://lh3.googleusercontent.com/p", 100, 100], 0, "d1"]
+    video = ["mk2", ["https://lh3.googleusercontent.com/v", 100, 100], 0, "d2"]
+    assert gs._is_video_item(photo) is False
+    video.append({gs._VIDEO_DURATION_KEY: [1]})
+    assert gs._is_video_item(video) is True
+
+
+def test_af_block_with_videos_is_still_recognised():
+    # A video in the sample must not disqualify the whole AF item list.
+    photo = ["mk1", ["https://lh3.googleusercontent.com/p", 100, 100], 0, "d1"]
+    video = [
+        "mk2",
+        ["https://lh3.googleusercontent.com/v", 100, 100],
+        0,
+        "d2",
+        {"76647426": [12345]},
+    ]
+    assert gs._list_looks_like_album_items([photo, video]) is True
+
+
 # -- _extract_keys ----------------------------------------------------------
 
 def test_extract_keys_finds_request_payload():

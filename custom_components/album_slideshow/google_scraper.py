@@ -194,6 +194,8 @@ def _extract_first_page_items(html: str) -> list[MediaItem]:
     items: list[MediaItem] = []
     seen: set[str] = set()
     for raw in best:
+        if _is_video_item(raw):
+            continue
         item = _parse_album_item(raw)
         if item is None or item.url in seen:
             continue
@@ -290,10 +292,37 @@ def _parse_batchexecute_album_page(body: str) -> tuple[list[MediaItem], str | No
 
     items: list[MediaItem] = []
     for raw in raw_items:
+        if _is_video_item(raw):
+            continue
         item = _parse_album_item(raw)
         if item is not None:
             items.append(item)
     return items, next_page
+
+
+def _is_video_item(raw: Any) -> bool:
+    """Return ``True`` when an album item carries a video duration.
+
+    Google tags videos with key ``76647426`` (duration in ms) inside a metadata
+    dict. That dict is usually the item's last element, but its position moves
+    between responses, so scan every nested container instead of just ``[-1]``.
+    Live photos carry a duration too and are skipped along with videos, which
+    is what the photo-only slideshow wants (see #26).
+    """
+    return _contains_key(raw, 0)
+
+
+def _contains_key(node: Any, depth: int) -> bool:
+    if depth > 6:
+        return False
+    if isinstance(node, dict):
+        for key in node:
+            if key == _VIDEO_DURATION_KEY or key == str(_VIDEO_DURATION_KEY):
+                return True
+        return any(_contains_key(v, depth + 1) for v in node.values())
+    if isinstance(node, list):
+        return any(_contains_key(v, depth + 1) for v in node)
+    return False
 
 
 def _parse_album_item(raw: Any) -> MediaItem | None:
@@ -314,14 +343,6 @@ def _parse_album_item(raw: Any) -> MediaItem | None:
         return None
     width = visual[1] if isinstance(visual[1], int) else None
     height = visual[2] if isinstance(visual[2], int) else None
-
-    # Skip videos: their last element is a dict with key 76647426 (duration).
-    if raw and isinstance(raw[-1], dict):
-        if _VIDEO_DURATION_KEY in raw[-1] or "76647426" in raw[-1]:
-            # Note: live photos also carry a duration but are still images;
-            # we treat the presence of duration as "video". If a user reports
-            # missing live photos we can revisit by checking 146008172 too.
-            return None
 
     captured_at = raw[2] if len(raw) > 2 and _looks_like_timestamp_ms(raw[2]) else None
     uploaded_at = raw[5] if len(raw) > 5 and _looks_like_timestamp_ms(raw[5]) else None
