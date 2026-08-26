@@ -1204,12 +1204,39 @@ class AlbumSlideshowCamera(Camera):
                     url, len(data), _MAX_DOWNLOAD_BYTES,
                 )
                 return None
+        elif not url.startswith("http"):
+            # End-to-end encrypted providers (Ente) can't be fetched by URL:
+            # the coordinator downloads and decrypts the bytes for us.
+            data = await self._provider_bytes(url)
+            if data is None:
+                return None
         else:
             data = await self._http_get(url)
             if data is None:
                 return None
 
         self._download_cache.put(url, data)
+        return data
+
+    async def _provider_bytes(self, url: str) -> bytes | None:
+        """Ask the coordinator for decrypted bytes behind a provider URL."""
+        fetcher = getattr(self.coordinator, "async_fetch_image_bytes", None)
+        if fetcher is None:
+            _LOGGER.warning("Album Slideshow: no handler for image url %s", url)
+            return None
+        try:
+            data = await fetcher(url)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Album Slideshow: failed to fetch %s: %s", url, err)
+            return None
+        if data is None:
+            return None
+        if len(data) > _MAX_DOWNLOAD_BYTES:
+            _LOGGER.warning(
+                "Album Slideshow: %s is %d bytes, exceeds %d byte limit; skipping",
+                url, len(data), _MAX_DOWNLOAD_BYTES,
+            )
+            return None
         return data
 
     def _image_request_headers(self, url: str) -> dict[str, str] | None:

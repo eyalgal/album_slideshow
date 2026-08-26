@@ -46,16 +46,19 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".heic", ".heif
 
 _DAV_NS = "DAV:"
 _OC_NS = "http://owncloud.org/ns"
+_NC_NS = "http://nextcloud.org/ns"
 
 _PROPFIND_BODY = (
     '<?xml version="1.0" encoding="utf-8" ?>'
-    '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+    '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"'
+    ' xmlns:nc="http://nextcloud.org/ns">'
     "<d:prop>"
     "<d:getcontenttype/>"
     "<d:getcontentlength/>"
     "<d:getlastmodified/>"
     "<d:resourcetype/>"
     "<oc:fileid/>"
+    "<nc:original-name/>"
     "</d:prop>"
     "</d:propfind>"
 ).encode("utf-8")
@@ -198,10 +201,16 @@ def parse_propfind_response(xml_text: str, root_url: str) -> list[dict[str, Any]
         # site-relative). Keep it already percent-encoded as the server gave it.
         abs_url = origin + href_raw if href_raw.startswith("/") else href_raw
 
+        # Photos albums name their DAV entries "{fileid}-{original name}", so
+        # prefer nc:original-name for anything user-visible.
+        original_name = prop.findtext(f"{{{_NC_NS}}}original-name")
+        display_name = original_name.strip() if original_name else ""
+
         out.append(
             {
                 "href": abs_url,
                 "filename": filename,
+                "display_name": display_name or filename,
                 "content_type": content_type,
                 "size": size,
                 "mtime_ms": _mtime_to_epoch_ms(

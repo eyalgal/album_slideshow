@@ -86,6 +86,14 @@ from .const import (
     DEFAULT_NEXTCLOUD_IMAGE_SIZE,
     NEXTCLOUD_IMAGE_PREVIEW,
     NEXTCLOUD_IMAGE_ORIGINAL,
+    CONF_ENTE_URL,
+    CONF_ENTE_ACCESS_TOKEN,
+    CONF_ENTE_COLLECTION_KEY,
+    CONF_ENTE_API_ORIGIN,
+    CONF_ENTE_IMAGE_SIZE,
+    DEFAULT_ENTE_IMAGE_SIZE,
+    ENTE_IMAGE_FULL,
+    ENTE_IMAGE_PREVIEW,
     DEFAULT_REVERSE_GEOCODE,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
@@ -95,6 +103,7 @@ from .const import (
     PROVIDER_ICLOUD,
     PROVIDER_SYNOLOGY,
     PROVIDER_NEXTCLOUD,
+    PROVIDER_ENTE,
     DEFAULT_RECURSIVE,
 )
 
@@ -186,6 +195,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if config_entry.data.get(CONF_PROVIDER) in (
             PROVIDER_LOCAL_FOLDER,
             PROVIDER_NEXTCLOUD,
+            PROVIDER_ENTE,
         ):
             return LocalFolderOptionsFlow()
         return _NoOptionsFlow()
@@ -207,6 +217,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_synology()
             if self._provider == PROVIDER_NEXTCLOUD:
                 return await self.async_step_nextcloud()
+            if self._provider == PROVIDER_ENTE:
+                return await self.async_step_ente()
             return await self.async_step_google_shared()
 
         schema = vol.Schema(
@@ -219,6 +231,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     PROVIDER_ICLOUD: "iCloud Shared Album",
                     PROVIDER_SYNOLOGY: "Synology Photos (direct API, full metadata)",
                     PROVIDER_NEXTCLOUD: "Nextcloud (WebDAV folder or public album link)",
+                    PROVIDER_ENTE: "Ente Photos (public album link)",
                     PROVIDER_MEDIA_SOURCE: "Media Source (any source, no metadata)",
                 })
             }
@@ -1133,6 +1146,77 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         return self.async_show_form(
             step_id="nextcloud_public", data_schema=schema, errors=errors
+        )
+
+    async def async_step_ente(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect and validate an Ente Photos public album link."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            name = user_input[CONF_ALBUM_NAME].strip()
+            raw_url = user_input[CONF_ENTE_URL].strip()
+            api_origin = (user_input.get(CONF_ENTE_API_ORIGIN) or "").strip()
+            size = user_input.get(CONF_ENTE_IMAGE_SIZE, DEFAULT_ENTE_IMAGE_SIZE)
+
+            from . import ente as ente_api
+
+            share = ente_api.parse_share_link(raw_url)
+            if share is None:
+                errors[CONF_ENTE_URL] = "invalid_ente_url"
+            else:
+                client = ente_api.EnteClient(self.hass, share, api_origin)
+                try:
+                    await client.async_validate()
+                except Exception as err:  # noqa: BLE001 - bad, expired or private link
+                    _LOGGER.warning(
+                        "Ente validation failed for %s: %s",
+                        share.album_origin,
+                        _describe_error(err),
+                    )
+                    errors["base"] = "ente_cannot_connect"
+                else:
+                    from base64 import b64encode
+
+                    await self.async_set_unique_id(
+                        f"{DOMAIN}:{PROVIDER_ENTE}:{share.access_token}:{name}"
+                    )
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=name,
+                        data={
+                            CONF_PROVIDER: PROVIDER_ENTE,
+                            CONF_ENTE_URL: share.album_origin,
+                            CONF_ENTE_ACCESS_TOKEN: share.access_token,
+                            CONF_ENTE_COLLECTION_KEY: b64encode(
+                                share.collection_key
+                            ).decode("ascii"),
+                            CONF_ENTE_API_ORIGIN: ente_api.normalize_api_origin(
+                                api_origin
+                            ),
+                            CONF_ENTE_IMAGE_SIZE: size,
+                            CONF_ALBUM_NAME: name,
+                        },
+                    )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ALBUM_NAME): str,
+                vol.Required(CONF_ENTE_URL): str,
+                vol.Optional(
+                    CONF_ENTE_IMAGE_SIZE, default=DEFAULT_ENTE_IMAGE_SIZE
+                ): vol.In(
+                    {
+                        ENTE_IMAGE_FULL: "Full quality (original file)",
+                        ENTE_IMAGE_PREVIEW: "Preview (faster, softer)",
+                    }
+                ),
+                vol.Optional(CONF_ENTE_API_ORIGIN): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="ente", data_schema=schema, errors=errors
         )
 
 

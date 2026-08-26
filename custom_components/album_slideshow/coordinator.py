@@ -72,6 +72,13 @@ from .const import (
     DEFAULT_NEXTCLOUD_IMAGE_SIZE,
     NEXTCLOUD_IMAGE_ORIGINAL,
     NEXTCLOUD_PREVIEW_PX,
+    CONF_ENTE_URL,
+    CONF_ENTE_ACCESS_TOKEN,
+    CONF_ENTE_COLLECTION_KEY,
+    CONF_ENTE_API_ORIGIN,
+    CONF_ENTE_IMAGE_SIZE,
+    DEFAULT_ENTE_IMAGE_SIZE,
+    ENTE_IMAGE_PREVIEW,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
     PROVIDER_GOOGLE_SHARED,
@@ -82,6 +89,7 @@ from .const import (
     PROVIDER_ICLOUD,
     PROVIDER_SYNOLOGY,
     PROVIDER_NEXTCLOUD,
+    PROVIDER_ENTE,
 )
 from .store import SlideshowStore
 
@@ -887,6 +895,55 @@ def _read_manifest_version(integration_dir: Path) -> str:
     return ""
 
 
+def _build_ente_item(
+    raw: dict[str, Any], collection_key: bytes, want_preview: bool
+) -> tuple[MediaItem, dict[str, Any]] | None:
+    """Decrypt one Ente file into a MediaItem plus its fetch material.
+
+    Runs in an executor: unsealing a key and opening two small secretstreams
+    is CPU work, and an album can hold thousands of files. Returns ``None``
+    for anything that is not a still image.
+    """
+    from . import ente as ente_api
+
+    file_key = ente_api.decrypt_file_key(raw, collection_key)
+    metadata = ente_api.decrypt_metadata(raw, file_key)
+    if not ente_api.is_image(metadata):
+        return None
+
+    magic = ente_api.decrypt_magic_metadata(raw, file_key)
+    fields = ente_api.build_media_fields(metadata, magic)
+
+    attrs = raw.get("thumbnail" if want_preview else "file")
+    if not isinstance(attrs, dict) or not attrs.get("decryptionHeader"):
+        return None
+    info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+
+    item = MediaItem(
+        url=ente_api.build_item_url(raw["id"]),
+        width=fields["width"],
+        height=fields["height"],
+        mime_type=None,
+        filename=fields["filename"],
+        captured_at=fields["captured_at"],
+        uploaded_at=fields["uploaded_at"],
+        byte_size=info.get("thumbSize" if want_preview else "fileSize"),
+        latitude=fields["latitude"],
+        longitude=fields["longitude"],
+        description=fields["description"],
+        source_id=str(raw["id"]),
+        # Ente hands over full metadata up front, so there is nothing for the
+        # per-photo enrichment download to add.
+        exif_scanned=True,
+    )
+    meta = {
+        "key": file_key,
+        "header": attrs["decryptionHeader"],
+        "thumbnail": want_preview,
+    }
+    return item, meta
+
+
 def _merge_prior_enrichment(
     new_items: list[MediaItem], prior_items: list[MediaItem]
 ) -> None:
@@ -942,6 +999,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # Extra headers the camera must send when fetching image bytes
         # (Immich API key). Empty for providers that need no auth.
         self.image_request_headers: dict[str, str] = {}
+        # Ente only: file id -> {key, header, thumbnail}, the material needed
+        # to decrypt each image. Rebuilt on every album refresh.
+        self._ente_fetch_meta: dict[str, dict[str, Any]] = {}
 
         # Persist the most recent successful album fetch so that a transient
         # network/Google failure doesn't blank the slideshow on restart.
@@ -1015,6 +1075,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 data = await self._update_synology()
             elif self.provider == PROVIDER_NEXTCLOUD:
                 data = await self._update_nextcloud()
+            elif self.provider == PROVIDER_ENTE:
+                data = await self._update_ente()
             else:
                 raise UpdateFailed(f"Unsupported provider: {self.provider}")
         except UpdateFailed:
@@ -1028,7 +1090,12 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise
 
         items = data.get("items") or []
-        if self.provider in (PROVIDER_LOCAL_FOLDER, PROVIDER_IMMICH, PROVIDER_NEXTCLOUD) and items:
+        if self.provider in (
+            PROVIDER_LOCAL_FOLDER,
+            PROVIDER_IMMICH,
+            PROVIDER_NEXTCLOUD,
+            PROVIDER_ENTE,
+        ) and items:
             # Carry forward EXIF/geocode metadata for items we've already
             # scanned this session; new items get filled in by the
             # background worker below.
@@ -1070,7 +1137,13 @@ class AlbumCoordinator(DataUpdateCoordinator):
         """Kick off the background EXIF + geocode worker if there's work."""
         items: list[MediaItem] = data.get("items") or []
         unscanned = [it for it in items if not it.exif_scanned]
-        if not unscanned:
+        # Providers that decrypt/return GPS inline (Ente) have nothing to scan
+        # but still need the coordinates turned into a place label.
+        needs_geocode = any(
+            it.latitude is not None and it.longitude is not None and not it.location
+            for it in items
+        )
+        if not unscanned and not needs_geocode:
             # Even with nothing to do, mark the phase as ``done`` so the
             # diagnostic sensor stops reporting an in-progress run from
             # the previous refresh.
@@ -1748,6 +1821,109 @@ class AlbumCoordinator(DataUpdateCoordinator):
             return await self._update_nextcloud_public()
         return await self._update_nextcloud_folder()
 
+    def _ente_share(self):
+        """Rebuild the parsed share (token + collection key) from entry data."""
+        from base64 import b64decode
+
+        from . import ente as ente_api
+
+        token = self.entry.data.get(CONF_ENTE_ACCESS_TOKEN)
+        raw_key = self.entry.data.get(CONF_ENTE_COLLECTION_KEY)
+        if not token or not raw_key:
+            raise UpdateFailed("Ente entry is missing its link credentials")
+        return ente_api.EnteShare(
+            token,
+            b64decode(raw_key),
+            self.entry.data.get(CONF_ENTE_URL) or "",
+        )
+
+    async def _update_ente(self) -> dict[str, Any]:
+        """List and decrypt an Ente public album.
+
+        Ente returns everything encrypted, so each file's key is unsealed from
+        the collection key and its metadata decrypted here. That metadata is
+        complete (capture date, GPS, caption), so unlike the folder-style
+        providers there is no per-photo enrichment download; items come back
+        already scanned and only need reverse-geocoding.
+        """
+        from . import ente as ente_api
+
+        share = self._ente_share()
+        client = ente_api.EnteClient(
+            self.hass, share, self.entry.data.get(CONF_ENTE_API_ORIGIN)
+        )
+
+        try:
+            files = await client.async_list_files()
+        except Exception as err:
+            raise UpdateFailed(f"Error listing Ente album: {err}") from err
+
+        want_preview = (
+            self.entry.data.get(CONF_ENTE_IMAGE_SIZE, DEFAULT_ENTE_IMAGE_SIZE)
+            == ENTE_IMAGE_PREVIEW
+        )
+
+        items: list[MediaItem] = []
+        fetch_meta: dict[str, dict[str, Any]] = {}
+        for f in files:
+            try:
+                built = await self.hass.async_add_executor_job(
+                    _build_ente_item, f, share.collection_key, want_preview
+                )
+            except Exception as err:  # noqa: BLE001 - one bad file must not fail the album
+                _LOGGER.debug("Ente: skipping file %s (%s)", f.get("id"), err)
+                continue
+            if built is None:
+                continue
+            item, meta = built
+            items.append(item)
+            fetch_meta[str(f["id"])] = meta
+
+        if not items:
+            raise UpdateFailed("No images found in the Ente album")
+
+        # Per-file keys + stream headers, so the camera can decrypt on demand
+        # without re-listing the album for every slide.
+        self._ente_fetch_meta = fetch_meta
+
+        return {
+            "title": self.entry.title,
+            "items": items,
+        }
+
+    async def async_fetch_image_bytes(self, url: str) -> bytes | None:
+        """Fetch and decrypt bytes for a provider-internal URL.
+
+        Only Ente uses this today: its images cannot be served by URL because
+        the bytes are end-to-end encrypted, so the camera hands the synthetic
+        ``ente://<fileID>`` id back here to be downloaded and decrypted.
+        Returns ``None`` for anything this coordinator does not own.
+        """
+        from . import ente as ente_api
+
+        if self.provider != PROVIDER_ENTE:
+            return None
+        file_id = ente_api.file_id_from_url(url)
+        if not file_id:
+            return None
+
+        meta = (self._ente_fetch_meta or {}).get(str(file_id))
+        if not meta:
+            _LOGGER.debug("Ente: no decryption material cached for %s", file_id)
+            return None
+
+        share = self._ente_share()
+        client = ente_api.EnteClient(
+            self.hass, share, self.entry.data.get(CONF_ENTE_API_ORIGIN)
+        )
+        try:
+            return await client.async_fetch_image(
+                file_id, meta["key"], meta["header"], meta["thumbnail"]
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Ente: failed to fetch image %s: %s", file_id, err)
+            return None
+
     async def _update_nextcloud_folder(self) -> dict[str, Any]:
         """List photos from an authenticated Nextcloud WebDAV folder.
 
@@ -1857,10 +2033,12 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     width=None,
                     height=None,
                     mime_type=p.get("content_type"),
-                    filename=p.get("filename"),
+                    filename=p.get("display_name") or p.get("filename"),
                     uploaded_at=p.get("mtime_ms"),
                     byte_size=p.get("size"),
-                    source_id=p.get("file_id") or href,
+                    # The DAV href, so enrichment can fetch the original bytes
+                    # even when the display URL is a preview.
+                    source_id=href,
                 )
             )
 
@@ -1959,23 +2137,19 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self, item: MediaItem
     ) -> tuple[str | None, dict[str, str]]:
         """Return ``(original_url, headers)`` for a public-link item, or (None, {})."""
-        from . import nextcloud as nc_api
-
         url = self.entry.data.get(CONF_NEXTCLOUD_URL)
         token = self.entry.data.get(CONF_NEXTCLOUD_SHARE_TOKEN)
         if not url or not token:
             return None, {}
 
-        # Reconstruct the original-file URL: for preview items the display url
-        # is the preview endpoint, so fall back to the album href by filename.
-        original_url = None
-        if isinstance(item.url, str) and "/remote.php/dav/photospublic/" in item.url:
-            original_url = item.url
-        elif item.filename:
-            original_url = nc_api.build_image_url_public(url, token, item.filename)
-        if not original_url:
-            return None, {}
-        return original_url, {}
+        # For preview items the display url is the preview endpoint, so fall
+        # back to the DAV href stashed on the item at listing time.
+        for candidate in (item.url, item.source_id):
+            if isinstance(candidate, str) and (
+                "/remote.php/dav/photospublic/" in candidate
+            ):
+                return candidate, {}
+        return None, {}
 
     async def _enrich_immich_item(self, item: MediaItem) -> None:
         """Fetch one Immich asset's detail and fill location/description."""

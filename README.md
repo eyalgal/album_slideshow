@@ -7,7 +7,7 @@
 
 <img width="800" alt="banner" src="https://github.com/user-attachments/assets/591b3541-5e2a-43d0-a97a-145f365cff94" />
 
-Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, an **iCloud Shared Album**, a **Synology Photos** library, a **Nextcloud** folder, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
+Turn a **Google Photos shared album**, an **Immich** or **PhotoPrism** library, an **iCloud Shared Album**, a **Synology Photos** library, a **Nextcloud** folder, an **Ente Photos** album, a **local/NAS folder**, or any **Home Assistant Media Source** into a fully controllable Home Assistant camera slideshow.
 
 Clean. Flexible. Fully runtime configurable. Designed for dashboards.
 
@@ -23,6 +23,7 @@ Album Slideshow creates a **camera entity** that automatically cycles through im
 - **iCloud** Shared Albums (public link)  
 - **Synology Photos** (direct API): favorites, albums, people, places, tags or subjects  
 - **Nextcloud**: an authenticated WebDAV folder (full metadata) or a public Nextcloud Photos album link (no login needed)  
+- **Ente Photos** public albums (end-to-end encrypted, decrypted inside Home Assistant)  
 - **Local folders** and NAS mounted directories  
 - Home Assistant **Media Source** (local media, Jellyfin, ...)  
 
@@ -45,11 +46,12 @@ All behavior is exposed as Home Assistant entities. Adjust everything live witho
 - **iCloud** Shared Albums (public link), with capture date + captions
 - **Synology Photos** (direct API): favorites, albums, people, places, tags or subjects, with full metadata
 - **Nextcloud**: an authenticated WebDAV folder (app-password auth, recursive, full metadata), or a public Nextcloud Photos album link (no login, full metadata)
+- **Ente Photos** public album links (no login, end-to-end encrypted, with full metadata)
 - **Local folder** paths and NAS mounted directories
 - Home Assistant **Media Source** (local media, Jellyfin, ...)
 - Optional recursive scanning
 
-### 📍 EXIF & Location (local / NAS / Immich / PhotoPrism / Synology / Nextcloud)
+### 📍 EXIF & Location (local / NAS / Immich / PhotoPrism / Synology / Nextcloud / Ente)
 - Reads capture date so date-filter modes work (EXIF `DateTimeOriginal` with `OffsetTimeOriginal` for local files; Immich's own capture date for the Immich provider)
 - Surfaces GPS as `latitude` / `longitude` camera attributes
 - Human-readable `location` label (reverse-geocoded via OpenStreetMap Nominatim for local files, or Immich's own place data); per-album opt-out for geocoding in the integration's Configure dialog
@@ -159,6 +161,7 @@ Pick the provider that matches where your photos live:
 | **Synology** | A Synology Photos library (favorites, albums, people, places, tags, subjects) | ✅ | ✅ | ✅ |
 | **Nextcloud (folder)** | Any folder in your Nextcloud files (WebDAV, app password) | ✅ | ✅ | ✅ |
 | **Nextcloud (public link)** | A public Nextcloud Photos album share link (no login) | ✅ | ✅ | ✅ |
+| **Ente Photos** | A public Ente album link (no login, end-to-end encrypted) | ✅ | ✅ | ✅ |
 | **Local Folder** | Files on the HA host / NAS | ✅ | ✅ | ✅ |
 | **Media Source** | Any HA media source with no API (local media, Jellyfin, ...) | ❌ | ❌ | ❌ |
 
@@ -444,6 +447,66 @@ login stored or required.
 
 ---
 
+### Ente Photos
+
+The **Ente** provider slideshows a **public Ente album link**, with **full
+photo metadata** (capture date, GPS location and captions). No Ente account,
+password or API key is involved.
+
+Ente is **end-to-end encrypted**, so this provider works differently from the
+others: the album's decryption key travels in the link itself and never
+reaches Ente's servers. Home Assistant downloads the encrypted bytes and
+decrypts them locally, then serves the decrypted image to your dashboard.
+
+1. In Ente (mobile or web), open the album, tap **Share** and create a
+   **public link**.
+2. Copy the link. It looks like
+   `https://albums.ente.io/?t=TOKEN#KEY`.
+3. Add the integration and choose **Ente Photos (public album link)**.
+4. Paste the link, name the album and pick an image quality.
+
+> [!IMPORTANT]
+> **Copy the whole link, including everything after the `#`.** That fragment
+> is the album's decryption key. Without it the photos cannot be decrypted,
+> and some apps truncate links at the `#` when sharing them. If setup fails
+> with "that does not look like an Ente public album link", a missing
+> fragment is the usual cause.
+
+#### Image quality
+
+- **Full quality** (default) - the original file, decrypted locally.
+- **Preview** - Ente's smaller pre-generated thumbnail; much faster to load
+  and lighter on CPU, noticeably softer on a large display.
+
+#### Self-hosted Ente
+
+Leave **API endpoint** blank to use Ente's hosted service. If you run your own
+Ente (museum) server, enter its API URL there, for example
+`https://api.photos.example.com`.
+
+#### Notes
+
+- **Date, location and captions all work**, and unlike the folder-style
+  providers they cost nothing extra: Ente returns metadata alongside the file
+  list, so it is decrypted up front rather than by downloading every photo.
+  Reverse-geocoding into a `location` label still applies, with the same
+  opt-out in the integration's **Configure** dialog.
+- **Decryption happens in Home Assistant.** Because there is no URL that
+  serves a decrypted image, the camera's `current_url` attribute shows an
+  internal `ente://<id>` reference instead of a real link. The access token
+  and decryption key are never placed in an image URL or exposed to the
+  browser.
+- The link's access token and collection key are stored in the config entry so
+  the integration can re-list and decrypt on each refresh.
+- Full-quality mode decrypts each original in Home Assistant. On a low-powered
+  host (a Pi, say) with very large photos, **Preview** gives a smoother
+  slideshow.
+- Password-protected album links are not supported yet.
+- Videos and live photos are skipped.
+- Photos added to the album show up on the next refresh.
+
+---
+
 ### Local Folder or NAS
 
 Use any folder accessible to Home Assistant.
@@ -599,7 +662,7 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `media_count_total` | int | Total photos available before filtering |
 | `current_index` | int | Index of the current slide |
 | `current_filename` | string \| null | Source filename when known |
-| `current_url` | string \| null | URL of the current slide |
+| `current_url` | string \| null | URL of the current slide. For Ente this is an internal `ente://<id>` reference, since the image is decrypted locally rather than fetched from a URL |
 | `current_is_portrait` | bool \| null | Orientation of the current slide |
 | `captured_at` | string \| list \| null | ISO-8601 capture date. List of `[primary, partner]` when paired (top/left first). For local files this is read from EXIF (or the file's mtime as a fallback). |
 | `captured_at_primary` | string \| null | Capture date of the primary image only |

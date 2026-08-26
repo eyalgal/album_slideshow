@@ -7,6 +7,6 @@
   "documentation": "https://github.com/eyalgal/album_slideshow",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/eyalgal/album_slideshow/issues",
-  "requirements": ["Pillow"],
-  "version": "1.8.1"
+  "requirements": ["Pillow", "PyNaCl>=1.5.0"],
+  "version": "1.9.0"
 }

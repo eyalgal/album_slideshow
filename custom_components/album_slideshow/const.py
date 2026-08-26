@@ -59,6 +59,7 @@ PROVIDER_PHOTOPRISM = "photoprism"
 PROVIDER_ICLOUD = "icloud"
 PROVIDER_SYNOLOGY = "synology"
 PROVIDER_NEXTCLOUD = "nextcloud"
+PROVIDER_ENTE = "ente"
 
 # Nextcloud provider - two auth modes against the same PROVIDER_NEXTCLOUD id:
 #
@@ -92,6 +93,25 @@ NEXTCLOUD_IMAGE_SIZE_OPTIONS = [NEXTCLOUD_IMAGE_PREVIEW, NEXTCLOUD_IMAGE_ORIGINA
 DEFAULT_NEXTCLOUD_IMAGE_SIZE = NEXTCLOUD_IMAGE_PREVIEW
 # Long edge (px) requested from the core/preview endpoint for preview quality.
 NEXTCLOUD_PREVIEW_PX = 1920
+
+# Ente Photos (public album link) provider. Ente is end-to-end encrypted: the
+# access token in the link's ``?t=`` query authenticates to the API, while the
+# collection key lives in the link's URL *fragment* and never reaches the
+# server. Both are stored so the coordinator can re-list and decrypt on each
+# refresh; neither is ever put in an image URL, because Ente images are
+# decrypted inside Home Assistant and served from memory.
+CONF_ENTE_URL = "ente_url"
+CONF_ENTE_ACCESS_TOKEN = "ente_access_token"
+CONF_ENTE_COLLECTION_KEY = "ente_collection_key"
+CONF_ENTE_API_ORIGIN = "ente_api_origin"
+CONF_ENTE_IMAGE_SIZE = "ente_image_size"
+
+# ``full`` downloads the original file; ``preview`` uses Ente's smaller
+# pre-generated thumbnail (much faster, noticeably softer on a big screen).
+ENTE_IMAGE_FULL = "full"
+ENTE_IMAGE_PREVIEW = "preview"
+ENTE_IMAGE_SIZE_OPTIONS = [ENTE_IMAGE_FULL, ENTE_IMAGE_PREVIEW]
+DEFAULT_ENTE_IMAGE_SIZE = ENTE_IMAGE_FULL
 
 # Synology Photos (direct API) provider. Talks to a DSM Photos package over its
 # entry.cgi web API. The account password is stored so the coordinator can

@@ -130,6 +130,16 @@
           "nextcloud_image_size": "Image quality"
         }
       },
+      "ente": {
+        "title": "Ente Photos public album",
+        "description": "Paste a public Ente album link, for example https://albums.ente.io/?t=TOKEN#KEY. Copy the whole link including the part after the # - that fragment is the decryption key and the album cannot be read without it. No Ente account or password is needed. Leave the API endpoint blank unless you self-host Ente.",
+        "data": {
+          "album_name": "Album name",
+          "ente_url": "Album share link",
+          "ente_image_size": "Image quality",
+          "ente_api_origin": "API endpoint (self-hosted only)"
+        }
+      },
       "nextcloud_public": {
         "title": "Nextcloud public album link",
         "description": "Paste a public Nextcloud Photos album share link (from the Photos app's Share menu). No login is needed - the link itself grants access.",
@@ -161,7 +171,9 @@
       "synology_shared_unavailable": "Could not access the Shared Space. Enable Shared Space in Synology Photos and make sure this account has access to it, or choose Personal instead.",
       "nextcloud_cannot_connect": "Could not connect to Nextcloud. Check the URL, username, app password and folder path.",
       "invalid_nextcloud_url": "That does not look like a Nextcloud Photos public album link.",
-      "nextcloud_public_cannot_connect": "Could not connect to that Nextcloud album. Check the link is still valid."
+      "nextcloud_public_cannot_connect": "Could not connect to that Nextcloud album. Check the link is still valid.",
+      "invalid_ente_url": "That does not look like an Ente public album link. It should look like https://albums.ente.io/?t=TOKEN#KEY, including the part after the #."
+      ,"ente_cannot_connect": "Could not open that Ente album. The link may be expired, revoked, or password-protected."
     }
   },
   "options": {

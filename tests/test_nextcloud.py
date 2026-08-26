@@ -261,3 +261,34 @@ def test_parse_propfind_real_server_shape_multi_propstat_root():
     assert photo["content_type"] == "image/jpeg"
     assert photo["size"] == 4424803
     assert photo["file_id"] == "12345"
+
+
+# ── nc:original-name (Photos albums prefix DAV names with "{fileid}-") ─────
+# CollectionPhoto::getName() in nextcloud/photos returns "{fileId}-{name}", so
+# the DAV path segment is not presentable. nc:original-name carries the real
+# filename; the href-derived name stays as-is because URLs are built from it.
+
+_ORIGINAL_NAME_MULTISTATUS = """<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns"><d:response><d:href>/remote.php/dav/photospublic/AbC123/12345-20260518_190350.jpg</d:href><d:propstat><d:prop><d:getcontenttype>image/jpeg</d:getcontenttype><d:getcontentlength>42</d:getcontentlength><d:resourcetype/><oc:fileid>12345</oc:fileid><nc:original-name>Beach day.jpg</nc:original-name></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>
+"""
+
+
+def test_parse_propfind_prefers_original_name_for_display():
+    root = "https://cloud.example.com/remote.php/dav/photospublic/AbC123/"
+    items = nc.parse_propfind_response(_ORIGINAL_NAME_MULTISTATUS, root)
+    assert len(items) == 1
+    photo = items[0]
+    assert photo["display_name"] == "Beach day.jpg"
+    # The DAV segment is untouched so href/URL building still works.
+    assert photo["filename"] == "12345-20260518_190350.jpg"
+
+
+def test_parse_propfind_display_name_falls_back_to_filename():
+    root = "https://cloud.example.com/remote.php/dav/photospublic/AbC123/"
+    items = nc.parse_propfind_response(_REAL_SHAPE_MULTISTATUS, root)
+    assert items[0]["display_name"] == "12345-20260518_190350.jpg"
+
+
+def test_propfind_body_requests_original_name():
+    assert b"<nc:original-name/>" in nc._PROPFIND_BODY
+    assert b'xmlns:nc="http://nextcloud.org/ns"' in nc._PROPFIND_BODY
