@@ -21,11 +21,18 @@ Nextcloud has no metadata-only endpoint for WebDAV files, so capture date, GPS
 and description are filled in by the coordinator's background enrichment worker
 (one original-file download per photo, then read the EXIF - same idea as the
 Local Folder provider, just over the network).
+
+This module also supports a second, unauthenticated mode: a public Nextcloud
+Photos album share link, served via the ``photospublic`` WebDAV collection and
+handled by ``NextcloudPublicClient``. That mode's detailed API shape is
+documented in the ``## Public album link mode`` comment banner further down
+this file rather than duplicated here.
 """
 from __future__ import annotations
 
 import base64
 import email.utils
+import re
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
@@ -207,6 +214,22 @@ def parse_propfind_response(xml_text: str, root_url: str) -> list[dict[str, Any]
     return out
 
 
+async def _async_propfind(
+    hass: Any, url: str, depth: str, extra_headers: dict[str, str] | None = None
+) -> str:
+    """Issue a WebDAV PROPFIND against ``url`` and return the raw XML body."""
+    session = async_get_clientsession(hass)
+    headers = {"Depth": depth, "Content-Type": "application/xml"}
+    if extra_headers:
+        headers.update(extra_headers)
+    async with async_timeout.timeout(_TIMEOUT):
+        async with session.request(
+            "PROPFIND", url, data=_PROPFIND_BODY, headers=headers
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.text()
+
+
 class NextcloudClient:
     """Thin async wrapper over an authenticated WebDAV folder."""
 
@@ -229,18 +252,12 @@ class NextcloudClient:
         return {"Authorization": basic_auth_header(self.username, self.password)}
 
     async def _propfind(self, depth: str) -> str:
-        session = async_get_clientsession(self.hass)
-        headers = {
-            "Depth": depth,
-            "Content-Type": "application/xml",
-            "Authorization": basic_auth_header(self.username, self.password),
-        }
-        async with async_timeout.timeout(_TIMEOUT):
-            async with session.request(
-                "PROPFIND", self.dav_root, data=_PROPFIND_BODY, headers=headers
-            ) as resp:
-                resp.raise_for_status()
-                return await resp.text()
+        return await _async_propfind(
+            self.hass,
+            self.dav_root,
+            depth,
+            {"Authorization": basic_auth_header(self.username, self.password)},
+        )
 
     async def async_validate(self) -> None:
         """Confirm the URL, credentials and folder work. Raises on failure."""
@@ -249,4 +266,96 @@ class NextcloudClient:
     async def async_list_photos(self, recursive: bool = False) -> list[dict[str, Any]]:
         """Return the folder's image files (optionally recursing into it)."""
         xml_text = await self._propfind(depth="infinity" if recursive else "1")
+        return parse_propfind_response(xml_text, self.dav_root)[:_MAX_ASSETS]
+
+
+# ── Public album link mode ──────────────────────────────────────────────────
+#
+# Talks to the same ``photospublic`` WebDAV collection the Nextcloud Photos
+# app registers for a public album share - no session, API key, or Basic-auth
+# is involved; the share token embedded in the URL path is the only
+# credential the server checks (verified against the ``nextcloud/photos``
+# server source: ``PublicAlbumAuthBackend`` unconditionally authenticates any
+# request against a valid token).
+#
+# API shape:
+# - ``PROPFIND /remote.php/dav/photospublic/{token}/`` (Depth: 0) -> confirms
+#   the token is valid; used to validate the config flow input.
+# - ``PROPFIND /remote.php/dav/photospublic/{token}/`` (Depth: 1) -> the
+#   album's files, parsed by the shared ``parse_propfind_response`` above.
+# - ``GET /remote.php/dav/photospublic/{token}/{filename}`` -> the real
+#   original file bytes, used both as the "original" quality display URL and
+#   for background EXIF enrichment.
+# - ``GET /index.php/apps/photos/api/v1/publicPreview/{fileId}?token=...`` ->
+#   a resized preview JPEG, used as the "preview" (default) display quality.
+
+_PUBLIC_SHARE_LINK_RE = re.compile(
+    r"^(?P<base>https?://[^\s]+?)/(?:index\.php/)?apps/photos/public/"
+    r"(?P<token>[A-Za-z0-9]+)/?(?:[?#].*)?$"
+)
+
+
+def parse_share_link(url: str) -> tuple[str, str] | None:
+    """Extract ``(base_url, token)`` from a pasted public album link.
+
+    Returns ``None`` if the link doesn't look like a Nextcloud Photos public
+    album share (``.../apps/photos/public/{token}``, with or without
+    ``index.php`` or a subdirectory install).
+    """
+    if not url:
+        return None
+    match = _PUBLIC_SHARE_LINK_RE.match(url.strip())
+    if not match:
+        return None
+    return normalize_base_url(match.group("base")), match.group("token")
+
+
+def dav_root_public(base_url: str, token: str) -> str:
+    """Return the ``photospublic`` WebDAV collection URL for a shared album."""
+    return f"{normalize_base_url(base_url)}/remote.php/dav/photospublic/{token}/"
+
+
+def build_image_url_public(base_url: str, token: str, filename: str) -> str:
+    """Build the "original" quality URL: a direct WebDAV GET of the real file."""
+    return dav_root_public(base_url, token) + quote(filename)
+
+
+def build_preview_url_public(
+    base_url: str, token: str, file_id: str, px: int = 1024
+) -> str:
+    """Build the "preview" quality URL via the Photos app's publicPreview API."""
+    base = normalize_base_url(base_url)
+    return (
+        f"{base}/index.php/apps/photos/api/v1/publicPreview/{file_id}"
+        f"?token={token}&x={px}&y={px}"
+    )
+
+
+class NextcloudPublicClient:
+    """Thin async wrapper over a public ``photospublic`` WebDAV share.
+
+    Unlike :class:`NextcloudClient`, no authentication is involved - the
+    share token embedded in the URL path is the only credential the server
+    checks.
+    """
+
+    def __init__(self, hass: Any, base_url: str, token: str) -> None:
+        self.hass = hass
+        self.base_url = normalize_base_url(base_url)
+        self.token = token
+
+    @property
+    def dav_root(self) -> str:
+        return dav_root_public(self.base_url, self.token)
+
+    async def _propfind(self, depth: str) -> str:
+        return await _async_propfind(self.hass, self.dav_root, depth)
+
+    async def async_validate(self) -> None:
+        """Confirm the token/URL work. Raises on any failure."""
+        await self._propfind(depth="0")
+
+    async def async_list_photos(self) -> list[dict[str, Any]]:
+        """Return the album's image files."""
+        xml_text = await self._propfind(depth="1")
         return parse_propfind_response(xml_text, self.dav_root)[:_MAX_ASSETS]
