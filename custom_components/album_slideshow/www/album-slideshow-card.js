@@ -810,9 +810,11 @@ function createAlbumSlideshowCardClass(Base) {
       ddd: part({ weekday: "short" }),
       HH: pad(d.getHours()),
       mm: pad(d.getMinutes()),
+      // Lets relative time be mixed into a format string, e.g. "DD MMMM YYYY - REL".
+      REL: this._relativeTime(d),
     };
     return fmt.replace(
-      /YYYY|YY|MMMM|MMM|MM|M|DD|D|dddd|ddd|HH|mm/g,
+      /REL|YYYY|YY|MMMM|MMM|MM|M|DD|D|dddd|ddd|HH|mm/g,
       (t) => map[t],
     );
   }
@@ -925,6 +927,10 @@ const CAPTION_DATE_FORMAT_OPTIONS = [
   { value: "numeric", label: "Numeric (8/16/2014)" },
   { value: "weekday", label: "Weekday (Saturday, August 16, 2014)" },
   { value: "relative", label: "Relative (3 years ago)" },
+  {
+    value: "D MMMM YYYY - REL",
+    label: "Date + relative (16 August 2014 - 3 years ago)",
+  },
 ];
 
 const DEFAULTS = {
@@ -1440,7 +1446,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
       tap_pause_seconds:
         "How long the card freezes its slide after a tap. 0 disables it.",
       caption_date_format:
-        "Pick a preset or type a custom format (YYYY, MMMM, MMM, MM, DD, D).",
+        "Pick a preset or type a custom format (YYYY, MMMM, MMM, MM, DD, D, REL for relative time).",
       caption_show:
         "Description comes from the photo's EXIF/IPTC/XMP caption and is only available with the local-folder provider.",
       caption_per_image:

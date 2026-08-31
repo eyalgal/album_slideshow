@@ -721,7 +721,7 @@ caption:                    # overlay the photo's date, location and/or descript
   position: bottom-left     #   top/center/bottom + -left/-center/-right, or center
   date_format: medium       #   medium | full | month_year | year | numeric
                             #     | weekday | relative, or a custom token string
-                            #     (YYYY, MMMM, MMM, MM, M, DD, D, dddd, ddd)
+                            #     (YYYY, MMMM, MMM, MM, M, DD, D, dddd, ddd, REL)
   per_image: true           #   caption each half of a portrait pair separately
   color: '#ffffff'          #   any CSS color
   font_size: 14px           #   any CSS size
@@ -734,7 +734,7 @@ caption:                    # overlay the photo's date, location and/or descript
 - `transition: random` picks a different effect per slide and avoids repeating the previous one.
 - `fit: auto` reads the camera's `fill_mode` attribute. `blur` renders the slide as `contain` plus a blurred backdrop layer behind it.
 - **Caption overlay:** omit the `caption:` block (or set `show: []`) to disable it. The date comes from `captured_at`; `location` and `description` come from photo metadata. Location and description are available with the **Local Folder** and **Immich** providers (they are simply skipped when a photo has none); Google Photos and Media Source slides show only the date. On a portrait pair, `per_image: true` anchors each photo's own date/location/description to its half; set it to `false` for a single caption over the whole frame.
-- `date_format` accepts a preset name or a custom token string. Presets are locale-aware (they follow your Home Assistant language). Example custom format: `'D MMMM YYYY'` -> `29 July 2023`.
+- `date_format` accepts a preset name or a custom token string. Presets are locale-aware (they follow your Home Assistant language). Example custom format: `'D MMMM YYYY'` -> `29 July 2023`. The `REL` token inserts relative time, so `'D MMMM YYYY - REL'` -> `29 July 2023 - 3 years ago`.
 - Every slide commit increments the camera's `frame_id` attribute. The card cache-busts the camera proxy URL with that value, so the browser refetches a fresh JPEG on every change instead of serving a stale cached image.
 - If the entity is unavailable, the card shows a "Camera not ready" placeholder.
 
