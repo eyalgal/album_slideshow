@@ -61,6 +61,17 @@ PROVIDER_SYNOLOGY = "synology"
 PROVIDER_NEXTCLOUD = "nextcloud"
 PROVIDER_ENTE = "ente"
 
+# Providers whose coordinator runs a background enrichment pass: per-photo
+# metadata reads, reverse-geocoding, or both. These are the entries that get
+# the Enrichment progress diagnostic sensor. Keep this as the single source of
+# truth so the sensor can't drift away from what the coordinator actually does.
+ENRICHING_PROVIDERS = (
+    PROVIDER_LOCAL_FOLDER,
+    PROVIDER_IMMICH,
+    PROVIDER_NEXTCLOUD,
+    PROVIDER_ENTE,
+)
+
 # Nextcloud provider - two auth modes against the same PROVIDER_NEXTCLOUD id:
 #
 # - "folder": authenticated WebDAV folder. Points at any folder in a user's

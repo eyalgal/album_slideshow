@@ -431,9 +431,9 @@ login stored or required.
 - **Date, location and captions all work in both modes.** Nextcloud has no
   metadata-only API, so the integration reads EXIF the same way the **Local
   Folder** provider does: it downloads each original photo once in the
-  background and reads its EXIF/IPTC/XMP. Metadata appears shortly after the
-  first load, and the same reverse-geocoding opt-out applies in the
-  integration's **Configure** dialog.
+  background and reads its EXIF/IPTC/XMP. Progress is tracked by the
+  **Enrichment progress** diagnostic sensor, and the same reverse-geocoding
+  opt-out applies in the integration's **Configure** dialog.
 - **Folder mode:** the app password is stored so the integration can re-list
   the folder on each refresh. It is sent to Nextcloud server-side only (HTTP
   Basic auth) and never appears in the camera's image URL or the browser.
@@ -647,7 +647,7 @@ Each album you configure creates the following entities in Home Assistant.
 | Album title | All | Title of the source album |
 | Media count | All | Number of images currently available |
 | Image cache usage *(diagnostic)* | All | Current download cache size in MB |
-| Enrichment progress *(diagnostic)* | Local folder | Percent of items whose EXIF/GPS has been read (and, when enabled, reverse-geocoded). Attributes include `phase`, `exif_done`/`exif_total`, `geocode_done`/`geocode_total`. |
+| Enrichment progress *(diagnostic)* | Local folder / Immich / Nextcloud / Ente | Percent of items whose metadata has been processed (EXIF/GPS for local folder and Nextcloud, per-asset detail for Immich, reverse-geocoding for Ente). Attributes include `phase`, `exif_done`/`exif_total`, `geocode_done`/`geocode_total`. |
 
 ---
 

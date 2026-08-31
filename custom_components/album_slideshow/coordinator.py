@@ -81,6 +81,7 @@ from .const import (
     ENTE_IMAGE_PREVIEW,
     DEFAULT_REVERSE_GEOCODE,
     DOMAIN,
+    ENRICHING_PROVIDERS,
     PROVIDER_GOOGLE_SHARED,
     PROVIDER_LOCAL_FOLDER,
     PROVIDER_MEDIA_SOURCE,
@@ -1090,12 +1091,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise
 
         items = data.get("items") or []
-        if self.provider in (
-            PROVIDER_LOCAL_FOLDER,
-            PROVIDER_IMMICH,
-            PROVIDER_NEXTCLOUD,
-            PROVIDER_ENTE,
-        ) and items:
+        if self.provider in ENRICHING_PROVIDERS and items:
             # Carry forward EXIF/geocode metadata for items we've already
             # scanned this session; new items get filled in by the
             # background worker below.

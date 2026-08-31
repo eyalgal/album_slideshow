@@ -6,7 +6,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, PROVIDER_GOOGLE_SHARED, PROVIDER_LOCAL_FOLDER
+from .const import (
+    DOMAIN,
+    ENRICHING_PROVIDERS,
+    PROVIDER_GOOGLE_SHARED,
+)
 from .coordinator import AlbumCoordinator
 
 
@@ -17,11 +21,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         AlbumTitleSensor(entry, coordinator),
         CacheUsageSensor(entry, coordinator),
     ]
-    if coordinator.provider == PROVIDER_LOCAL_FOLDER:
-        # Diagnostic surface for the local-folder background enrichment
-        # (EXIF reads + reverse-geocode). For Google albums there's no
-        # enrichment work, so this sensor is omitted to keep the device
-        # screen tidy.
+    if coordinator.provider in ENRICHING_PROVIDERS:
+        # Diagnostic surface for the background enrichment pass (per-photo
+        # metadata reads and/or reverse-geocode). Providers with nothing to
+        # enrich omit it to keep the device screen tidy.
         entities.append(EnrichmentProgressSensor(entry, coordinator))
     async_add_entities(entities)
 

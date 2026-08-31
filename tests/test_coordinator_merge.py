@@ -92,3 +92,39 @@ def test_enrich_noop_when_a_source_empty():
     scraped = [_item("https://lh3.googleusercontent.com/photo1", captured=1000)]
     assert _enrich_missing_dates([], scraped) == 0
     assert _enrich_missing_dates(scraped, []) == 0
+
+
+# -- ENRICHING_PROVIDERS ----------------------------------------------------
+# The Enrichment progress sensor is created from this tuple, so it has to stay
+# in step with the providers the coordinator actually schedules work for.
+
+def test_enriching_providers_matches_documented_set():
+    from custom_components.album_slideshow.const import (
+        ENRICHING_PROVIDERS,
+        PROVIDER_ENTE,
+        PROVIDER_GOOGLE_SHARED,
+        PROVIDER_IMMICH,
+        PROVIDER_LOCAL_FOLDER,
+        PROVIDER_MEDIA_SOURCE,
+        PROVIDER_NEXTCLOUD,
+    )
+
+    assert set(ENRICHING_PROVIDERS) == {
+        PROVIDER_LOCAL_FOLDER,
+        PROVIDER_IMMICH,
+        PROVIDER_NEXTCLOUD,
+        PROVIDER_ENTE,
+    }
+    # Providers with no metadata to enrich must stay out, or they'd get a
+    # progress sensor that never moves.
+    assert PROVIDER_GOOGLE_SHARED not in ENRICHING_PROVIDERS
+    assert PROVIDER_MEDIA_SOURCE not in ENRICHING_PROVIDERS
+
+
+def test_sensor_platform_uses_the_shared_enrichment_tuple():
+    import pathlib
+
+    src = pathlib.Path(
+        "custom_components/album_slideshow/sensor.py"
+    ).read_text()
+    assert "coordinator.provider in ENRICHING_PROVIDERS" in src

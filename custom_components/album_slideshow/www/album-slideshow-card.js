@@ -26,7 +26,7 @@
  *   tap_action: none        # none | more-info
  */
 
-const VERSION = "1.9.0";
+const VERSION = "1.9.1";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
