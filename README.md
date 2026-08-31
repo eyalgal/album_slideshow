@@ -188,8 +188,9 @@ all work, and you can slideshow far more than just an album. If you have an
 Immich server, prefer this over the Media Source route.
 
 1. In Immich, create an API key: **Account Settings → API Keys → New API Key**.
-   Read scopes are enough: `asset.read`, `asset.view`, `asset.download`,
-   `album.read`, `person.read`.
+   Read scopes are enough: `server.about`, `asset.read`, `asset.view`,
+   `asset.download`, `album.read`, `person.read`. `server.about` is what the
+   setup step uses to check the URL and key, so setup fails without it.
 2. Add the integration and choose **Immich (direct API, full metadata)**.
 3. Enter your Immich URL (e.g. `http://192.168.1.10:2283`) and the API key.
 4. Give it a name, tick what you want to show, and choose the image quality.
