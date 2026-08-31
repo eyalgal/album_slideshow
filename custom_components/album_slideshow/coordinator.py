@@ -357,7 +357,9 @@ def _find_largest_item_list(obj: Any) -> list[dict[str, Any]]:
 
 
 def _looks_like_video(raw: dict[str, Any]) -> bool:
-    mime = raw.get("mimeType")
+    # publicalbum.org sends lowercase ``mimetype``; Google's own shapes use
+    # ``mimeType``.
+    mime = raw.get("mimeType") or raw.get("mimetype")
     if isinstance(mime, str) and mime.startswith("video/"):
         return True
 
@@ -2501,10 +2503,13 @@ class AlbumCoordinator(DataUpdateCoordinator):
         # to bypass publicalbum.org's ~300 cap.
         scraped_items: list[MediaItem] = []
         scraped_title: str | None = None
+        # Media keys the scraper identified as video. publicalbum.org returns
+        # no media type at all, so this is what lets us drop them there too.
+        video_keys: set[str] = set()
         try:
             from . import google_scraper
 
-            scraped_title, scraped_items = await google_scraper.fetch_album(
+            scraped_title, scraped_items, video_keys = await google_scraper.fetch_album(
                 session, self.album_url
             )
         except Exception as err:  # never let scrape failure break the integration
@@ -2546,10 +2551,17 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
         page_items = _find_largest_item_list(result) or _find_largest_item_list(data)
         api_items: list[MediaItem] = []
+        dropped_videos = 0
         if page_items:
             seen_urls: set[str] = set()
             for raw in page_items:
                 if _looks_like_video(raw):
+                    continue
+
+                # publicalbum.org gives no media type, so fall back to the
+                # scraper's verdict for the same photo (matched on media key).
+                if raw.get("id") in video_keys:
+                    dropped_videos += 1
                     continue
 
                 url = _pick_url(raw)
@@ -2621,8 +2633,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("No photos returned from Google shared album")
 
         _LOGGER.info(
-            "Album scraper: source=publicalbum items=%d (batchexecute=%d)",
-            len(api_items), len(scraped_items),
+            "Album scraper: source=publicalbum items=%d (batchexecute=%d, "
+            "videos dropped via scraper=%d)",
+            len(api_items), len(scraped_items), dropped_videos,
         )
         return {
             "title": result.get("title") or self.entry.title,

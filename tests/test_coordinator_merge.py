@@ -128,3 +128,31 @@ def test_sensor_platform_uses_the_shared_enrichment_tuple():
         "custom_components/album_slideshow/sensor.py"
     ).read_text()
     assert "coordinator.provider in ENRICHING_PROVIDERS" in src
+
+
+# -- publicalbum.org video filtering (#26) ----------------------------------
+# publicalbum.org returns mimetype/mediaMetadata as null, verified against a
+# real shared album, so it can only drop videos by reusing the scraper's keys.
+
+def test_looks_like_video_accepts_lowercase_mimetype():
+    from custom_components.album_slideshow.coordinator import _looks_like_video
+
+    # publicalbum.org spells it lowercase; Google's own shapes use camelCase.
+    assert _looks_like_video({"mimetype": "video/mp4"}) is True
+    assert _looks_like_video({"mimeType": "video/mp4"}) is True
+    assert _looks_like_video({"mimetype": "image/jpeg"}) is False
+
+
+def test_looks_like_video_cannot_detect_a_publicalbum_video():
+    from custom_components.album_slideshow.coordinator import _looks_like_video
+
+    # This is the exact shape a real album returned for a video: no signal at
+    # all. It documents why the media-key fallback exists.
+    raw = {
+        "id": "AF1QipOVuW0YZ1YRJ-dHFC8FZ1wp0JEjwAHdYIG2CF_v",
+        "description": None,
+        "url": "https://lh3.googleusercontent.com/pw/AP1GczPO7xue=w1920-h1080",
+        "mimetype": None,
+        "mediaMetadata": None,
+    }
+    assert _looks_like_video(raw) is False

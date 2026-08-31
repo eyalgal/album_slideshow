@@ -369,3 +369,55 @@ def test_parse_album_item_handles_missing_size():
     assert item is not None
     assert item.byte_size is None
     assert item.captured_at is None
+
+# -- video media keys shared with the publicalbum.org source (#26) ----------
+# publicalbum.org returns mimetype/mediaMetadata as null, so it cannot spot a
+# video on its own. It reuses the keys the scraper collected here.
+
+def test_batchexecute_records_media_keys_of_skipped_videos():
+    photo = ["mk_photo", ["https://lh3.googleusercontent.com/p", 100, 100], 0, "d1"]
+    video = [
+        "mk_video",
+        ["https://lh3.googleusercontent.com/v", 100, 100],
+        0,
+        "d2",
+        None,
+        None,
+        {"76647426": [12345]},
+    ]
+    body = _make_batchexecute_response([photo, video], None)
+
+    keys: set[str] = set()
+    items, _ = gs._parse_batchexecute_album_page(body, keys)
+
+    assert len(items) == 1
+    assert keys == {"mk_video"}
+
+
+def test_record_video_key_populates_the_sink():
+    keys: set[str] = set()
+    gs._record_video_key(["mk_video", ["url", 1, 1]], keys)
+    assert keys == {"mk_video"}
+    # Items with no usable key must not poison the set.
+    gs._record_video_key([], keys)
+    gs._record_video_key([123], keys)
+    assert keys == {"mk_video"}
+
+
+def test_record_video_key_tolerates_no_sink():
+    gs._record_video_key(["mk_video", ["url", 1, 1]], None)
+
+
+def test_media_key_reads_the_leading_element():
+    assert gs._media_key(["AF1Qip_abc", ["url", 1, 1]]) == "AF1Qip_abc"
+    assert gs._media_key([]) is None
+    assert gs._media_key("nope") is None
+    assert gs._media_key([123, ["url"]]) is None
+
+
+def test_video_key_sink_is_optional():
+    # The parsers must stay usable without a sink (existing callers pass none).
+    photo = ["mk", ["https://lh3.googleusercontent.com/p", 100, 100], 0, "d1"]
+    body = _make_batchexecute_response([photo], None)
+    items, _ = gs._parse_batchexecute_album_page(body)
+    assert len(items) == 1

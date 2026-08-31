@@ -71,16 +71,23 @@ class _AlbumKeys:
         self.auth_key = auth_key
 
 
-async def fetch_album(session, share_url: str, *, timeout: float = 30.0) -> tuple[str | None, list[MediaItem]]:
-    """Fetch a shared album in full. Returns (title, items).
+async def fetch_album(
+    session, share_url: str, *, timeout: float = 30.0
+) -> tuple[str | None, list[MediaItem], set[str]]:
+    """Fetch a shared album in full. Returns (title, items, video_keys).
 
     The HTML page is fetched once - just to recover the album/auth keys and
     title. All actual photo enumeration goes through Google's ``batchexecute``
     endpoint, which is the only way to reach photos beyond the first ~300.
+
+    ``video_keys`` holds the media keys of items skipped as video. The
+    publicalbum.org source returns no media type at all, so it relies on these
+    to drop the same videos (see #26).
     """
+    video_keys: set[str] = set()
     keys, title = await _fetch_album_keys(session, share_url, timeout=timeout)
     if keys is None:
-        return None, []
+        return None, [], video_keys
 
     items: list[MediaItem] = []
     seen_urls: set[str] = set()
@@ -90,7 +97,7 @@ async def fetch_album(session, share_url: str, *, timeout: float = 30.0) -> tupl
         page_no += 1
         try:
             page_items, page_id = await _fetch_album_page(
-                session, keys, page_id, timeout=timeout
+                session, keys, page_id, timeout=timeout, video_keys=video_keys
             )
         except Exception as err:
             _LOGGER.warning(
@@ -119,7 +126,7 @@ async def fetch_album(session, share_url: str, *, timeout: float = 30.0) -> tupl
         "Album scraper: batchexecute fetched %d photos in %d page(s)",
         len(items), page_no,
     )
-    return title, items
+    return title, items, video_keys
 
 
 # -- Internals ---------------------------------------------------------------
@@ -173,11 +180,14 @@ def _extract_title(html: str) -> str | None:
     return title or None
 
 
-def _extract_first_page_items(html: str) -> list[MediaItem]:
+def _extract_first_page_items(
+    html: str, video_keys: set[str] | None = None
+) -> list[MediaItem]:
     """Pull the first 300 items out of the AF_initDataCallback blocks.
 
     Returns an empty list if the embedded data can't be parsed - the caller
-    will still get the rest via batchexecute pagination.
+    will still get the rest via batchexecute pagination. Media keys of items
+    skipped as video are added to ``video_keys`` when one is supplied.
     """
     candidates: list[list[Any]] = []
     for blob in _iter_af_data_blobs(html):
@@ -195,6 +205,7 @@ def _extract_first_page_items(html: str) -> list[MediaItem]:
     seen: set[str] = set()
     for raw in best:
         if _is_video_item(raw):
+            _record_video_key(raw, video_keys)
             continue
         item = _parse_album_item(raw)
         if item is None or item.url in seen:
@@ -226,6 +237,7 @@ async def _fetch_album_page(
     page_id: str | None,
     *,
     timeout: float,
+    video_keys: set[str] | None = None,
 ) -> tuple[list[MediaItem], str | None]:
     """Call snAcKc once. ``page_id=""`` is treated as ``None`` (initial fetch)."""
     pid = page_id or None
@@ -247,10 +259,12 @@ async def _fetch_album_page(
     async with session.post(url, data=form, headers=headers, timeout=timeout) as resp:
         resp.raise_for_status()
         body = await resp.text()
-    return _parse_batchexecute_album_page(body)
+    return _parse_batchexecute_album_page(body, video_keys)
 
 
-def _parse_batchexecute_album_page(body: str) -> tuple[list[MediaItem], str | None]:
+def _parse_batchexecute_album_page(
+    body: str, video_keys: set[str] | None = None
+) -> tuple[list[MediaItem], str | None]:
     """Parse a batchexecute response for one snAcKc call.
 
     Format (per line, after the XSSI prefix):
@@ -293,11 +307,28 @@ def _parse_batchexecute_album_page(body: str) -> tuple[list[MediaItem], str | No
     items: list[MediaItem] = []
     for raw in raw_items:
         if _is_video_item(raw):
+            _record_video_key(raw, video_keys)
             continue
         item = _parse_album_item(raw)
         if item is not None:
             items.append(item)
     return items, next_page
+
+
+def _record_video_key(raw: Any, sink: set[str] | None) -> None:
+    """Remember a rejected video so other sources can drop it by id too."""
+    if sink is None:
+        return
+    key = _media_key(raw)
+    if key:
+        sink.add(key)
+
+
+def _media_key(raw: Any) -> str | None:
+    """Google's stable per-photo id, which publicalbum.org echoes as item ``id``."""
+    if isinstance(raw, list) and raw and isinstance(raw[0], str):
+        return raw[0]
+    return None
 
 
 def _is_video_item(raw: Any) -> bool:
