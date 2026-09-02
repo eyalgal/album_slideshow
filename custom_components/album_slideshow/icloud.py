@@ -50,6 +50,10 @@ _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 # also contain ``-`` and ``_`` (e.g. ``045YeI20-8u3X31bBPD5z9B_A``).
 _TOKEN_CHARS = frozenset(_BASE62 + "-_")
 
+# Used when a token's leading characters aren't base62 and the partition can't
+# be derived. Apple answers with an X-Apple-MMe-Host redirect to the right one.
+_DEFAULT_PARTITION_HOST = "p01-sharedstreams.icloud.com"
+
 # Which iCloud backend serves an album. These string values match the
 # ``ICLOUD_BACKEND_*`` constants in ``const.py``; they are duplicated here to
 # keep this module free of a hard dependency on ``const``.
@@ -95,10 +99,18 @@ _CK_BROWSER_SAFE_ORIGINAL = {"public.jpeg", "public.png"}
 _CK_VIDEO_HINTS = ("movie", "video", "mpeg-4", "quicktime")
 
 
-def _base62_to_int(value: str) -> int:
+def _base62_to_int(value: str) -> int | None:
+    """Decode base62, or ``None`` if the text isn't purely base62.
+
+    Share tokens may contain ``-``/``_`` (CloudKit uses a URL-safe alphabet), so
+    this has to answer "not base62" rather than raise.
+    """
     result = 0
     for ch in value:
-        result = result * 62 + _BASE62.index(ch)
+        index = _BASE62.find(ch)
+        if index < 0:
+            return None
+        result = result * 62 + index
     return result
 
 
@@ -155,7 +167,9 @@ def partition_host(token: str) -> str:
     """Derive the shared-streams partition host for a token.
 
     Apple encodes the server partition in the first characters of the token:
-    one char after a leading ``A``, otherwise the first two chars.
+    one char after a leading ``A``, otherwise the first two chars. When those
+    characters aren't base62 the partition can't be computed, so fall back to
+    a valid host and let Apple redirect via ``X-Apple-MMe-Host``.
     """
     if not token:
         return ""
@@ -163,6 +177,8 @@ def partition_host(token: str) -> str:
         partition = _base62_to_int(token[1:2])
     else:
         partition = _base62_to_int(token[1:3])
+    if partition is None:
+        return _DEFAULT_PARTITION_HOST
     return f"p{partition:02d}-sharedstreams.icloud.com"
 
 

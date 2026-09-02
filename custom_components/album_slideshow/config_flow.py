@@ -141,6 +141,14 @@ def _describe_error(err: BaseException) -> str:
     return f"HTTP {status}: {detail}" if status else f"{type(err).__name__}: {detail}"
 
 
+def _redact_token(token: str | None) -> str:
+    """Show enough of a share token to debug it without publishing the album."""
+    if not token:
+        return "<empty>"
+    shape = "".join("-" if c in "-_" else "x" for c in token)
+    return f"{token[:3]}...({len(token)} chars, shape {shape})"
+
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
@@ -549,7 +557,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await client.async_validate()
                     albums = await client.async_list_albums()
                     people = await client.async_list_people()
-                except Exception:  # noqa: BLE001 - any failure means bad URL/creds
+                except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds
+                    _LOGGER.warning(
+                        "PhotoPrism validation failed for %s: %s",
+                        client.base_url,
+                        _describe_error(err),
+                    )
                     errors["base"] = "photoprism_cannot_connect"
                 else:
                     self._pp_url = client.base_url
@@ -729,7 +742,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     client = icloud_api.IcloudClient(self.hass, token)
                 try:
                     await client.async_validate()
-                except Exception:  # noqa: BLE001 - any failure means bad/expired link
+                except Exception as err:  # noqa: BLE001 - any failure means bad/expired link
+                    _LOGGER.warning(
+                        "iCloud validation failed for token %s (%s backend): %s",
+                        _redact_token(token),
+                        backend,
+                        _describe_error(err),
+                    )
                     errors["base"] = "icloud_cannot_connect"
                 else:
                     await self.async_set_unique_id(
@@ -791,7 +810,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await client.async_login(otp_code=otp or None)
             except syn_api.SynologyOtpRequired:
                 errors["otp_code"] = "synology_otp_required"
-            except Exception:  # noqa: BLE001 - any failure means bad URL/creds
+            except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds
+                _LOGGER.warning(
+                    "Synology login failed for %s: %s", url, _describe_error(err)
+                )
                 errors["base"] = "synology_cannot_connect"
 
             if not errors:
@@ -811,7 +833,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         places = await client.async_list_places()
                         tags = await client.async_list_tags()
                         subjects = await client.async_list_subjects()
-                except Exception:  # noqa: BLE001
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Synology listing failed for space %s: %s",
+                        space,
+                        _describe_error(err),
+                    )
                     if space == SYNOLOGY_SPACE_SHARED:
                         errors["base"] = "synology_shared_unavailable"
                     else:
@@ -1039,7 +1066,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.async_validate()
-            except Exception:  # noqa: BLE001 - any failure means bad URL/creds/folder
+            except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds/folder
+                _LOGGER.warning(
+                    "Nextcloud validation failed for %s (folder %r): %s",
+                    client.base_url,
+                    client.folder,
+                    _describe_error(err),
+                )
                 errors["base"] = "nextcloud_cannot_connect"
             else:
                 await self.async_set_unique_id(
@@ -1111,7 +1144,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 client = nc_api.NextcloudPublicClient(self.hass, base_url, token)
                 try:
                     await client.async_validate()
-                except Exception:  # noqa: BLE001 - any failure means bad/expired link
+                except Exception as err:  # noqa: BLE001 - any failure means bad/expired link
+                    _LOGGER.warning(
+                        "Nextcloud public album validation failed for %s: %s",
+                        base_url,
+                        _describe_error(err),
+                    )
                     errors["base"] = "nextcloud_public_cannot_connect"
                 else:
                     await self.async_set_unique_id(

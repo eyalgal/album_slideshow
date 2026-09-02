@@ -156,3 +156,48 @@ def test_looks_like_video_cannot_detect_a_publicalbum_video():
         "mediaMetadata": None,
     }
     assert _looks_like_video(raw) is False
+
+
+# -- config flow diagnostics (#30, #34) -------------------------------------
+# Every provider validation step used to swallow its exception, so users kept
+# reporting "nothing in the logs". These pin the helpers that fixed that.
+
+def _load_config_flow():
+    import importlib, sys, types
+
+    sys.modules["homeassistant.helpers"].selector = types.ModuleType("selector")
+    return importlib.import_module("custom_components.album_slideshow.config_flow")
+
+
+def test_describe_error_includes_http_status_when_present():
+    cf = _load_config_flow()
+
+    class Boom(Exception):
+        status = 403
+
+    assert cf._describe_error(Boom("Forbidden")) == "HTTP 403: Forbidden"
+    assert cf._describe_error(ValueError("nope")) == "ValueError: nope"
+
+
+def test_redact_token_never_leaks_the_whole_token():
+    cf = _load_config_flow()
+    token = "045YeI20-8u3X31bBPD5z9B_A"
+    out = cf._redact_token(token)
+    assert token not in out
+    assert out.startswith("045")
+    # The shape is what matters for debugging: length and where -/_ sit.
+    assert f"{len(token)} chars" in out
+    assert "-" in out
+    assert cf._redact_token("") == "<empty>"
+    assert cf._redact_token(None) == "<empty>"
+
+
+def test_every_provider_validation_logs_its_failure():
+    import pathlib
+    import re
+
+    src = pathlib.Path(
+        "custom_components/album_slideshow/config_flow.py"
+    ).read_text()
+    # A bare "except Exception:" means the cause is being discarded again.
+    assert not re.search(r"except Exception:\s*(#.*)?\n\s+errors\[", src)

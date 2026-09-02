@@ -293,3 +293,33 @@ def test_parse_ck_records_dedupes_by_master():
         [master, _ck_asset("A1", "M1"), _ck_asset("A2", "M1")], "full"
     )
     assert len(out) == 1
+
+
+# ── partition host robustness (#34) ────────────────────────────────────────
+# parse_share_link accepts "-" and "_" because CloudKit tokens use a URL-safe
+# alphabet. Those characters used to raise ValueError out of the base62 decode
+# when a token was routed down the legacy path, which the config flow then
+# swallowed into a generic "could not reach that album" with an empty log.
+
+def test_partition_host_still_derives_known_tokens():
+    assert ic.partition_host("B2XJtdOXmGiafRQ") == "p157-sharedstreams.icloud.com"
+    # A leading "A" means the partition is a single character.
+    assert ic.partition_host("A2XJtdOXmGiafRQ") == "p02-sharedstreams.icloud.com"
+
+
+def test_partition_host_falls_back_instead_of_raising():
+    # Apple redirects to the right partition via X-Apple-MMe-Host, so a valid
+    # host is a better answer than a crash.
+    for token in ("0-8u3X31bBPD5z9B_A", "x_yZZZ", "A-bcdef"):
+        host = ic.partition_host(token)
+        assert host.endswith("-sharedstreams.icloud.com")
+
+
+def test_partition_host_empty_token():
+    assert ic.partition_host("") == ""
+
+
+def test_base62_to_int_reports_non_base62():
+    assert ic._base62_to_int("2X") == 157
+    assert ic._base62_to_int("-8") is None
+    assert ic._base62_to_int("_") is None
