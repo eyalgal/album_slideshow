@@ -1153,12 +1153,26 @@ class AlbumSlideshowCamera(Camera):
     ) -> tuple[Image.Image, MediaItem] | None:
         """Find an image with the opposite orientation of the canvas.
 
-        Candidates within ``pair_min_gap_percent`` of the current index
-        (wrapping on both sides, since the album is a ring buffer) are
-        excluded so the partner comes from a meaningfully different part of
-        the collection rather than the same burst/session. The remaining
+        By default (``pair_min_gap_percent`` = 0) this is the original
+        search: walk forward from the very next item, nearest candidate
+        wins, fully deterministic. Setting ``pair_min_gap_percent`` above 0
+        opts into a cooldown search instead - candidates within that
+        percentage of the current index (wrapping on both sides, since the
+        album is a ring buffer) are excluded so the partner comes from a
+        meaningfully different part of the collection, and the remaining
         candidates are shuffled before scanning so the same nearby partner
-        isn't picked deterministically every time.
+        isn't picked deterministically every time. Small albums where the
+        cooldown would leave no candidates fall back to the deterministic
+        search (see ``_pair_exclusion_radius``); no eligible partner at all
+        (orientation, recent-repeat, or download failures) is a normal
+        outcome and simply returns ``None``, which the caller renders as a
+        single unpaired image.
+
+        This is a pure function of ``self._index``, ``self._recent_urls``
+        and ``self._rng``'s state, which is exactly what the navigation
+        buffer's cursor snapshots capture - so replaying a cached cursor
+        (Previous/Next) always reproduces the same paired frame; only
+        rendering a slide for the first time consumes new randomness.
 
         Uses metadata wherever possible - only candidates without width/height
         metadata are downloaded and decoded for their orientation. The returned
@@ -1169,9 +1183,12 @@ class AlbumSlideshowCamera(Camera):
             return None
         n = len(items)
         radius = _pair_exclusion_radius(n, self.store.pair_min_gap_percent)
-        excluded = {(self._index + d) % n for d in range(-radius, radius + 1)}
-        candidates = [idx for idx in range(n) if idx not in excluded]
-        self._rng.shuffle(candidates)
+        if radius > 0:
+            excluded = {(self._index + d) % n for d in range(-radius, radius + 1)}
+            candidates = [idx for idx in range(n) if idx not in excluded]
+            self._rng.shuffle(candidates)
+        else:
+            candidates = [(self._index + offset) % n for offset in range(1, n)]
 
         tries = 0
         for idx in candidates:

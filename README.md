@@ -109,7 +109,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Slide interval | 60 | Any positive integer (seconds) | Time between slides |
 | Number | Album refresh | 24 | Any positive integer (hours) | How often album contents refresh |
 | Number | Pair divider size | 8 | 0-64 (px) | Width of divider between paired images |
-| Number | Pair minimum gap | 10 | 0-50 (% of album) | Minimum separation from the current slide's index when picking an orientation-mismatch pairing partner, so nearby/same-session shots aren't paired together; 0 disables the cooldown |
+| Number | Pair minimum gap | 0 (off) | 0-50 (% of album) | Opt-in: above 0, excludes candidates within this percentage of the current slide's index (and shuffles the rest) when picking an orientation-mismatch pairing partner, so nearby/same-session shots aren't paired together. At 0, pairing uses the original nearest-candidate search |
 | Number | Navigation buffer | 2 | 0-10 (slides) | Fully rendered slides cached before and after the current frame for immediate Previous/Next navigation |
 | Number | Image cache size | 75 | 50-1000 (MB) | Memory budget for downloaded image data (per album) |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |

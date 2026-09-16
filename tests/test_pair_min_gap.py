@@ -15,9 +15,10 @@ from custom_components.album_slideshow.store import SlideshowStore
 # ── _pair_exclusion_radius ──────────────────────────────────────────────────
 
 
-def test_default_min_gap_percent_is_ten():
-    assert DEFAULT_PAIR_MIN_GAP_PERCENT == 10
-    assert SlideshowStore().pair_min_gap_percent == 10
+def test_default_min_gap_percent_is_off():
+    # Opt-in: the default preserves the original deterministic behavior.
+    assert DEFAULT_PAIR_MIN_GAP_PERCENT == 0
+    assert SlideshowStore().pair_min_gap_percent == 0
 
 
 @pytest.mark.parametrize("n", [0, 1, 2, 3])
@@ -125,6 +126,60 @@ def test_zero_gap_percent_allows_immediate_neighbors():
     assert item.url == "item-1"
 
 
+def test_default_gap_is_deterministic_nearest_candidate_first():
+    # With the feature off (the default), behavior must be byte-for-byte the
+    # original algorithm: walk forward from the current index and take the
+    # first orientation match, regardless of rng seed - i.e. no shuffling.
+    n = 20
+    items = [_item(i, portrait=False) for i in range(n)]
+    items[5] = _item(5, portrait=True)
+    items[12] = _item(12, portrait=True)
+
+    for seed in range(10):
+        cam = _make_search_cam(index=0, pair_min_gap_percent=0, seed=seed)
+        result = _run(
+            cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100)
+        )
+        assert result is not None
+        assert result[1].url == "item-5"
+
+
+def test_default_gap_does_not_consume_rng_state():
+    # The old algorithm never touched randomness; preserving that means a
+    # disabled cooldown must leave self._rng untouched, so anything else
+    # relying on rng state (e.g. random order mode) is unaffected.
+    n = 20
+    items = [_item(i, portrait=False) for i in range(n)]
+    items[5] = _item(5, portrait=True)
+
+    cam = _make_search_cam(index=0, pair_min_gap_percent=0, seed=3)
+    state_before = cam._rng.getstate()
+    _run(cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100))
+    assert cam._rng.getstate() == state_before
+
+
+def test_same_starting_state_reproduces_the_same_pairing_partner():
+    # The navigation buffer restores Previous/Next frames by replaying a
+    # captured cursor (index, recent_urls, rng state) rather than
+    # recomposing - so for that replay to show the exact same paired frame,
+    # this search must be a pure function of that state. This is the
+    # property the buffer relies on.
+    n = 40
+    items = [_item(i, portrait=False) for i in range(n)]
+    for i in (5, 12, 20, 33):
+        items[i] = _item(i, portrait=True)
+
+    def pick(seed):
+        cam = _make_search_cam(index=0, pair_min_gap_percent=20, seed=seed)
+        result = _run(
+            cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100)
+        )
+        assert result is not None
+        return result[1].url
+
+    assert pick(seed=99) == pick(seed=99)
+
+
 def test_candidate_order_is_shuffled_not_nearest_first():
     # Many equally-eligible portrait candidates outside the cooldown zone;
     # across seeds we should see more than one of them picked, proving the
@@ -153,3 +208,45 @@ def test_no_eligible_candidates_returns_none():
         cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100)
     )
     assert result is None
+
+
+def test_no_eligible_partner_when_all_matches_are_recently_shown():
+    # Orientation matches exist, but every one of them is in the recent-urls
+    # cooldown - a normal "no partner right now" outcome, not a crash.
+    n = 10
+    items = [_item(i, portrait=False) for i in range(n)]
+    items[3] = _item(3, portrait=True)
+    items[7] = _item(7, portrait=True)
+
+    cam = _make_search_cam(index=0, pair_min_gap_percent=0, seed=1)
+    cam._recent_urls = ["item-3", "item-7"]
+    result = _run(
+        cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100)
+    )
+    assert result is None
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("pair_min_gap_percent", [0, 10, 50])
+def test_small_albums_never_crash_regardless_of_gap_setting(n, pair_min_gap_percent):
+    # Every item shares the canvas orientation, so there is genuinely no
+    # eligible partner - this must degrade to None gracefully at every
+    # album size and every gap setting, never raise or hang.
+    items = [_item(i, portrait=False) for i in range(n)]
+    cam = _make_search_cam(index=0, pair_min_gap_percent=pair_min_gap_percent, seed=1)
+    result = _run(
+        cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100)
+    )
+    assert result is None
+
+
+def test_tiny_album_with_gap_enabled_still_finds_the_only_candidate():
+    # n=2 caps the exclusion radius to 0 (see _pair_exclusion_radius), so a
+    # high gap setting must still fall back to finding the only other item.
+    items = [_item(0, portrait=False), _item(1, portrait=True)]
+    cam = _make_search_cam(index=0, pair_min_gap_percent=50, seed=1)
+    result = _run(
+        cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100)
+    )
+    assert result is not None
+    assert result[1].url == "item-1"
