@@ -158,6 +158,28 @@ def test_default_gap_does_not_consume_rng_state():
     assert cam._rng.getstate() == state_before
 
 
+@pytest.mark.parametrize("limit", [0, 1, camera._PAIR_SEARCH_LIMIT])
+def test_default_gap_candidate_generation_is_bounded(monkeypatch, limit):
+    items = [_item(index, portrait=False) for index in range(1000)]
+    cam = _make_search_cam(index=0, pair_min_gap_percent=0)
+    generated_offsets = []
+
+    def tracked_range(start, stop):
+        for offset in range(start, stop):
+            generated_offsets.append(offset)
+            yield offset
+
+    monkeypatch.setattr(camera, "range", tracked_range, raising=False)
+    result = _run(
+        cam._find_next_mismatch_image(
+            items, is_portrait_canvas=False, width=100, height=100, limit=limit
+        )
+    )
+
+    assert result is None
+    assert generated_offsets == list(range(1, limit + 1))
+
+
 def test_same_starting_state_reproduces_the_same_pairing_partner():
     # The navigation buffer restores Previous/Next frames by replaying a
     # captured cursor (index, recent_urls, rng state) rather than

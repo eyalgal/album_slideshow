@@ -292,7 +292,7 @@ DEFAULT_PAIR_DIVIDER_PX = 8
 DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"
 # Minimum separation (as a percentage of album size) enforced between the
 # current slide's index and a candidate orientation-mismatch pairing
-# partner, so bursts/same-session shots aren't paired together. Opt-in: 0
+# partner. Helps avoid nearby photos; does not detect photo sessions. Opt-in: 0
 # (the default) keeps the original deterministic "nearest candidate first"
 # search; a positive value switches to a shuffled search that excludes the
 # cooldown zone around the current index.

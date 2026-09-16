@@ -1188,7 +1188,10 @@ class AlbumSlideshowCamera(Camera):
             candidates = [idx for idx in range(n) if idx not in excluded]
             self._rng.shuffle(candidates)
         else:
-            candidates = [(self._index + offset) % n for offset in range(1, n)]
+            candidates = (
+                (self._index + offset) % n
+                for offset in range(1, min(n, limit + 1))
+            )
 
         tries = 0
         for idx in candidates:
