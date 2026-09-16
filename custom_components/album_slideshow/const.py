@@ -290,6 +290,11 @@ DEFAULT_ORDER_MODE = ORDER_RANDOM
 DEFAULT_ASPECT_RATIO = "16:9"
 DEFAULT_PAIR_DIVIDER_PX = 8
 DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"
+# Minimum separation (as a percentage of album size) enforced between the
+# current slide's index and a candidate orientation-mismatch pairing
+# partner, so bursts/same-session shots aren't paired together. 0 disables
+# the cooldown and restores the old "nearest candidate" behaviour.
+DEFAULT_PAIR_MIN_GAP_PERCENT = 10
 DEFAULT_RECURSIVE = True
 # Per-album download cache. Multiple albums add up: 4 × 150 MB = 600 MB
 # of just-in-case downloaded JPEGs. 75 MB caches roughly 10-20 photos

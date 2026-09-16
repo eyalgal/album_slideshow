@@ -969,6 +969,7 @@ const LIVE_FIELDS = [
   "slide_interval",
   "pair_divider_px",
   "pair_divider_color",
+  "pair_min_gap_percent",
 ];
 
 const LIVE_SUFFIX = {
@@ -980,6 +981,7 @@ const LIVE_SUFFIX = {
   slide_interval: "_interval",
   pair_divider_px: "_pair_divider_px",
   pair_divider_color: "_pair_divider_color",
+  pair_min_gap_percent: "_pair_min_gap_percent",
   previous_button: "_previous_button",
   next_button: "_next_button",
   refresh_button: "_refresh_button",
@@ -994,6 +996,7 @@ const LIVE_LABELS = {
   live_slide_interval: "Slide interval (seconds)",
   live_pair_divider_px: "Pair divider size (px)",
   live_pair_divider_color: "Pair divider color",
+  live_pair_min_gap_percent: "Pair minimum gap (% of album)",
 };
 
 function humanizeOption(value) {
@@ -1188,6 +1191,19 @@ function createAlbumSlideshowCardEditorClass(Base) {
     }
     if (s.pair_divider_color) {
       items.push({ name: "live_pair_divider_color", selector: { text: {} } });
+    }
+    if (s.pair_min_gap_percent) {
+      items.push({
+        name: "live_pair_min_gap_percent",
+        selector: {
+          number: this._liveNumberConfig(s.pair_min_gap_percent, {
+            min: 0,
+            max: 50,
+            step: 1,
+            unit: "%",
+          }),
+        },
+      });
     }
     return items;
   }
@@ -1401,7 +1417,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
         out[`live_${f}`] = e ? e.state : "";
       }
     }
-    for (const f of ["slide_interval", "pair_divider_px"]) {
+    for (const f of ["slide_interval", "pair_divider_px", "pair_min_gap_percent"]) {
       if (s[f]) {
         const e = st(s[f]);
         out[`live_${f}`] = e ? Number(e.state) : null;
@@ -1594,7 +1610,11 @@ function createAlbumSlideshowCardEditorClass(Base) {
         entity_id: id,
         option: value,
       });
-    } else if (field === "slide_interval" || field === "pair_divider_px") {
+    } else if (
+      field === "slide_interval" ||
+      field === "pair_divider_px" ||
+      field === "pair_min_gap_percent"
+    ) {
       hass.callService("number", "set_value", {
         entity_id: id,
         value: Number(value),
