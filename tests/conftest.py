@@ -100,6 +100,9 @@ class _Store:
     async def async_save(self, *a, **kw):
         return None
 
+    async def async_remove(self):
+        return None
+
 
 _storage.Store = _Store  # type: ignore[attr-defined]
 
@@ -183,3 +186,22 @@ class _SensorStateClass:
 
 
 _sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
+
+
+# helpers.selector: just enough for config_flow to build its schemas.
+import homeassistant.helpers.selector as _selector
+
+
+class _SelectorBase:
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        return value
+
+
+_selector.SelectOptionDict = dict  # type: ignore[attr-defined]
+_selector.SelectSelectorConfig = lambda **kw: kw  # type: ignore[attr-defined]
+_selector.SelectSelectorMode = types.SimpleNamespace(DROPDOWN="dropdown", LIST="list")  # type: ignore[attr-defined]
+_selector.SelectSelector = _SelectorBase  # type: ignore[attr-defined]
+_selector.BooleanSelector = _SelectorBase  # type: ignore[attr-defined]

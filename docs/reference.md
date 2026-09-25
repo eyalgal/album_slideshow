@@ -29,6 +29,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Select | Date filter | off | off, last_7_days, last_30_days, last_365_days, this_month, this_year, on_this_day | Restrict the slideshow to a date window based on photo capture date |
 | Text | Pair divider color | #FFFFFF | Hex, named colors, transparent | Divider color between paired images |
 | Switch | Pause slideshow | off | on / off | Hold the current frame; advances pause until turned off |
+| Switch | Crop debug overlay | off | on / off | Show detected face boxes, preferred padding, and the original photo center; see [crop diagnostics](provider-setup.md#crop-debug-overlay) |
 
 ## Rendering Options
 

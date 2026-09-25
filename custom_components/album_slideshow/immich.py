@@ -15,7 +15,7 @@ API shape (Immich v1.13x / v3, ``/api`` prefix, ``x-api-key`` header):
 - ``GET /api/assets/{id}`` -> full asset incl ``exifInfo`` (lat/long, city,
     country, description) - used to enrich location/description per asset.
 - ``GET /api/faces?id={id}`` -> recognised faces and bounding boxes - used to
-    focus cover-mode crops when the source contains selected people.
+    keep faces whole in cover-mode crops.
 - Image bytes: ``/api/assets/{id}/thumbnail?size=preview|fullsize`` or
     ``/api/assets/{id}/original`` (all require the ``x-api-key`` header).
 """
@@ -263,6 +263,72 @@ def selected_person_ids(
     return set()
 
 
+def _normalised_face_box(
+    face: Any,
+    edits: list[dict[str, Any]] | None = None,
+    original_size: tuple[float, float] | None = None,
+) -> tuple[float, float, float, float] | None:
+    """Return a face's bounding box normalised to 0..1, or None if invalid."""
+    if not isinstance(face, dict):
+        return None
+    width = face.get("imageWidth")
+    height = face.get("imageHeight")
+    coords = (
+        face.get("boundingBoxX1"),
+        face.get("boundingBoxY1"),
+        face.get("boundingBoxX2"),
+        face.get("boundingBoxY2"),
+    )
+    if (
+        any(isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) for value in (width, height, *coords))
+        or width <= 0
+        or height <= 0
+    ):
+        return None
+    x1, y1, x2, y2 = coords
+    if x2 <= x1 or y2 <= y1:
+        return None
+    box = _original_face_box(
+        (x1 / width, y1 / height, x2 / width, y2 / height),
+        edits or [], original_size,
+    )
+    box = tuple(max(0.0, min(1.0, value)) for value in box)
+    return box if box[2] > box[0] and box[3] > box[1] else None
+
+
+def parse_face_boxes(
+    faces: Any,
+    person_ids: set[str] | None = None,
+    *,
+    edits: list[dict[str, Any]] | None = None,
+    original_size: tuple[float, float] | None = None,
+) -> list[list[float | bool]]:
+    """Return normalised ``[x1, y1, x2, y2, area, selected]`` face boxes.
+
+    Immich reports face boxes in the coordinate space described by each
+    face's ``imageWidth``/``imageHeight``. Normalising each box makes it
+    independent of whether Album Slideshow downloads a preview, full-size
+    derivative or original. Faces Immich has not linked to a named person
+    are included. Explicit person selection is a separate priority from area.
+    """
+    if not isinstance(faces, list):
+        return []
+    boxes: list[list[float | bool]] = []
+    for face in faces:
+        box = _normalised_face_box(face, edits, original_size)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        weight = (x2 - x1) * (y2 - y1)
+        person = face.get("person")
+        selected = bool(
+            person_ids and isinstance(person, dict) and person.get("id") in person_ids
+        )
+        boxes.append([x1, y1, x2, y2, weight, selected])
+    return boxes
+
+
 def _original_face_box(
     box: tuple[float, float, float, float],
     edits: list[dict[str, Any]],
@@ -355,40 +421,12 @@ def parse_face_focus(
     """
     if not isinstance(faces, list) or not person_ids:
         return None
-
-    boxes: list[tuple[float, float, float, float]] = []
-    for face in faces:
-        if not isinstance(face, dict):
-            continue
-        person = face.get("person")
-        if not isinstance(person, dict) or person.get("id") not in person_ids:
-            continue
-        width = face.get("imageWidth")
-        height = face.get("imageHeight")
-        coords = (
-            face.get("boundingBoxX1"),
-            face.get("boundingBoxY1"),
-            face.get("boundingBoxX2"),
-            face.get("boundingBoxY2"),
-        )
-        if (
-            any(isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value) for value in (width, height, *coords))
-            or width <= 0
-            or height <= 0
-        ):
-            continue
-        x1, y1, x2, y2 = coords
-        if x2 <= x1 or y2 <= y1:
-            continue
-        box = _original_face_box(
-            (x1 / width, y1 / height, x2 / width, y2 / height),
-            edits or [], original_size,
-        )
-        box = tuple(max(0.0, min(1.0, value)) for value in box)
-        if box[2] > box[0] and box[3] > box[1]:
-            boxes.append(box)
-
+    selected_faces = [
+        face for face in faces
+        if isinstance(face, dict) and isinstance(face.get("person"), dict)
+        and face["person"].get("id") in person_ids
+    ]
+    boxes = parse_face_boxes(selected_faces, edits=edits, original_size=original_size)
     if not boxes:
         return None
     left = min(box[0] for box in boxes)

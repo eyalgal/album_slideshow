@@ -127,12 +127,11 @@ class MediaItem:
     # Provider-specific source identifier (e.g. the Immich asset id) used by
     # background enrichment to fetch per-item metadata.
     source_id: str | None = None
-    # Normalised point (0..1 in displayed-image coordinates) that cover-mode
-    # cropping should keep visible. Immich person sources populate this from
-    # the selected person's face bounding box; other sources leave it unset
-    # and retain the traditional centred crop.
-    focus_x: float | None = None
-    focus_y: float | None = None
+    # Detected faces as normalised [x1, y1, x2, y2, weight, selected] boxes (0..1 in
+    # displayed-image coordinates). Cover-mode cropping keeps as many whole
+    # faces as fit. None means no face data (non-Immich source, not scanned
+    # yet or the face lookup failed); an empty list means "no faces".
+    faces: list[list[float | bool]] | None = None
     # True once the local-folder EXIF reader has visited this file.
     # Prevents re-reading EXIF on every coordinator refresh and lets the
     # background enrichment task skip already-processed files even after
@@ -995,13 +994,11 @@ def _merge_prior_enrichment(
             item.location = prev.location
         if prev.description and not item.description:
             item.description = prev.description
-        if prev.focus_x is not None and item.focus_x is None:
-            item.focus_x = prev.focus_x
-        if prev.focus_y is not None and item.focus_y is None:
-            item.focus_y = prev.focus_y
+        if prev.faces is not None and item.faces is None:
+            item.faces = prev.faces
         if prev.exif_scanned:
             item.exif_scanned = True
-        if prev.face_scanned:
+        if prev.face_scanned and prev.faces is not None:
             item.face_scanned = True
 
 
@@ -1021,6 +1018,13 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self.store = store
 
         self.provider: str = entry.data.get(CONF_PROVIDER, PROVIDER_GOOGLE_SHARED)
+        self._immich_cache_source = None
+        if self.provider == PROVIDER_IMMICH:
+            source = [entry.data.get(key) for key in (
+                CONF_IMMICH_URL, CONF_IMMICH_API_KEY, CONF_IMMICH_SELECTION_TYPE,
+                CONF_IMMICH_SELECTION_ID, CONF_IMMICH_FILTER, CONF_IMMICH_IMAGE_SIZE,
+            )]
+            self._immich_cache_source = sha256(json.dumps(source).encode()).hexdigest()
         self.album_url: str | None = entry.data.get(CONF_ALBUM_URL)
         self.local_path: str | None = entry.data.get(CONF_LOCAL_PATH)
         self.recursive: bool = bool(entry.data.get(CONF_RECURSIVE, True))
@@ -1160,14 +1164,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
     def _needs_enrichment(self, item: MediaItem) -> bool:
         if not item.exif_scanned:
             return True
-        if self.provider != PROVIDER_IMMICH or item.face_scanned:
-            return False
-        from . import immich as immich_api
-
-        return bool(immich_api.selected_person_ids(
-            self.entry.data.get(CONF_IMMICH_SELECTION_TYPE),
-            self.entry.data.get(CONF_IMMICH_SELECTION_ID),
-        ))
+        return self.provider == PROVIDER_IMMICH and not item.face_scanned
 
     def _schedule_enrichment(self, data: dict[str, Any]) -> None:
         """Kick off the background EXIF + geocode worker if there's work."""
@@ -1212,6 +1209,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
         if not isinstance(payload, dict):
             return None
 
+        cached_source = payload.get("immich_source")
+        if cached_source is not None and cached_source != getattr(self, "_immich_cache_source", None):
+            return None
+
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
             return None
@@ -1235,11 +1236,11 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     location=raw.get("location"),
                     description=raw.get("description"),
                     source_id=raw.get("source_id"),
-                    focus_x=raw.get("focus_x"),
-                    focus_y=raw.get("focus_y"),
+                    faces=raw.get("faces"),
                     exif_scanned=bool(raw.get("exif_scanned", False)),
                     photo_id=raw.get("photo_id"),
-                    face_scanned=bool(raw.get("face_scanned", False)),
+                    face_scanned=bool(raw.get("face_scanned", False))
+                    and isinstance(raw.get("faces"), list),
                 ))
             except Exception:
                 continue
@@ -1271,8 +1272,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "location": it.location,
                     "description": it.description,
                     "source_id": it.source_id,
-                    "focus_x": it.focus_x,
-                    "focus_y": it.focus_y,
+                    "faces": it.faces,
                     "exif_scanned": it.exif_scanned,
                     "photo_id": it.photo_id,
                     "face_scanned": it.face_scanned,
@@ -1280,6 +1280,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 for it in items
             ],
         }
+        if source := getattr(self, "_immich_cache_source", None):
+            payload["immich_source"] = source
         try:
             await self._items_cache_store.async_save(payload)
         except Exception as err:  # pragma: no cover - storage layer
@@ -2199,7 +2201,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         return None, {}
 
     async def _enrich_immich_item(self, item: MediaItem) -> None:
-        """Fetch Immich metadata and selected-person face crop focus."""
+        """Fetch Immich metadata and the face boxes used for cropping."""
         from . import immich as immich_api
 
         url = self.entry.data.get(CONF_IMMICH_URL)
@@ -2214,7 +2216,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         )
 
         requests = {}
-        needs_faces = bool(person_ids) and not item.face_scanned
+        needs_faces = not item.face_scanned
         if not item.exif_scanned or needs_faces:
             requests["asset"] = client.async_get_asset(item.source_id)
         if needs_faces:
@@ -2263,14 +2265,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         _LOGGER.debug("Immich: edit metadata unavailable for asset %s", item.source_id)
                         continue
                 try:
-                    focus = immich_api.parse_face_focus(
+                    boxes = immich_api.parse_face_boxes(
                         result, person_ids, edits=edits,
                         original_size=immich_api.original_image_size(asset),
                     )
                 except (TypeError, ValueError):
                     _LOGGER.debug("Immich: unsupported face geometry for asset %s", item.source_id)
                     continue
-                item.focus_x, item.focus_y = focus if focus is not None else (None, None)
+                item.faces = boxes
                 item.face_scanned = True
 
     async def _enrich_items_background(self, data: dict[str, Any]) -> None:

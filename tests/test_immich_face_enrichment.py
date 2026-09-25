@@ -60,11 +60,11 @@ def test_face_focus_keeps_legacy_playlist_cache_readable():
 
     assert cached["title"] == "Cached album"
     assert len(cached["items"]) == 1
-    assert cached["items"][0].focus_x is None
-    assert cached["items"][0].focus_y is None
+    assert cached["items"][0].faces is None
+    assert cached["items"][0].face_scanned is False
 
 
-def test_immich_enrichment_adds_selected_face_focus(monkeypatch):
+def test_immich_enrichment_adds_weighted_face_boxes(monkeypatch):
     class FakeClient:
         def __init__(self, *_args):
             pass
@@ -94,8 +94,7 @@ def test_immich_enrichment_adds_selected_face_focus(monkeypatch):
     asyncio.run(coord._enrich_immich_item(item))
 
     assert item.description == "Portrait"
-    assert item.focus_x == pytest.approx(0.2)
-    assert item.focus_y == pytest.approx(0.2)
+    assert item.faces == [pytest.approx([0.1, 0.1, 0.3, 0.3, 0.04, True])]
     assert item.exif_scanned is True
     assert item.face_scanned is True
 
@@ -118,13 +117,12 @@ def test_immich_face_failure_keeps_metadata_and_center_fallback(monkeypatch):
     asyncio.run(coord._enrich_immich_item(item))
 
     assert item.description == "Still available"
-    assert item.focus_x is None
-    assert item.focus_y is None
+    assert item.faces is None  # unknown, not "no faces"
     assert item.exif_scanned is True
     assert item.face_scanned is False
 
 
-def test_immich_album_only_source_does_not_request_faces(monkeypatch):
+def test_immich_album_only_source_stores_all_faces(monkeypatch):
     class FakeClient:
         def __init__(self, *_args):
             pass
@@ -133,7 +131,26 @@ def test_immich_album_only_source_does_not_request_faces(monkeypatch):
             return {"exifInfo": {}}
 
         async def async_get_faces(self, _asset_id):
-            raise AssertionError("album-only source must not request faces")
+            return [
+                {
+                    "imageWidth": 1000,
+                    "imageHeight": 2000,
+                    "boundingBoxX1": 100,
+                    "boundingBoxY1": 200,
+                    "boundingBoxX2": 300,
+                    "boundingBoxY2": 600,
+                    "person": None,
+                },
+                {
+                    "imageWidth": 1000,
+                    "imageHeight": 2000,
+                    "boundingBoxX1": 500,
+                    "boundingBoxY1": 1000,
+                    "boundingBoxX2": 700,
+                    "boundingBoxY2": 1400,
+                    "person": {"id": "someone", "name": "Someone"},
+                },
+            ]
 
     monkeypatch.setattr(immich, "ImmichClient", FakeClient)
     coord = _coordinator('{"albums": ["a1"], "people": [], "favorites": false}')
@@ -141,12 +158,16 @@ def test_immich_album_only_source_does_not_request_faces(monkeypatch):
 
     asyncio.run(coord._enrich_immich_item(item))
 
-    assert item.focus_x is None
+    assert item.faces == [
+        pytest.approx([0.1, 0.1, 0.3, 0.3, 0.04, False]),
+        pytest.approx([0.5, 0.5, 0.7, 0.7, 0.04, False]),
+    ]
     assert item.exif_scanned is True
 
 
 @pytest.mark.parametrize("failure", [PermissionError("face.read missing"), TimeoutError()])
-def test_face_lookup_recovers_after_cached_failure(monkeypatch, failure):
+@pytest.mark.parametrize("selection", ['{"people": ["p1"]}', '{"albums": ["a1"]}'])
+def test_face_lookup_recovers_after_cached_failure(monkeypatch, failure, selection):
     face_calls = []
     asset_calls = []
 
@@ -173,7 +194,7 @@ def test_face_lookup_recovers_after_cached_failure(monkeypatch, failure):
             }]
 
     monkeypatch.setattr(immich, "ImmichClient", FakeClient)
-    coord = _coordinator('{"albums": [], "people": ["p1"], "favorites": false}')
+    coord = _coordinator(selection)
     coord.provider = "immich"
     coord._enrich_progress = {}
     coord._items_cache_store = SimpleNamespace(async_save=AsyncMock(), async_load=AsyncMock())
@@ -200,8 +221,7 @@ def test_face_lookup_recovers_after_cached_failure(monkeypatch, failure):
     refreshed = asyncio.run(refresh_twice())
     assert len(face_calls) == 2, "A failed face lookup was permanently cached as complete"
     assert len(asset_calls) == 2
-    assert refreshed.focus_x == pytest.approx(0.2)
-    assert refreshed.focus_y == pytest.approx(0.2)
+    assert refreshed.faces[0][:4] == pytest.approx([0.1, 0.1, 0.3, 0.3])
     assert refreshed.face_scanned is True
 
 
@@ -226,8 +246,26 @@ def test_legacy_exif_scanned_immich_item_still_gets_face_enrichment(monkeypatch)
 
     assert item.exif_scanned is True
     assert item.face_scanned is True
-    assert item.focus_x is None
+    assert item.faces == []
     assert coord._needs_enrichment(item) is False
+
+
+def test_v1120_focus_cache_is_reenriched_without_losing_playlist():
+    coord = _coordinator('{"people": ["p1"]}')
+    coord._items_cache_store = SimpleNamespace(async_load=AsyncMock(return_value={
+        "items": [{
+            "url": "http://immich.test/photo.jpg", "source_id": "a1",
+            "exif_scanned": True, "face_scanned": True,
+            "focus_x": 0.2, "focus_y": 0.3,
+        }],
+    }))
+
+    cached = asyncio.run(coord._load_cached_items())
+
+    assert len(cached["items"]) == 1
+    assert cached["items"][0].exif_scanned is True
+    assert cached["items"][0].face_scanned is False
+    assert coord._needs_enrichment(cached["items"][0]) is True
 
 
 @pytest.mark.parametrize("provider", ["google_shared", "local_folder", "media_source", "photoprism"])
@@ -276,15 +314,14 @@ def test_edited_face_focus_matches_download_coordinates(size):
         "boundingBoxY2": 60,
         "person": {"id": "p1"},
     }]
-    focus = immich.parse_face_focus(
+    boxes = immich.parse_face_boxes(
         mirrored_face_response, {"p1"},
         edits=[{"action": "mirror", "parameters": {"axis": "vertical"}}],
     )
     with Image.new("RGB", (300, 100), "green") as original:
         original.paste("red", (260, 40, 280, 60))
-        with ip.render_image(original, "cover", 100, 100, (0.9, 0.5)) as control:
-            assert control.getpixel((70, 50)) == (255, 0, 0)
-        with ip.render_image(original, "cover", 100, 100, focus) as actual:
+        hints = ip.CropHints(faces=tuple(tuple(box) for box in boxes))
+        with ip.render_image(original, "cover", 100, 100, hints) as actual:
             assert actual.getpixel((70, 50)) == (255, 0, 0), (
                 "Edited face coordinates focus the opposite side of the unedited download"
             )
@@ -316,8 +353,7 @@ def test_immich_enrichment_maps_edited_faces_to_original(monkeypatch):
 
     asyncio.run(coord._enrich_immich_item(item))
 
-    assert item.focus_x == pytest.approx(0.9)
-    assert item.focus_y == pytest.approx(0.5)
+    assert item.faces[0][:4] == pytest.approx([260 / 300, 0.4, 280 / 300, 0.6])
     assert item.face_scanned is True
     assert "edited=" not in item.url
 
@@ -351,7 +387,7 @@ def test_edited_face_metadata_failure_retries_safely(monkeypatch, failure):
     coord = _coordinator('{"people": ["p1"]}')
     first = _item()
     asyncio.run(coord._enrich_immich_item(first))
-    assert first.focus_x is None
+    assert first.faces is None
     assert first.face_scanned is False
     refreshed = _item()
     c._merge_prior_enrichment([refreshed], [first])
@@ -360,7 +396,7 @@ def test_edited_face_metadata_failure_retries_safely(monkeypatch, failure):
     asyncio.run(coord._enrich_immich_item(refreshed))
 
     assert len(edit_calls) == 2
-    assert refreshed.focus_x == pytest.approx(0.9)
+    assert refreshed.faces[0][:4] == pytest.approx([260 / 300, 0.4, 280 / 300, 0.6])
     assert refreshed.face_scanned is True
 
 

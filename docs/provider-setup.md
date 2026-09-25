@@ -87,6 +87,19 @@ endpoint (with `type` forced to images). Examples:
 { "country": "Japan", "takenAfter": "2023-01-01T00:00:00Z" }
 ```
 
+### Changing an Existing Source
+
+Open **Settings > Devices & services > Album Slideshow** and use the Immich
+entry's **Configure** button to change its albums, people, favorites, search
+filter, name, or image quality. The reverse-geocoding privacy toggle remains
+available. Saving reloads that slideshow without changing its entry ID,
+entities, runtime settings, or hidden-photo list.
+
+Saved albums and people that cannot currently be listed remain selected and
+are marked **unavailable**. They are not silently removed. Deselecting all
+sources and clearing the filter deliberately selects the entire library.
+If the stored connection fails, the flow first asks for a working URL and key.
+
 ### Image Quality
 
 - **Preview** (default) - a downscaled preview; smoothest slideshow.
@@ -106,12 +119,17 @@ endpoint (with `type` forced to images). Examples:
 
 ### Face-aware Cropping
 
-When you select one or more **People** and use **Cover** fill mode, the
-integration uses Immich's recognized-face coordinates to focus the crop on
-those people. This also works when people are combined with albums or
-favorites. With several selected people in a photo, the crop targets the
-center of their combined face region. Each half of a paired slide gets its
-own focus. No new face recognition runs inside Home Assistant.
+In **Cover** fill mode, the integration uses Immich's existing face coordinates
+for albums, people, favorites, all-photo selections, and custom searches.
+Each half of a paired slide gets its own crop. No new face recognition runs
+inside Home Assistant.
+
+The crop favors whole faces and adds room around them where space allows.
+Explicitly selected people take priority over bystanders regardless of their
+relative sizes. Within each priority group, face area determines which group
+to retain when everyone cannot fit. Padding is a preference, not a reason to
+discard a face that fits. If a face is too large for the crop, the crop retains
+visible face area instead of choosing empty background.
 
 - Add the optional `face.read` permission to the Immich API key. For photos
   cropped, rotated, or mirrored inside Immich, also grant `asset.edit.get`
@@ -121,17 +139,29 @@ own focus. No new face recognition runs inside Home Assistant.
   displayed image or written back to your library.
 - Focus arrives through background enrichment. Initial slides may use a
   centered crop until their metadata has been read.
-- Missing permissions, unavailable metadata, or no matching faces fall back
+- Missing permissions, unavailable metadata, or no detected faces fall back
   to the usual centered crop. Failed lookups retry on the next album refresh;
   after granting permissions, press **Refresh album** rather than recreating
   the integration. Existing EXIF metadata and offline playlist caches are kept.
-- **Contain** and **Blur** keep their existing behavior. Album-only,
-  favorites-only, all-photo, and custom-search selections without explicitly
-  selected people keep centered cropping. Generic Media Source cannot provide
-  the required Immich face metadata.
+- **Contain** and **Blur** keep their existing behavior. Generic Media Source
+  cannot provide the required Immich face metadata.
 - A fixed-aspect Cover crop cannot guarantee that every face fits when a
   group spans too much of the photo. Use **Contain** or **Blur** when retaining
   the entire photo is more important than filling the frame.
+
+### Crop Debug Overlay
+
+The per-slideshow **Crop debug overlay** switch is off by default. It draws
+green boxes for kept faces, red for cut faces, and grey for excluded faces
+where their outlines are visible. Thin outlines show preferred padding.
+A yellow crosshair marks the original photo's center; an edge arrow points
+back to it when it is outside the crop. A label summarizes the detected faces
+or shows **no face data** while metadata is unavailable.
+
+The overlay is rendered into the camera image, so all cards using that camera
+see it. Turn it off when finished. Its setting survives restarts. Debug logging
+also includes per-photo crop summaries. Other providers can show the center
+marker but do not gain face recognition.
 
 ### Immich Limits
 

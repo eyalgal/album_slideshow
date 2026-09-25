@@ -429,8 +429,7 @@ def test_merge_prior_enrichment_carries_metadata_by_url():
             longitude=2.0,
             location="Somewhere",
             description="A caption",
-            focus_x=0.25,
-            focus_y=0.10,
+            faces=[[0.1, 0.05, 0.4, 0.15, 0.03]],
             exif_scanned=True,
             face_scanned=True,
         )
@@ -441,8 +440,7 @@ def test_merge_prior_enrichment_carries_metadata_by_url():
     assert new[0].latitude == 1.0
     assert new[0].location == "Somewhere"
     assert new[0].description == "A caption"
-    assert new[0].focus_x == pytest.approx(0.25)
-    assert new[0].focus_y == pytest.approx(0.10)
+    assert new[0].faces == [[0.1, 0.05, 0.4, 0.15, 0.03]]
     assert new[0].exif_scanned is True
     assert new[0].face_scanned is True
     # New file untouched.
@@ -494,8 +492,7 @@ def test_save_and_load_round_trips_gps_and_scanned_flag():
             longitude=-122.0850,
             location="Mountain View, USA",
             description="Sunset over the harbour",
-            focus_x=0.25,
-            focus_y=0.10,
+            faces=[[0.1, 0.05, 0.4, 0.15, 0.03]],
             exif_scanned=True,
             face_scanned=True,
             byte_size=4567,
@@ -514,8 +511,8 @@ def test_save_and_load_round_trips_gps_and_scanned_flag():
     assert out[0].longitude == pytest.approx(-122.0850)
     assert out[0].location == "Mountain View, USA"
     assert out[0].description == "Sunset over the harbour"
-    assert out[0].focus_x == pytest.approx(0.25)
-    assert out[0].focus_y == pytest.approx(0.10)
+    assert out[0].faces == [[0.1, 0.05, 0.4, 0.15, 0.03]]
+    assert out[1].faces is None
     assert out[0].exif_scanned is True
     assert out[0].face_scanned is True
     assert out[0].byte_size == 4567
@@ -523,6 +520,17 @@ def test_save_and_load_round_trips_gps_and_scanned_flag():
     assert out[1].latitude is None
     assert out[1].exif_scanned is False
     assert out[1].face_scanned is False
+
+
+def test_cache_from_previous_immich_source_is_not_used_after_reconfiguration():
+    coord = _stub_coordinator()
+    coord._immich_cache_source = "old-source"
+    asyncio.run(coord._save_cached_items({"items": [_item("https://example.test/old.jpg")]}))
+    assert asyncio.run(coord._load_cached_items()) is not None
+
+    coord._immich_cache_source = "new-source"
+
+    assert asyncio.run(coord._load_cached_items()) is None
 
 
 # ── geocode opt-out via entry.options ─────────────────────────────────────

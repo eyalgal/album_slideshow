@@ -108,6 +108,46 @@ async def _camera(items, monkeypatch, *, paired=False):
     return cam
 
 
+def test_debug_overlay_rebuilds_buffers_without_changing_exclusions(monkeypatch):
+    async def run():
+        cam = await _camera([_item("photo-a")], monkeypatch)
+        original = cam._current_frame.data
+        hidden = cam.store.hidden_photo_ids
+        cam._next_frames.append(cam._current_frame)
+
+        cam.store.face_debug = True
+        cam.store.notify()
+
+        assert cam._timeline_dirty
+        assert cam._crop_hints(None).debug is True
+        await cam._rebuild_current_frame()
+        assert cam._current_frame.data != original
+        assert cam.store.hidden_photo_ids == hidden
+
+        cam.store.face_debug = False
+        cam.store.notify()
+        await cam._rebuild_current_frame()
+        assert cam._current_frame.data == original
+
+    asyncio.run(run())
+
+
+def test_unload_stops_old_source_enrichment():
+    async def run():
+        coord = SimpleNamespace(_cancel_enrichment=AsyncMock())
+        hass = SimpleNamespace(
+            data={integration.DOMAIN: {"entry": {"coordinator": coord}}},
+            config_entries=SimpleNamespace(async_unload_platforms=AsyncMock(return_value=True)),
+        )
+
+        assert await integration.async_unload_entry(hass, SimpleNamespace(entry_id="entry"))
+
+        coord._cancel_enrichment.assert_awaited_once()
+        assert "entry" not in hass.data[integration.DOMAIN]
+
+    asyncio.run(run())
+
+
 def test_hide_clears_history_and_preloads_and_filters_the_cached_pool(monkeypatch):
     async def run():
         items = [_item(f"photo-{index}", f"https://example.com/{index}") for index in range(4)]

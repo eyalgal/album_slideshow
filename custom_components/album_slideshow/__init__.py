@@ -516,16 +516,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _register_photo_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Reload when the options flow changes the entry (e.g. a new Immich
+    # selection or the reverse-geocode toggle) so it takes effect at once.
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     store.notify()
 
     return True
 
 
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         domain_data = hass.data.get(DOMAIN, {})
+        coordinator = domain_data.get(entry.entry_id, {}).get("coordinator")
+        if coordinator is not None:
+            await coordinator._cancel_enrichment()
         domain_data.pop(entry.entry_id, None)
         # Drop the shared semaphore once the last album is gone so it's
         # re-created if the integration is re-added later.

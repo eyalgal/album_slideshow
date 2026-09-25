@@ -5,6 +5,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -111,17 +112,31 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _item_focus(item: MediaItem | None) -> tuple[float, float] | None:
-    """Return a validated normalised crop focus stored on a media item."""
-    if item is None:
+def _item_faces(item: MediaItem | None) -> tuple[ip.FaceBox, ...] | None:
+    """Return the validated face boxes stored on a media item.
+
+    None means no face data; an empty tuple means the photo has no faces.
+    """
+    faces = getattr(item, "faces", None) if item is not None else None
+    if not isinstance(faces, (list, tuple)):
         return None
-    x = getattr(item, "focus_x", None)
-    y = getattr(item, "focus_y", None)
-    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-        return None
-    if not 0 <= x <= 1 or not 0 <= y <= 1:
-        return None
-    return (float(x), float(y))
+    valid: list[ip.FaceBox] = []
+    for face in faces:
+        if (
+            not isinstance(face, (list, tuple))
+            or len(face) not in (5, 6)
+            or not all(
+                not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) for value in face[:5]
+            )
+            or (len(face) == 6 and not isinstance(face[5], bool))
+        ):
+            continue
+        left, top, right, bottom, weight = (float(value) for value in face[:5])
+        if 0 <= left < right <= 1 and 0 <= top < bottom <= 1 and weight > 0:
+            selected = face[5] if len(face) == 6 else False
+            valid.append(ip.FaceBox(left, top, right, bottom, weight, selected))
+    return tuple(valid)
 
 
 class _DownloadCache:
@@ -1135,6 +1150,13 @@ class AlbumSlideshowCamera(Camera):
             return
         self._index = (self._index + 1) % count
 
+    def _crop_hints(self, item: MediaItem | None) -> ip.CropHints:
+        return ip.CropHints(
+            faces=_item_faces(item),
+            debug=bool(getattr(getattr(self, "store", None), "face_debug", False)),
+            name=getattr(item, "filename", None),
+        )
+
     async def _compose_for_index(
         self, items: list[MediaItem]
     ) -> tuple[Image.Image | None, dict | None]:
@@ -1196,7 +1218,7 @@ class AlbumSlideshowCamera(Camera):
                         composed = await self._async_image_job(
                             ip.pair_images, img, other_img, width, height, fill_mode,
                             is_portrait_canvas, divider, divider_fill, transparent_divider,
-                            _item_focus(cur), _item_focus(other_item),
+                            self._crop_hints(cur), self._crop_hints(other_item),
                         )
                         pair_frames = [
                             {
@@ -1217,7 +1239,7 @@ class AlbumSlideshowCamera(Camera):
                         pair_meta = [f["captured_at"] for f in pair_frames]
                     else:
                         composed = await self._async_image_job(
-                            ip.render_image, img, fill_mode, width, height, _item_focus(cur),
+                            ip.render_image, img, fill_mode, width, height, self._crop_hints(cur),
                         )
                 finally:
                     ip.safe_close(other_img)
@@ -1240,7 +1262,7 @@ class AlbumSlideshowCamera(Camera):
                 return composed, meta
 
             composed = await self._async_image_job(
-                ip.render_image, img, fill_mode, width, height, _item_focus(cur)
+                ip.render_image, img, fill_mode, width, height, self._crop_hints(cur)
             )
             return composed, {
                 "is_portrait": cur_is_portrait,
@@ -1292,7 +1314,7 @@ class AlbumSlideshowCamera(Camera):
                 if self._index != start:
                     self._do_advance(count, items)
                 composed = await self._async_image_job(
-                    ip.render_image, img, fill_mode, width, height, _item_focus(cur)
+                    ip.render_image, img, fill_mode, width, height, self._crop_hints(cur)
                 )
                 return composed, {
                     "is_portrait": is_portrait_canvas,
@@ -1318,7 +1340,7 @@ class AlbumSlideshowCamera(Camera):
         try:
             cur_is_portrait = ip.is_portrait_item(item, img)
             composed = await self._async_image_job(
-                ip.render_image, img, fill_mode, width, height, _item_focus(item)
+                ip.render_image, img, fill_mode, width, height, self._crop_hints(item)
             )
             return composed, {
                 "is_portrait": cur_is_portrait,

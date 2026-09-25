@@ -52,6 +52,9 @@ class SlideshowStore:
     # Pause toggle - when True, the slideshow holds on the current frame.
     paused: bool = False
 
+    # Draw face boxes, a centre crosshair and a crop summary on each slide.
+    face_debug: bool = False
+
     # In-memory last rendered frame. Not user-configurable; used to re-serve
     # the previous slide instantly across a camera reload.
     last_frame: bytes | None = None
