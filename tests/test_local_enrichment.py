@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from itertools import pairwise
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -623,6 +624,7 @@ def _geocode_coordinator(monkeypatch, places, *, stored=None, options=None, coun
     monkeypatch.setattr(c, "_nominatim_lookup", lookup)
     monkeypatch.setattr(c, "async_get_clientsession", lambda _hass: None)
     monkeypatch.setattr(c, "_NOMINATIM_MIN_INTERVAL_S", 0)
+    monkeypatch.setattr(c, "_nominatim_next_slot", 0.0)
     return coord, lookup
 
 
@@ -704,6 +706,26 @@ def test_label_options_apply_to_cached_places_without_lookups(monkeypatch):
     assert [it.location for it in items] == ["Fredericton", "Lisbon, Portugal"]
     assert not any(coord._needs_geocode_lookup(it) for it in items)
     lookup.assert_not_awaited()
+
+
+def test_albums_share_the_nominatim_rate_limit(monkeypatch):
+    monkeypatch.setattr(c, "_NOMINATIM_MIN_INTERVAL_S", 0.05)
+    monkeypatch.setattr(c, "_nominatim_next_slot", 0.0)
+
+    async def album(times):
+        for _ in range(2):
+            await c._wait_for_nominatim_slot()
+            times.append(asyncio.get_running_loop().time())
+
+    async def two_albums():
+        times = []
+        await asyncio.gather(album(times), album(times))
+        return times
+
+    times = asyncio.run(two_albums())
+
+    assert len(times) == 4
+    assert all(later - earlier >= 0.04 for earlier, later in pairwise(times))
 
 
 # ── _read_manifest_version ────────────────────────────────────────────────

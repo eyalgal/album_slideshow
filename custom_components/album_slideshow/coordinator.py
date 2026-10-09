@@ -488,6 +488,8 @@ _HEIF_EXIF_RE = re.compile(rb"Exif\x00\x00(?:MM\x00\x2a|II\x2a\x00)")
 _NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/reverse"
 _NOMINATIM_MIN_INTERVAL_S = 1.1
 _NOMINATIM_TIMEOUT_S = 20
+# Next free request time, shared so several albums together stay within the limit.
+_nominatim_next_slot = 0.0
 
 # Nominatim address parts used for place labels, most specific first.
 _LOCALITY_KEYS = (
@@ -954,6 +956,15 @@ def _format_place(place: dict[str, str], home_country: str | None = None) -> str
         return ", ".join(parts)
     shown = [part.strip() for part in place.get("display_name", "").split(",") if part.strip()]
     return ", ".join(shown[:2]) or None
+
+
+async def _wait_for_nominatim_slot() -> None:
+    global _nominatim_next_slot
+    now = asyncio.get_running_loop().time()
+    slot = max(now, _nominatim_next_slot)
+    _nominatim_next_slot = slot + _NOMINATIM_MIN_INTERVAL_S
+    if slot > now:
+        await asyncio.sleep(slot - now)
 
 
 async def _nominatim_lookup(
@@ -2932,24 +2943,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
         session = async_get_clientsession(self.hass)
         user_agent = await self._async_user_agent()
         home = self._hidden_home_country
-
-        # Last network call wall-time; used to throttle Nominatim to the
-        # 1 req/sec policy.
-        last_call: float = 0.0
-        loop = asyncio.get_event_loop()
         unsaved = 0
 
         try:
             for key, group in pending.items():
-                # Respect the 1 req/sec Nominatim usage policy.
-                elapsed = loop.time() - last_call
-                if elapsed < _NOMINATIM_MIN_INTERVAL_S:
-                    await asyncio.sleep(_NOMINATIM_MIN_INTERVAL_S - elapsed)
-
+                await _wait_for_nominatim_slot()
                 place = await _nominatim_lookup(
                     session, group[0].latitude, group[0].longitude, user_agent
                 )
-                last_call = loop.time()
 
                 if place:
                     self._geocode_cache[key] = place
