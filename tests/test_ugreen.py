@@ -488,3 +488,7 @@ def test_ugreen_entries_can_turn_off_reverse_geocoding():
     entry = SimpleNamespace(data={"provider": PROVIDER_UGREEN}, options={})
     flow = config_flow.ConfigFlow.async_get_options_flow(entry)
     assert isinstance(flow, config_flow.LocalFolderOptionsFlow)
+    flow.config_entry = entry
+    flow.async_show_form = lambda **kwargs: kwargs
+    form = asyncio.run(flow.async_step_init())
+    assert form["data_schema"]({}) == {"reverse_geocode": True, "hide_home_country": False}

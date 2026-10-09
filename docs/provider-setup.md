@@ -70,6 +70,7 @@ album's **Configure** button. Location has two independent consent controls:
 |---------|---------|--------|
 | **Read original photo GPS (opt-in)** | Off | Fetches up to 256 KB of each original photo to extract embedded GPS into the existing `latitude` / `longitude` camera attributes |
 | **Look up GPS place names via OpenStreetMap (opt-in)** | Off | When GPS reading is also enabled, sends coordinates to the public Nominatim service and fills the existing `location` attribute and caption field |
+| **Hide the country for places in your home country** | Off | Leaves the country out of place names for photos taken in the country set in Home Assistant's general settings |
 
 **Google only includes GPS in shared originals when location sharing is
 turned on for the album.** Turn it on in the album's options in Google Photos;
@@ -153,9 +154,9 @@ endpoint (with `type` forced to images). Examples:
 
 Open **Settings > Devices & services > Album Slideshow** and use the Immich
 entry's **Configure** button to change its albums, people, favorites, search
-filter, name, or image quality. The reverse-geocoding privacy toggle remains
-available. Saving reloads that slideshow without changing its entry ID,
-entities, runtime settings, or hidden-photo list.
+filter, name, or image quality. The reverse-geocoding privacy toggle and the
+home-country option remain available. Saving reloads that slideshow without
+changing its entry ID, entities, runtime settings, or hidden-photo list.
 
 Saved albums and people that cannot currently be listed remain selected and
 are marked **unavailable**. They are not silently removed. Deselecting all
@@ -550,10 +551,20 @@ background after every refresh:
 - **Reverse-geocoded location:** by default the integration calls the
   public [Nominatim](https://nominatim.openstreetmap.org/) (OpenStreetMap)
   service to translate coordinates into a human-readable label such as
-  `"Lisbon, Portugal"`, exposed as the `location` attribute. Coordinates
-  are rounded to **~100 m** before lookup and the answer is cached on disk,
-  so the same neighbourhood is only ever fetched once. Nominatim's
-  free-tier policy (1 req/sec, identifying User-Agent) is respected.
+  `"Lisbon, Portugal"`, exposed as the `location` attribute. The label is
+  the town or city (without prefixes such as "City of"), or the province
+  or state when the photo was not taken in one, followed by the country.
+  Coordinates are rounded to **~100 m** before lookup and the answer is
+  cached on disk, so the same neighbourhood is only ever fetched once.
+  Nominatim's free-tier policy (1 req/sec, identifying User-Agent) is
+  respected.
+
+**Home country:** turn on **Hide the country for places in your home
+country** under the album's *Configure* to show `"Lisbon"` instead of
+`"Lisbon, Portugal"` for photos taken in the country set in Home
+Assistant's general settings. Changing it relabels photos from the cache
+without new lookups. Place names supplied by the photo service itself are
+not changed.
 
 **Privacy / opt-out:** if you'd rather not send any coordinates to
 OpenStreetMap, open *Settings > Devices & Services > Album Slideshow > your
@@ -653,9 +664,9 @@ NAS running UGOS / UGOS Pro, for capture date and (when present) GPS location.
   Photos. There is no description/caption field in this API.
 - **Place names.** The NAS's own place name is used when it has one. Photos
   with GPS but no NAS place name are labeled through OpenStreetMap Nominatim,
-  like the local folder provider; turn off **Reverse-geocode EXIF GPS
-  coordinates via OpenStreetMap** under the album's **Configure** to stop
-  those lookups.
+  like the local folder provider (including the home-country option); turn
+  off **Reverse-geocode EXIF GPS coordinates via OpenStreetMap** under the
+  album's **Configure** to stop those lookups.
 - The password is RSA-encrypted before it ever leaves Home Assistant, the
   same way the UGOS web app encrypts it. A fresh session is established on
   every refresh rather than persisting one.

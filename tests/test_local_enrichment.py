@@ -4,7 +4,7 @@ These cover the pieces that don't need a running HA event loop:
 - ``_gps_to_decimal`` sign + range handling
 - ``_geocode_cache_key`` rounding + ``-0.0`` normalisation
 - ``_read_local_exif`` end-to-end against Pillow-generated JPEGs
-- ``_format_nominatim_location`` field preferences
+- ``_nominatim_place`` / ``_format_place`` place-name rules
 - ``_nominatim_lookup`` against a fake aiohttp session
 - ``MediaItem`` round-trip through ``_save_cached_items`` /
   ``_load_cached_items`` (including the new GPS/location fields and
@@ -19,6 +19,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
@@ -302,37 +303,71 @@ def test_read_local_exif_handles_non_image(tmp_path: Path):
     assert "latitude" not in info
 
 
-# ── _format_nominatim_location ─────────────────────────────────────────────
+# ── place names ───────────────────────────────────────────────────────────
 
-def test_format_location_prefers_city():
+def _place(**address):
+    return c._nominatim_place({"address": address})
+
+
+_NB = {"state": "New Brunswick", "country": "Canada", "country_code": "ca"}
+
+
+@pytest.mark.parametrize(("address", "label"), [
+    ({"city": "Lisbon", "town": "Should not appear", "country": "Portugal"}, "Lisbon, Portugal"),
+    # The city itself, not its "City of" boundary.
+    ({"city": "Fredericton", "county": "City of Fredericton", **_NB}, "Fredericton, Canada"),
+    ({"town": "Town of Oromocto", "city_district": "Oromocto", **_NB}, "Oromocto, Canada"),
+    # A parish reported as the city gives way to the town or community.
+    ({"city": "Burton Parish", "city_district": "Oromocto", **_NB}, "Oromocto, Canada"),
+    ({"city": "Queensbury Parish", "city_district": "Scotch Lake", **_NB}, "Scotch Lake, Canada"),
+    ({"city": "Alma Parish", "city_district": "Fundy National Park", **_NB},
+     "Fundy National Park, Canada"),
+    ({"municipality": "Regional Municipality of Halifax", "country": "Canada"}, "Halifax, Canada"),
+    # Outside any town: the state or province.
+    ({"county": "Park County", "state": "Wyoming", "country": "United States", "country_code": "us"},
+     "Wyoming, United States"),
+    ({"city": "Kingsclear Parish", **_NB}, "New Brunswick, Canada"),
+    ({"city": "Singapore", "country": "Singapore", "country_code": "sg"}, "Singapore"),
+    ({"country": "Canada", "country_code": "ca"}, "Canada"),
+])
+def test_format_place(address, label):
+    assert c._format_place(_place(**address)) == label
+
+
+def test_format_place_hides_only_the_home_country():
+    fredericton = _place(city="Fredericton", **_NB)
+    assert c._format_place(fredericton, "CA") == "Fredericton"
+    assert c._format_place(fredericton, "US") == "Fredericton, Canada"
+    assert c._format_place(_place(state="Wyoming", country="United States", country_code="us"), "US") == "Wyoming"
+
+
+def test_place_name_keeps_names_that_are_only_a_prefix():
+    assert c._place_name("Town of") == "Town of"
+    assert c._place_name("Parish of Saint Mary") is None
+    assert c._place_name("  ") is None
+
+
+def test_place_keeps_only_label_parts():
     payload = {
-        "address": {
-            "city": "Lisbon",
-            "town": "Should not appear",
-            "country": "Portugal",
-        }
+        "address": {"road": "Rua Augusta", "city": " Lisbon ", "postcode": "1100",
+                    "country": "Portugal", "country_code": "pt"},
+        "display_name": "Rua Augusta, Lisbon, Portugal",
     }
-    assert c._format_nominatim_location(payload) == "Lisbon, Portugal"
+    assert c._nominatim_place(payload) == {"city": "Lisbon", "country": "Portugal", "country_code": "pt"}
 
 
-def test_format_location_falls_back_through_town_to_municipality():
-    payload = {
-        "address": {"municipality": "Cascais", "country": "Portugal"}
-    }
-    assert c._format_nominatim_location(payload) == "Cascais, Portugal"
-
-
-def test_format_location_uses_display_name_as_last_resort():
-    payload = {
+def test_place_uses_display_name_as_last_resort():
+    place = c._nominatim_place({
         "address": {},
         "display_name": "Mid Atlantic Ridge, Atlantic Ocean, Nowhere",
-    }
-    assert c._format_nominatim_location(payload) == "Mid Atlantic Ridge, Atlantic Ocean"
+    })
+    assert c._format_place(place) == "Mid Atlantic Ridge, Atlantic Ocean"
 
 
-def test_format_location_returns_none_for_empty_payload():
-    assert c._format_nominatim_location({}) is None
-    assert c._format_nominatim_location(None) is None  # type: ignore[arg-type]
+def test_place_returns_none_for_empty_payload():
+    assert c._nominatim_place({}) is None
+    assert c._nominatim_place(None) is None
+    assert c._nominatim_place({"address": {"road": "Main Street"}}) is None
 
 
 # ── _nominatim_lookup ──────────────────────────────────────────────────────
@@ -360,20 +395,21 @@ class _FakeSession:
         return self._responses.pop(0)
 
 
-def test_nominatim_lookup_success_returns_label():
+def test_nominatim_lookup_success_returns_place():
     session = _FakeSession(
-        _FakeResp(200, {"address": {"city": "Paris", "country": "France"}})
+        _FakeResp(200, {"address": {"city": "Paris", "country": "France", "country_code": "fr"}})
     )
-    label = asyncio.run(
+    place = asyncio.run(
         c._nominatim_lookup(session, 48.8566, 2.3522, "album_slideshow/test")
     )
-    assert label == "Paris, France"
+    assert place == {"city": "Paris", "country": "France", "country_code": "fr"}
     assert len(session.calls) == 1
     url, params, headers = session.calls[0]
     assert url == c._NOMINATIM_ENDPOINT
     assert params["format"] == "jsonv2"
     assert params["lat"] == "48.85660"
     assert params["lon"] == "2.35220"
+    assert params["zoom"] == "14"
     assert headers["User-Agent"] == "album_slideshow/test"
 
 
@@ -428,6 +464,7 @@ def test_merge_prior_enrichment_carries_metadata_by_url():
             latitude=1.0,
             longitude=2.0,
             location="Somewhere",
+            location_geocoded=True,
             description="A caption",
             faces=[[0.1, 0.05, 0.4, 0.15, 0.03]],
             exif_scanned=True,
@@ -439,6 +476,7 @@ def test_merge_prior_enrichment_carries_metadata_by_url():
     assert new[0].captured_at == 111
     assert new[0].latitude == 1.0
     assert new[0].location == "Somewhere"
+    assert new[0].location_geocoded is True
     assert new[0].description == "A caption"
     assert new[0].faces == [[0.1, 0.05, 0.4, 0.15, 0.03]]
     assert new[0].exif_scanned is True
@@ -450,12 +488,13 @@ def test_merge_prior_enrichment_carries_metadata_by_url():
 
 
 def test_merge_prior_enrichment_does_not_overwrite_fresh_values():
-    prior = [_item("file:///a.jpg", captured_at=111, location="Old")]
+    prior = [_item("file:///a.jpg", captured_at=111, location="Old", location_geocoded=True)]
     new = [_item("file:///a.jpg", captured_at=222, location="New")]
     c._merge_prior_enrichment(new, prior)
     # Fresh value wins; merge is purely a backfill.
     assert new[0].captured_at == 222
     assert new[0].location == "New"
+    assert new[0].location_geocoded is False
 
 
 # ── items-cache round trip ────────────────────────────────────────────────
@@ -491,6 +530,7 @@ def test_save_and_load_round_trips_gps_and_scanned_flag():
             latitude=37.4220,
             longitude=-122.0850,
             location="Mountain View, USA",
+            location_geocoded=True,
             description="Sunset over the harbour",
             faces=[[0.1, 0.05, 0.4, 0.15, 0.03]],
             exif_scanned=True,
@@ -510,6 +550,8 @@ def test_save_and_load_round_trips_gps_and_scanned_flag():
     assert out[0].latitude == pytest.approx(37.4220)
     assert out[0].longitude == pytest.approx(-122.0850)
     assert out[0].location == "Mountain View, USA"
+    assert out[0].location_geocoded is True
+    assert out[1].location_geocoded is False
     assert out[0].description == "Sunset over the harbour"
     assert out[0].faces == [[0.1, 0.05, 0.4, 0.15, 0.03]]
     assert out[1].faces is None
@@ -555,6 +597,113 @@ def test_geocode_phase_respects_opt_out():
         coord._geocode_items_background(data)
     )
     assert items[0].location is None
+
+
+# ── geocode worker and place cache ────────────────────────────────────────
+
+_FREDERICTON = {"city": "Fredericton", **_NB}
+_LISBON = {"city": "Lisbon", "country": "Portugal", "country_code": "pt"}
+
+
+def _geocode_coordinator(monkeypatch, places, *, stored=None, options=None, country=None):
+    coord = c.AlbumCoordinator.__new__(c.AlbumCoordinator)
+    coord.provider = "local_folder"
+    coord.entry = SimpleNamespace(options=dict(options or {}))
+    coord.hass = SimpleNamespace(config=SimpleNamespace(country=country))
+    coord._enrich_progress = {}
+    coord._items_cache_store = _RecordingStore()
+    coord._geocode_cache_store = _RecordingStore()
+    coord._geocode_cache_store.saved = stored
+    coord._geocode_cache = {}
+    coord._geocode_legacy = {}
+    coord._geocode_cache_loaded = False
+    coord._async_user_agent = AsyncMock(return_value="ua")
+    coord.async_set_updated_data = lambda _data: None
+    lookup = AsyncMock(side_effect=lambda _session, lat, lon, _ua: places.get((lat, lon)))
+    monkeypatch.setattr(c, "_nominatim_lookup", lookup)
+    monkeypatch.setattr(c, "async_get_clientsession", lambda _hass: None)
+    monkeypatch.setattr(c, "_NOMINATIM_MIN_INTERVAL_S", 0)
+    return coord, lookup
+
+
+def test_geocode_looks_up_each_place_once(monkeypatch):
+    coord, lookup = _geocode_coordinator(monkeypatch, {(45.9636, -66.6431): _FREDERICTON})
+    items = [
+        _item("file:///a.jpg", latitude=45.9636, longitude=-66.6431),
+        _item("file:///b.jpg", latitude=45.96362, longitude=-66.64311),
+        _item("file:///c.jpg", latitude=10.0, longitude=10.0),
+    ]
+
+    asyncio.run(coord._geocode_items_background({"items": items}))
+
+    assert lookup.await_count == 2
+    assert [it.location for it in items] == ["Fredericton, Canada", "Fredericton, Canada", None]
+    assert [it.location_geocoded for it in items] == [True, True, False]
+    assert coord._geocode_cache_store.saved == {"entries": {"45.964,-66.643": _FREDERICTON}}
+    # A failed lookup is retried on the next refresh.
+    assert coord._needs_geocode_lookup(items[2])
+
+
+def test_geocode_keeps_place_names_from_the_photo_service(monkeypatch):
+    coord, lookup = _geocode_coordinator(monkeypatch, {(45.9636, -66.6431): _FREDERICTON})
+    item = _item("file:///a.jpg", latitude=45.9636, longitude=-66.6431, location="Fredericton, NB")
+
+    asyncio.run(coord._geocode_items_background({"items": [item]}))
+
+    lookup.assert_not_awaited()
+    assert (item.location, item.location_geocoded) == ("Fredericton, NB", False)
+
+
+@pytest.mark.parametrize("restored_label", [None, "City of Fredericton, Canada"])
+def test_geocode_upgrades_labels_from_the_old_cache(monkeypatch, restored_label):
+    coord, lookup = _geocode_coordinator(
+        monkeypatch,
+        {(45.9636, -66.6431): _FREDERICTON},
+        stored={"entries": {
+            "45.964,-66.643": "City of Fredericton, Canada",
+            "38.722,-9.139": "Lisbon, Portugal",
+        }},
+    )
+    item = _item("file:///a.jpg", latitude=45.9636, longitude=-66.6431, location=restored_label)
+    seen = []
+
+    def lookup_place(*_args):
+        seen.append((item.location, item.location_geocoded))
+        return _FREDERICTON
+
+    lookup.side_effect = lookup_place
+
+    asyncio.run(coord._geocode_items_background({"items": [item]}))
+
+    # The old label shows until the new lookup replaces it.
+    assert seen == [("City of Fredericton, Canada", True)]
+    assert (item.location, item.location_geocoded) == ("Fredericton, Canada", True)
+    # Old labels for places not looked up again yet are kept.
+    assert coord._geocode_cache_store.saved == {"entries": {
+        "38.722,-9.139": "Lisbon, Portugal",
+        "45.964,-66.643": _FREDERICTON,
+    }}
+
+
+def test_label_options_apply_to_cached_places_without_lookups(monkeypatch):
+    coord, lookup = _geocode_coordinator(
+        monkeypatch,
+        {},
+        stored={"entries": {"45.964,-66.643": _FREDERICTON, "38.722,-9.139": _LISBON}},
+        options={"hide_home_country": True},
+        country="CA",
+    )
+    items = [
+        _item("file:///a.jpg", latitude=45.9636, longitude=-66.6431,
+              location="Fredericton, Canada", location_geocoded=True),
+        _item("file:///b.jpg", latitude=38.7223, longitude=-9.1393),
+    ]
+
+    asyncio.run(coord._relabel_from_place_cache(items))
+
+    assert [it.location for it in items] == ["Fredericton", "Lisbon, Portugal"]
+    assert not any(coord._needs_geocode_lookup(it) for it in items)
+    lookup.assert_not_awaited()
 
 
 # ── _read_manifest_version ────────────────────────────────────────────────

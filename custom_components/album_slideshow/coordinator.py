@@ -34,6 +34,8 @@ from .const import (
     CONF_MEDIA_CONTENT_ID,
     CONF_RECURSIVE,
     CONF_REVERSE_GEOCODE,
+    CONF_HIDE_HOME_COUNTRY,
+    DEFAULT_HIDE_HOME_COUNTRY,
     CONF_IMMICH_URL,
     CONF_IMMICH_API_KEY,
     CONF_IMMICH_SELECTION_TYPE,
@@ -157,6 +159,9 @@ class MediaItem:
     face_scanned: bool = False
     camera_metadata: dict[str, Any] | None = None
     google_location_scanned: bool = False
+    # True when ``location`` came from our OpenStreetMap lookup rather than
+    # the provider, so it can be re-formatted from the place cache.
+    location_geocoded: bool = False
 
     def __post_init__(self) -> None:
         if self.photo_id is None:
@@ -483,6 +488,20 @@ _HEIF_EXIF_RE = re.compile(rb"Exif\x00\x00(?:MM\x00\x2a|II\x2a\x00)")
 _NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/reverse"
 _NOMINATIM_MIN_INTERVAL_S = 1.1
 _NOMINATIM_TIMEOUT_S = 20
+
+# Nominatim address parts used for place labels, most specific first.
+_LOCALITY_KEYS = (
+    "city", "town", "village", "hamlet", "city_district", "suburb", "municipality",
+)
+_REGION_KEYS = ("state", "province", "region")
+_ADDRESS_KEYS = (*_LOCALITY_KEYS, *_REGION_KEYS, "country", "country_code")
+_PLACE_KEYS = (*_ADDRESS_KEYS, "display_name")
+# Administrative prefixes some areas carry in OpenStreetMap, longest first.
+_NAME_PREFIXES = (
+    "regional municipality of ", "rural municipality of ", "municipal district of ",
+    "municipality of ", "township of ", "district of ", "borough of ",
+    "village of ", "town of ", "city of ",
+)
 
 # How many EXIF reads to perform between cache flushes. Bigger batches
 # mean fewer Store writes but more rework if HA is killed mid-scan.
@@ -882,41 +901,59 @@ def _jpeg_exif_segment(data: bytes) -> bytes | None:
     raise ValueError("JPEG header ends before image data")
 
 
-def _format_nominatim_location(payload: dict[str, Any]) -> str | None:
-    """Turn a Nominatim reverse-geocode response into a short label.
+def _place_name(value: Any) -> str | None:
+    """A town or city name without prefixes like "City of"; parishes don't count."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    name = value.strip()
+    folded = name.casefold()
+    if folded.endswith(" parish") or folded.startswith("parish of "):
+        return None
+    for prefix in _NAME_PREFIXES:
+        if folded.startswith(prefix) and len(name) > len(prefix):
+            return name[len(prefix):].strip()
+    return name
 
-    Prefers ``city`` > ``town`` > ``village`` > ``municipality`` >
-    ``county`` for the locality portion, plus ``country`` when present.
-    Falls back to Nominatim's pre-formatted ``display_name`` (truncated
-    to the first two comma-separated parts) when no recognisable
-    locality fields are present.
+
+def _nominatim_place(payload: Any) -> dict[str, str] | None:
+    """Keep the parts of a Nominatim reverse-geocode response that labels use.
+
+    Caching these instead of a finished label lets label options change
+    without new lookups.
     """
     if not isinstance(payload, dict):
         return None
     address = payload.get("address") if isinstance(payload.get("address"), dict) else {}
-    locality = None
-    for key in ("city", "town", "village", "hamlet", "municipality", "county", "state"):
-        val = address.get(key)
-        if isinstance(val, str) and val.strip():
-            locality = val.strip()
-            break
-    country = address.get("country") if isinstance(address.get("country"), str) else None
-
-    if locality and country:
-        return f"{locality}, {country}"
-    if locality:
-        return locality
-    if isinstance(country, str) and country.strip():
-        return country.strip()
-
+    place = {
+        key: value.strip()
+        for key in _ADDRESS_KEYS
+        if isinstance(value := address.get(key), str) and value.strip()
+    }
     display = payload.get("display_name")
-    if isinstance(display, str) and display.strip():
-        parts = [p.strip() for p in display.split(",") if p.strip()]
-        if len(parts) >= 2:
-            return ", ".join(parts[:2])
-        if parts:
-            return parts[0]
-    return None
+    if not place and isinstance(display, str) and display.strip():
+        place["display_name"] = display.strip()
+    return place or None
+
+
+def _format_place(place: dict[str, str], home_country: str | None = None) -> str | None:
+    """Short label such as ``"Lisbon, Portugal"`` from cached address parts.
+
+    Uses the town or city, else the province/state, then the country, which
+    is left out when its code matches ``home_country``.
+    """
+    area = next(
+        (name for key in _LOCALITY_KEYS if (name := _place_name(place.get(key)))), None
+    ) or next((place[key] for key in _REGION_KEYS if place.get(key)), None)
+    country = place.get("country")
+    if home_country and place.get("country_code", "").upper() == home_country.upper():
+        country = None
+    parts = [part for part in (area, country) if part]
+    if len(parts) == 2 and parts[0].casefold() == parts[1].casefold():
+        parts.pop()
+    if parts:
+        return ", ".join(parts)
+    shown = [part.strip() for part in place.get("display_name", "").split(",") if part.strip()]
+    return ", ".join(shown[:2]) or None
 
 
 async def _nominatim_lookup(
@@ -924,18 +961,21 @@ async def _nominatim_lookup(
     lat: float,
     lon: float,
     user_agent: str,
-) -> str | None:
+) -> dict[str, str] | None:
     """Reverse-geocode a coordinate pair via Nominatim.
 
-    Returns a human-readable label or ``None`` if the lookup failed or
-    the response had no useful address. Never raises - geocoding is
-    best-effort and a failure must never stop the slideshow.
+    Returns the cached address parts (see :func:`_nominatim_place`) or
+    ``None`` if the lookup failed or the response had no useful address.
+    Never raises - geocoding is best-effort and a failure must never stop
+    the slideshow.
     """
     params = {
         "format": "jsonv2",
         "lat": f"{lat:.5f}",
         "lon": f"{lon:.5f}",
-        "zoom": "10",      # Roughly city-level - we don't need street precision.
+        # Neighbourhood level: coarser levels can return an administrative
+        # area such as a parish instead of the town.
+        "zoom": "14",
         "addressdetails": "1",
     }
     headers = {
@@ -969,7 +1009,7 @@ async def _nominatim_lookup(
         _LOGGER.debug("Nominatim lookup failed (%s, %s): %s", lat, lon, err)
         return None
 
-    return _format_nominatim_location(payload)
+    return _nominatim_place(payload)
 
 
 def _read_manifest_version(integration_dir: Path) -> str:
@@ -1061,6 +1101,7 @@ def _merge_prior_enrichment(
             item.longitude = prev.longitude
         if prev.location and not item.location:
             item.location = prev.location
+            item.location_geocoded = prev.location_geocoded
         if prev.description and not item.description:
             item.description = prev.description
         if prev.faces is not None and item.faces is None:
@@ -1126,15 +1167,19 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self._items_cache_loaded: bool = False
 
         # Reverse-geocode cache. Coordinates rounded to ~100 m via
-        # ``_geocode_cache_key``; mapping value -> label string. Shared
-        # across all items in the album, persisted independently of the
-        # items cache so changes to one don't invalidate the other.
+        # ``_geocode_cache_key``; mapping value -> Nominatim address parts
+        # (see ``_nominatim_place``). Shared across all items in the album,
+        # persisted independently of the items cache so changes to one don't
+        # invalidate the other.
         self._geocode_cache_store: Store = Store(
             hass,
             self._GEOCODE_CACHE_VERSION,
             f"{DOMAIN}.{entry.entry_id}.geocode",
         )
-        self._geocode_cache: dict[str, str] = {}
+        self._geocode_cache: dict[str, dict[str, str]] = {}
+        # Finished labels from the older label-only cache, kept until each
+        # coordinate has been looked up again.
+        self._geocode_legacy: dict[str, str] = {}
         self._geocode_cache_loaded: bool = False
         # Per-coordinator User-Agent so OSM operators can track us if we
         # ever misbehave. Resolved lazily because __init__ is sync.
@@ -1224,8 +1269,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     item.latitude = previous.latitude
                     item.longitude = previous.longitude
                     item.location = previous.location
+                    item.location_geocoded = previous.location_geocoded
                     item.google_location_scanned = True
             self._apply_google_location_privacy(items)
+            await self._relabel_from_place_cache(items)
             self._schedule_enrichment(data)
         elif self.provider in ENRICHING_PROVIDERS and items:
             # Carry forward EXIF/geocode metadata for items we've already
@@ -1234,6 +1281,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             prior_items = (self.data or {}).get("items") if isinstance(self.data, dict) else None
             if prior_items:
                 _merge_prior_enrichment(items, prior_items)
+            await self._relabel_from_place_cache(items)
             self._schedule_enrichment(data)
 
         if items:
@@ -1294,9 +1342,71 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 item.latitude = None
                 item.longitude = None
                 item.location = None
+                item.location_geocoded = False
                 item.google_location_scanned = False
             elif not self.google_reverse_geocode_enabled:
                 item.location = None
+                item.location_geocoded = False
+
+    @property
+    def reverse_geocode_enabled(self) -> bool:
+        if getattr(self, "provider", None) == PROVIDER_GOOGLE_SHARED:
+            return self.google_reverse_geocode_enabled
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return bool(options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE))
+
+    @property
+    def _hidden_home_country(self) -> str | None:
+        """Country code to leave out of place labels, if the user asked for that."""
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        if not options.get(CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY):
+            return None
+        return getattr(getattr(self.hass, "config", None), "country", None) or None
+
+    def _needs_geocode_lookup(self, item: MediaItem) -> bool:
+        """True for items with GPS whose place isn't cached yet."""
+        if item.latitude is None or item.longitude is None:
+            return False
+        if item.location and not item.location_geocoded:
+            return False  # The provider's own label.
+        return _geocode_cache_key(item.latitude, item.longitude) not in self._geocode_cache
+
+    def _label_items_from_geocode_cache(self, items: list[MediaItem]) -> int:
+        """Set OpenStreetMap labels from cached places; return how many changed.
+
+        Labels from the older label-only cache are adopted as ours, so they
+        stay visible until a new lookup replaces them.
+        """
+        home = self._hidden_home_country
+        changed = 0
+        for item in items:
+            if item.latitude is None or item.longitude is None:
+                continue
+            key = _geocode_cache_key(item.latitude, item.longitude)
+            legacy = self._geocode_legacy.get(key)
+            if item.location and not item.location_geocoded:
+                if item.location != legacy:
+                    continue
+                item.location_geocoded = True
+            place = self._geocode_cache.get(key)
+            if place is None:
+                if legacy and not item.location:
+                    item.location, item.location_geocoded = legacy, True
+                    changed += 1
+                continue
+            label = _format_place(place, home)
+            if label != item.location or not item.location_geocoded:
+                item.location, item.location_geocoded = label, True
+                changed += 1
+        return changed
+
+    async def _relabel_from_place_cache(self, items: list[MediaItem]) -> None:
+        """Apply current label options to known places without new lookups."""
+        if self.reverse_geocode_enabled and any(
+            it.latitude is not None and it.longitude is not None for it in items
+        ):
+            await self._ensure_geocode_cache_loaded()
+            self._label_items_from_geocode_cache(items)
 
     def _needs_enrichment(self, item: MediaItem) -> bool:
         if self.provider == PROVIDER_GOOGLE_SHARED:
@@ -1313,11 +1423,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
         unscanned = [it for it in items if self._needs_enrichment(it)]
         # Providers that decrypt/return GPS inline (Ente) have nothing to scan
         # but still need the coordinates turned into a place label.
-        needs_geocode = (
-            self.provider != PROVIDER_GOOGLE_SHARED or self.google_reverse_geocode_enabled
-        ) and any(
-            it.latitude is not None and it.longitude is not None and not it.location
-            for it in items
+        needs_geocode = self.reverse_geocode_enabled and any(
+            self._needs_geocode_lookup(it) for it in items
         )
         if not unscanned and not needs_geocode:
             # Even with nothing to do, mark the phase as ``done`` so the
@@ -1390,6 +1497,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                         if key in CAMERA_METADATA_FIELDS
                     } if isinstance(raw.get("camera_metadata"), dict) else None,
                     google_location_scanned=bool(raw.get("google_location_scanned", False)),
+                    location_geocoded=bool(raw.get("location_geocoded", False)),
                 ))
             except Exception:
                 continue
@@ -1429,6 +1537,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "face_scanned": it.face_scanned,
                     "camera_metadata": it.camera_metadata,
                     "google_location_scanned": it.google_location_scanned,
+                    "location_geocoded": it.location_geocoded,
                 }
                 for it in items
             ],
@@ -2496,6 +2605,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     item.longitude = info["longitude"]
                 if "location" in info:
                     item.location = info["location"]
+                    item.location_geocoded = False
                 if "description" in info:
                     item.description = info["description"]
                 item.exif_scanned = True
@@ -2577,6 +2687,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                             else:
                                 item.latitude = item.longitude = None
                             item.location = None
+                            item.location_geocoded = False
                             item.google_location_scanned = True
                         else:
                             if keys is None:
@@ -2650,6 +2761,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             item.longitude = meta["longitude"]
         if "location" in meta:
             item.location = meta["location"]
+            item.location_geocoded = False
         item.exif_scanned = True
 
     async def _enrich_items_background(self, data: dict[str, Any]) -> None:
@@ -2786,74 +2898,67 @@ class AlbumCoordinator(DataUpdateCoordinator):
             self._enrich_progress["phase"] = "done"
 
     async def _geocode_items_background(self, data: dict[str, Any]) -> None:
-        """Reverse-geocode items with EXIF GPS but no location label yet.
+        """Label items with GPS from the place cache, looking up new places.
 
         Honours the ``reverse_geocode`` option (default on) so privacy-
         conscious users can disable the Nominatim calls without losing
-        the GPS coordinates themselves. Successful labels are written
-        back into the items in-place and persisted via the items cache.
+        the GPS coordinates themselves. Labels are written back into the
+        items in-place and persisted via the items cache.
         """
-        if getattr(self, "provider", None) == PROVIDER_GOOGLE_SHARED and not self.google_reverse_geocode_enabled:
-            return
-        if not bool(
-            self.entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE)
-            if hasattr(self.entry, "options") and self.entry.options is not None
-            else DEFAULT_REVERSE_GEOCODE
-        ):
+        if not self.reverse_geocode_enabled:
             _LOGGER.debug("Reverse geocode disabled via options; skipping")
             return
 
         items: list[MediaItem] = data.get("items") or []
-        candidates: list[MediaItem] = [
-            it
-            for it in items
-            if it.latitude is not None
-            and it.longitude is not None
-            and not it.location
-        ]
-        if not candidates:
+        if not any(it.latitude is not None and it.longitude is not None for it in items):
             return
 
         await self._ensure_geocode_cache_loaded()
+        if self._label_items_from_geocode_cache(items):
+            self.async_set_updated_data(data)
+
+        pending: dict[str, list[MediaItem]] = {}
+        for item in items:
+            if self._needs_geocode_lookup(item):
+                key = _geocode_cache_key(item.latitude, item.longitude)
+                pending.setdefault(key, []).append(item)
+        if not pending:
+            return
 
         self._enrich_progress["phase"] = "geocoding"
-        self._enrich_progress["geocode_total"] = len(candidates)
+        self._enrich_progress["geocode_total"] = sum(len(group) for group in pending.values())
         self._enrich_progress["geocode_done"] = 0
 
         session = async_get_clientsession(self.hass)
         user_agent = await self._async_user_agent()
+        home = self._hidden_home_country
 
         # Last network call wall-time; used to throttle Nominatim to the
-        # 1 req/sec policy without sleeping for cached lookups.
+        # 1 req/sec policy.
         last_call: float = 0.0
         loop = asyncio.get_event_loop()
         unsaved = 0
 
         try:
-            for item in candidates:
-                key = _geocode_cache_key(item.latitude, item.longitude)
-                cached_label = self._geocode_cache.get(key)
-                if cached_label:
-                    item.location = cached_label
-                    self._enrich_progress["geocode_done"] += 1
-                    continue
-
+            for key, group in pending.items():
                 # Respect the 1 req/sec Nominatim usage policy.
                 elapsed = loop.time() - last_call
                 if elapsed < _NOMINATIM_MIN_INTERVAL_S:
                     await asyncio.sleep(_NOMINATIM_MIN_INTERVAL_S - elapsed)
 
-                label = await _nominatim_lookup(
-                    session, item.latitude, item.longitude, user_agent
+                place = await _nominatim_lookup(
+                    session, group[0].latitude, group[0].longitude, user_agent
                 )
                 last_call = loop.time()
 
-                if label:
-                    self._geocode_cache[key] = label
-                    item.location = label
+                if place:
+                    self._geocode_cache[key] = place
+                    label = _format_place(place, home)
+                    for item in group:
+                        item.location, item.location_geocoded = label, True
                     unsaved += 1
 
-                self._enrich_progress["geocode_done"] += 1
+                self._enrich_progress["geocode_done"] += len(group)
 
                 if unsaved >= _GEOCODE_BATCH_SAVE:
                     unsaved = 0
@@ -2883,18 +2988,28 @@ class AlbumCoordinator(DataUpdateCoordinator):
         if isinstance(payload, dict):
             entries = payload.get("entries")
             if isinstance(entries, dict):
-                self._geocode_cache = {
-                    str(k): str(v)
-                    for k, v in entries.items()
-                    if isinstance(v, str) and v
-                }
+                for key, value in entries.items():
+                    if isinstance(value, dict):
+                        place = {
+                            k: v for k, v in value.items()
+                            if k in _PLACE_KEYS and isinstance(v, str) and v
+                        }
+                        if place:
+                            self._geocode_cache[str(key)] = place
+                    elif isinstance(value, str) and value:
+                        self._geocode_legacy[str(key)] = value
         self._geocode_cache_loaded = True
 
     async def _save_geocode_cache(self) -> None:
+        # Old labels stay until their coordinate is looked up again, so an
+        # unfinished upgrade still has them after a restart.
+        entries: dict[str, Any] = {
+            key: label for key, label in self._geocode_legacy.items()
+            if key not in self._geocode_cache
+        }
+        entries.update(self._geocode_cache)
         try:
-            await self._geocode_cache_store.async_save(
-                {"entries": self._geocode_cache}
-            )
+            await self._geocode_cache_store.async_save({"entries": entries})
         except Exception as err:  # pragma: no cover - storage layer
             _LOGGER.debug("Geocode cache: failed to save (%s)", err)
 

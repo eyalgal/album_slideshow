@@ -11,6 +11,7 @@ from custom_components.album_slideshow import config_flow as cf
 from custom_components.album_slideshow import immich
 from custom_components.album_slideshow.const import (
     CONF_ALBUM_NAME,
+    CONF_HIDE_HOME_COUNTRY,
     CONF_IMMICH_API_KEY,
     CONF_IMMICH_FILTER,
     CONF_IMMICH_IMAGE_SIZE,
@@ -146,11 +147,15 @@ def test_reverse_geocoding_option_remains_editable(monkeypatch):
     form = asyncio.run(flow.async_step_init())
     values = _defaults(form)
     assert values[CONF_REVERSE_GEOCODE] is False
+    assert values[CONF_HIDE_HOME_COUNTRY] is False
     values[CONF_REVERSE_GEOCODE] = True
+    values[CONF_HIDE_HOME_COUNTRY] = True
 
     result = asyncio.run(flow.async_step_immich_select(values))
 
-    assert result["data"] == {CONF_REVERSE_GEOCODE: True, "other": "kept"}
+    assert result["data"] == {
+        CONF_REVERSE_GEOCODE: True, CONF_HIDE_HOME_COUNTRY: True, "other": "kept",
+    }
     assert flow.hass.config_entries.updates[0]["options"] == result["data"]
 
 

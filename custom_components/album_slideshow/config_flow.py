@@ -29,6 +29,8 @@ from .const import (
     CONF_MEDIA_CONTENT_ID,
     CONF_RECURSIVE,
     CONF_REVERSE_GEOCODE,
+    CONF_HIDE_HOME_COUNTRY,
+    DEFAULT_HIDE_HOME_COUNTRY,
     CONF_IMMICH_URL,
     CONF_IMMICH_API_KEY,
     CONF_IMMICH_SELECTION_TYPE,
@@ -1509,6 +1511,7 @@ class GoogleOptionsFlow(config_entries.OptionsFlow):
             CONF_GOOGLE_METADATA: DEFAULT_GOOGLE_METADATA,
             CONF_GOOGLE_LOCATION: DEFAULT_GOOGLE_LOCATION,
             CONF_REVERSE_GEOCODE: DEFAULT_GOOGLE_REVERSE_GEOCODE,
+            CONF_HIDE_HOME_COUNTRY: DEFAULT_HIDE_HOME_COUNTRY,
         }
         if user_input is not None:
             options = {
@@ -1531,9 +1534,9 @@ class GoogleOptionsFlow(config_entries.OptionsFlow):
 class LocalFolderOptionsFlow(config_entries.OptionsFlow):
     """Options for local-folder entries.
 
-    Currently exposes a single toggle: ``reverse_geocode``. Users with
+    Exposes the ``reverse_geocode`` toggle and ``hide_home_country``. Users with
     privacy concerns about handing EXIF GPS coordinates to an external
-    OSM endpoint can turn this off; the GPS coordinates remain available
+    OSM endpoint can turn geocoding off; the GPS coordinates remain available
     as ``latitude``/``longitude`` attributes regardless.
 
     ``self.config_entry`` is provided by ``OptionsFlow`` as a managed
@@ -1550,10 +1553,16 @@ class LocalFolderOptionsFlow(config_entries.OptionsFlow):
         current = self.config_entry.options.get(
             CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE
         )
+        hide_home = self.config_entry.options.get(
+            CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY
+        )
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_REVERSE_GEOCODE, default=bool(current)
+                ): bool,
+                vol.Required(
+                    CONF_HIDE_HOME_COUNTRY, default=bool(hide_home)
                 ): bool,
             }
         )
@@ -1684,6 +1693,10 @@ class ImmichOptionsFlow(config_entries.OptionsFlow):
                             CONF_REVERSE_GEOCODE,
                             entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE),
                         ),
+                        CONF_HIDE_HOME_COUNTRY: user_input.get(
+                            CONF_HIDE_HOME_COUNTRY,
+                            entry.options.get(CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY),
+                        ),
                     }
                     self.hass.config_entries.async_update_entry(
                         entry, data=new_data, title=fields[CONF_ALBUM_NAME], options=options
@@ -1704,6 +1717,9 @@ class ImmichOptionsFlow(config_entries.OptionsFlow):
         schema = _immich_select_schema(self._albums, self._people, defaults).extend({
             vol.Required(CONF_REVERSE_GEOCODE, default=bool(entry.options.get(
                 CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE,
+            ))): bool,
+            vol.Required(CONF_HIDE_HOME_COUNTRY, default=bool(entry.options.get(
+                CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY,
             ))): bool,
         })
         return self.async_show_form(

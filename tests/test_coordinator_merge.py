@@ -190,12 +190,13 @@ def test_google_options_default_on_and_preserve_other_options(options, enabled):
     form = asyncio.run(flow.async_step_init())
     assert form["data_schema"]({}) == {
         "google_metadata": enabled, "google_location": False, "reverse_geocode": False,
+        "hide_home_country": False,
     }
     submit = getattr(flow, f"async_step_{form['step_id']}")
     saved = asyncio.run(submit({"google_metadata": not enabled}))
     assert saved["data"] == {
         "google_metadata": not enabled, "other": "preserved",
-        "google_location": False, "reverse_geocode": False,
+        "google_location": False, "reverse_geocode": False, "hide_home_country": False,
     }
 
 
@@ -204,7 +205,7 @@ def test_google_options_preserve_independent_location_choices():
 
     entry = SimpleNamespace(data={"provider": "google_shared"}, options={
         "google_metadata": False, "google_location": True, "reverse_geocode": True,
-        "other": "preserved",
+        "hide_home_country": True, "other": "preserved",
     })
     flow = config_flow.ConfigFlow.async_get_options_flow(entry)
     flow.config_entry = entry
@@ -213,6 +214,7 @@ def test_google_options_preserve_independent_location_choices():
     form = asyncio.run(flow.async_step_init())
     assert form["data_schema"]({}) == {
         "google_metadata": False, "google_location": True, "reverse_geocode": True,
+        "hide_home_country": True,
     }
     submit = getattr(flow, f"async_step_{form['step_id']}")
     saved = asyncio.run(submit({"google_metadata": True}))
@@ -220,7 +222,7 @@ def test_google_options_preserve_independent_location_choices():
     saved = asyncio.run(submit({"google_location": False, "reverse_geocode": False}))
     assert saved["data"] == {
         "google_metadata": False, "google_location": False, "reverse_geocode": False,
-        "other": "preserved",
+        "hide_home_country": True, "other": "preserved",
     }
 
 
@@ -233,7 +235,9 @@ def test_google_options_disclose_location_privacy_in_matching_translations():
     translations = json.loads((root / "translations/en.json").read_text())
     options = strings["options"]["step"]["google_metadata"]
     assert options == translations["options"]["step"]["google_metadata"]
-    assert set(options["data"]) == {"google_metadata", "google_location", "reverse_geocode"}
+    assert set(options["data"]) == {
+        "google_metadata", "google_location", "reverse_geocode", "hide_home_country",
+    }
     for disclosure in ["off by default", "256 KB", "precise GPS", "location sharing", "Nominatim", "history or backups"]:
         assert disclosure in options["description"]
 
@@ -547,6 +551,29 @@ def test_google_geocode_worker_itself_enforces_opt_in(monkeypatch):
     asyncio.run(coord._geocode_items_background({"items": [item]}))
 
     coord._ensure_geocode_cache_loaded.assert_not_awaited()
+
+
+def test_google_place_names_follow_label_options_without_lookups(monkeypatch):
+    coord = _google_coordinator(monkeypatch, enabled=False)
+    coord.entry.options.update(google_location=True, reverse_geocode=True, hide_home_country=True)
+    coord.hass.config = SimpleNamespace(country="CA")
+    coord._geocode_cache_store = SimpleNamespace(async_load=AsyncMock(return_value={"entries": {
+        "45.964,-66.643": {"city": "Fredericton", "country": "Canada", "country_code": "ca"},
+    }}))
+    coord._geocode_cache = {}
+    coord._geocode_legacy = {}
+    coord._geocode_cache_loaded = False
+    coord._items_cache_store.async_load.return_value = {"items": [{
+        "url": "old-url", "source_id": "photo-key", "google_location_scanned": True,
+        "latitude": 45.9636, "longitude": -66.6431, "location": "Fredericton, Canada",
+        "location_geocoded": True,
+    }]}
+    coord._update_google_shared = AsyncMock(return_value={"items": [_google_photo()]})
+
+    item = asyncio.run(coord._async_update_data())["items"][0]
+
+    assert item.location == "Fredericton"
+    assert coord._enrichment_task is None
 
 
 @pytest.mark.parametrize("year", [1800, 1900, 1950, 1965, 1971, 1980, 1995, 1999, 2000, 2026])

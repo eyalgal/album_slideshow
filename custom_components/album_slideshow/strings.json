@@ -203,14 +203,16 @@
         "data": {
           "google_metadata": "Fetch photo metadata (experimental)",
           "google_location": "Read original photo GPS (opt-in)",
-          "reverse_geocode": "Look up GPS place names via OpenStreetMap (opt-in)"
+          "reverse_geocode": "Look up GPS place names via OpenStreetMap (opt-in)",
+          "hide_home_country": "Hide the country for places in your home country"
         }
       },
       "init": {
         "title": "Location & privacy options",
         "description": "Reverse geocoding sends your photos' EXIF GPS coordinates to the public OpenStreetMap Nominatim service to look up a human-readable place name. Coordinates are rounded to ~100 m before lookup and cached on disk. Turn this off to keep coordinates entirely local; the latitude and longitude attributes still work either way.",
         "data": {
-          "reverse_geocode": "Reverse-geocode EXIF GPS coordinates via OpenStreetMap"
+          "reverse_geocode": "Reverse-geocode EXIF GPS coordinates via OpenStreetMap",
+          "hide_home_country": "Hide the country for places in your home country"
         }
       },
       "immich_select": {
@@ -223,7 +225,8 @@
           "favorites": "Include favorites",
           "immich_filter": "Extra search filter (JSON, optional)",
           "immich_image_size": "Image quality",
-          "reverse_geocode": "Look up EXIF GPS locations via OpenStreetMap"
+          "reverse_geocode": "Look up EXIF GPS locations via OpenStreetMap",
+          "hide_home_country": "Hide the country for places in your home country"
         }
       },
       "connection": {

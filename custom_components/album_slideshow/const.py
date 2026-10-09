@@ -65,6 +65,10 @@ DEFAULT_IMMICH_IMAGE_SIZE = IMMICH_IMAGE_PREVIEW
 # integration's options dialog.
 CONF_REVERSE_GEOCODE = "reverse_geocode"
 DEFAULT_REVERSE_GEOCODE = True
+# Leave the country out of OpenStreetMap place names when it matches Home
+# Assistant's configured country.
+CONF_HIDE_HOME_COUNTRY = "hide_home_country"
+DEFAULT_HIDE_HOME_COUNTRY = False
 
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
