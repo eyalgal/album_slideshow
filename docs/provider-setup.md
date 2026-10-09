@@ -449,7 +449,7 @@ login stored or required.
   Folder** provider does: it downloads each original photo once in the
   background and reads its EXIF/IPTC/XMP. Progress is tracked by the
   **Enrichment progress** diagnostic sensor, and the same reverse-geocoding
-  opt-out applies in the integration's **Configure** dialog.
+  opt-out and home-country option apply in the integration's **Configure** dialog.
 - **Folder mode:** the app password is stored so the integration can re-list
   the folder on each refresh. It is sent to Nextcloud server-side only (HTTP
   Basic auth) and never appears in the camera's image URL or the browser.
@@ -504,7 +504,7 @@ Ente (museum) server, enter its API URL there, for example
   providers they cost nothing extra: Ente returns metadata alongside the file
   list, so it is decrypted up front rather than by downloading every photo.
   Reverse-geocoding into a `location` label still applies, with the same
-  opt-out in the integration's **Configure** dialog.
+  opt-out and home-country option in the integration's **Configure** dialog.
 - **Decryption happens in Home Assistant.** Because there is no URL that
   serves a decrypted image, the camera's `current_url` attribute shows an
   internal `ente://<id>` reference instead of a real link. The access token

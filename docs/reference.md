@@ -167,7 +167,7 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `byte_size` | int \| null | Original file size in bytes (Google Photos only) |
 | `latitude` | float \| null | GPS latitude when supplied by the provider; Google requires the separate original-GPS opt-in |
 | `longitude` | float \| null | GPS longitude when supplied by the provider; Google requires the separate original-GPS opt-in |
-| `location` | string \| null | Reverse-geocoded label (e.g. `"Lisbon, Portugal"`). Empty when reverse-geocoding is disabled or has not yet completed for this file. |
+| `location` | string \| null | Place name from the photo source, or the OpenStreetMap label (e.g. `"Lisbon, Portugal"`, or `"Lisbon"` when the album hides your home country). Empty when reverse-geocoding is disabled or has not yet completed for this file. |
 | `description` | string \| null | Free-text photo caption when supplied by the source, including local EXIF/IPTC/XMP, direct Immich metadata, and optional experimental Google enrichment. |
 | `camera_make` / `camera_model` | string \| null | Camera brand and model, when experimental Google metadata is enabled and available |
 | `focal_length_mm` | number \| null | Focal length in millimeters from Google metadata |
