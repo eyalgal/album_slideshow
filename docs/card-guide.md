@@ -290,6 +290,8 @@ With the icon display, **Weather icons** (`weather_icons`) picks the icon set:
 | `meteocons` | [Meteocons](https://github.com/basmilius/meteocons) Fill icons by Bas Milius (MIT license) |
 | `home_assistant` | The icons of Home Assistant's own weather forecast card (Apache License 2.0). They follow your theme's `--weather-icon-*` colors. An exceptional condition is shown as text |
 
+![Photo with a weather icon and temperature, a clock, and the photo's date and place](weather-caption.jpg)
+
 Each caption can select a different source and use its own placement and style:
 
 ```yaml
