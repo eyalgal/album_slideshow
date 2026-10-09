@@ -1260,6 +1260,175 @@ test("weather captions handle unavailable entities, missing temperatures, and ze
   assert.equal(card._weatherCaption({ weather_entity: "sensor.outdoor" }), "19.2 C");
 });
 
+test("weather display modes show a colored icon or only the temperature", () => {
+  const card = Object.create(Card.prototype);
+  const weather = { entity_id: "weather.home", state: "partlycloudy", attributes: { temperature: 12.9 } };
+  card._hass = {
+    states: { "weather.home": weather, "sensor.outdoor": { state: "11.5", attributes: {} } },
+    formatEntityState: entity => entity === weather ? "Partly cloudy" : "11.5 °C",
+    formatEntityAttributeValue: () => "12.9 °C",
+  };
+  const caption = display => card._normalizeCaption({ show: ["weather"], weather_entity: "weather.home", weather_display: display });
+  assert.equal(caption(undefined).weather_display, "condition_temperature");
+  assert.equal(caption("bogus").weather_display, "condition_temperature");
+  assert.equal(card._weatherCaption(caption("condition_temperature")), "Partly cloudy, 12.9 °C");
+  assert.equal(card._weatherCaption(caption("temperature")), "12.9 °C");
+  assert.equal(JSON.stringify(card._weatherCaption(caption("icon_temperature"))),
+    '{"icon":"yr/partlycloudy_day","label":"Partly cloudy","text":"12.9 °C"}');
+  card._hass.states["sun.sun"] = { state: "below_horizon" };
+  assert.equal(card._weatherCaption(caption("icon_temperature")).icon, "yr/partlycloudy_night");
+  // A condition without an icon keeps its text; a sensor has no condition.
+  weather.state = "volcanic-ash";
+  assert.equal(card._weatherCaption(caption("icon_temperature")), "Partly cloudy, 12.9 °C");
+  assert.equal(card._weatherCaption({ ...caption("icon_temperature"), weather_entity: "sensor.outdoor" }), "11.5 °C");
+  weather.state = "rainy";
+  delete weather.attributes.temperature;
+  assert.equal(card._weatherCaption(caption("temperature")), "");
+  assert.equal(JSON.stringify(card._weatherCaption(caption("icon_temperature"))),
+    '{"icon":"yr/rain","label":"Partly cloudy","text":""}');
+});
+
+test("weather icons come from the chosen icon set", () => {
+  const card = Object.create(Card.prototype);
+  const weather = { state: "partlycloudy", attributes: { temperature: 3 } };
+  card._hass = { states: { "weather.home": weather }, formatEntityState: () => "Partly cloudy", formatEntityAttributeValue: () => "3 °C" };
+  const caption = icons => card._normalizeCaption({
+    show: ["weather"], weather_entity: "weather.home", weather_display: "icon_temperature", weather_icons: icons,
+  });
+  assert.equal(caption(undefined).weather_icons, "yr");
+  assert.equal(caption("bogus").weather_icons, "yr");
+  assert.equal(card._weatherCaption(caption("meteocons")).icon, "meteocons/partly-cloudy-day");
+  const day = card._weatherCaption(caption("home_assistant"));
+  assert.equal(day.icon, undefined);
+  assert.match(day.svg, /^<svg [^>]*viewBox="0 0 17 17">/);
+  assert.match(day.svg, /class="sun"/);
+  assert.match(day.svg, /class="cloud-front"/);
+  card._hass.states["sun.sun"] = { state: "below_horizon" };
+  assert.equal(card._weatherCaption(caption("meteocons")).icon, "meteocons/partly-cloudy-night");
+  assert.match(card._weatherCaption(caption("home_assistant")).svg, /class="moon"/);
+  // Home Assistant draws no exceptional icon, so the text stays.
+  weather.state = "exceptional";
+  assert.equal(card._weatherCaption(caption("home_assistant")), "Partly cloudy, 3 °C");
+  assert.equal(card._weatherCaption(caption("meteocons")).icon, "meteocons/code-red");
+});
+
+test("every Home Assistant weather condition has a bundled icon in each set", () => {
+  const conditions = [
+    "clear-night", "cloudy", "exceptional", "fog", "hail", "lightning", "lightning-rainy",
+    "partlycloudy", "pouring", "rainy", "snowy", "snowy-rainy", "sunny", "windy", "windy-variant",
+  ];
+  const sets = vm.runInContext("WEATHER_ICON_SETS", context);
+  const folder = path.join(path.dirname(filename), "weather");
+  const used = new Set();
+  for (const icons of Object.values(sets)) {
+    assert.equal(JSON.stringify(Object.keys(icons).sort()), JSON.stringify([...conditions, "partlycloudy-night"].sort()));
+    Object.values(icons).forEach(icon => used.add(icon));
+  }
+  const bundled = ["yr", "meteocons"].flatMap(set => fs.readdirSync(path.join(folder, set))
+    .filter(file => file.endsWith(".svg")).map(file => `${set}/${file.slice(0, -4)}`));
+  assert.equal(JSON.stringify(bundled.sort()), JSON.stringify([...used].sort()));
+  for (const icon of used) {
+    assert.match(fs.readFileSync(path.join(folder, `${icon}.svg`), "utf8"), /^<svg /);
+  }
+  const render = vm.runInContext("homeAssistantWeatherSvg", context);
+  for (const condition of conditions.filter(name => name !== "exceptional")) {
+    assert.match(render(condition, false), /<path class="/, condition);
+  }
+  assert.equal(render("exceptional", false), null);
+  assert.equal((render("pouring", false).match(/class="rain"/g) || []).length, 6);
+  assert.match(render("snowy-rainy", false), /class="snow"/);
+  const license = fs.readFileSync(path.join(folder, "LICENSE"), "utf8");
+  assert.match(license, /Copyright \(c\) 2015-2017 Yr/);
+  assert.match(license, /Copyright \(c\) 2020-present Bas Milius/);
+  assert.match(license, /home-assistant\/frontend/);
+  assert.match(fs.readFileSync(path.join(folder, "LICENSE-home-assistant.md"), "utf8"), /^Apache License/);
+  const init = fs.readFileSync(path.join(__dirname, "../custom_components/album_slideshow/__init__.py"), "utf8");
+  assert.ok(init.includes('CARD_STATIC_PATH = "/album_slideshow_static"'));
+  assert.equal(vm.runInContext("WEATHER_ICON_PATH", context), "/album_slideshow_static/weather");
+});
+
+test("icon weather lines render the icon before the temperature", () => {
+  const card = Object.create(Card.prototype);
+  const previousDocument = context.document;
+  const makeElement = tag => ({
+    tag, children: [], style: {}, classList: { add() {} },
+    appendChild(child) { this.children.push(child); },
+    append(...nodes) { this.children.push(...nodes); },
+  });
+  context.document = { createElement: makeElement };
+  try {
+    card._hass = {
+      states: { "weather.home": { state: "sunny", attributes: { temperature: 20 } } },
+      formatEntityState: () => "Sunny", formatEntityAttributeValue: () => "20 °C",
+    };
+    const container = makeElement();
+    card._addCaptionRegion(container, {}, card._normalizeCaption({
+      show: ["weather"], weather_entity: "weather.home", weather_display: "icon_temperature",
+    }), null, 0);
+    const [icon, text] = container.children[0]._captionStack.children[0].children[0].children;
+    assert.equal(icon.tag, "img");
+    assert.equal(icon.className, "cap-icon");
+    assert.equal(icon.alt, "Sunny");
+    assert.equal(icon.src, `/album_slideshow_static/weather/yr/clearsky_day.svg?v=${vm.runInContext("VERSION", context)}`);
+    assert.equal(text, "20 °C");
+    const native = makeElement();
+    card._addCaptionRegion(native, {}, card._normalizeCaption({
+      show: ["weather"], weather_entity: "weather.home", weather_display: "icon_temperature", weather_icons: "home_assistant",
+    }), null, 0);
+    const [svgIcon, svgText] = native.children[0]._captionStack.children[0].children[0].children;
+    assert.equal(svgIcon.tag, "span");
+    assert.equal(svgIcon.className, "cap-icon");
+    assert.match(svgIcon.innerHTML, /^<svg [\s\S]*class="sun"/);
+    assert.equal(svgIcon.src, undefined);
+    assert.equal(svgText, "20 °C");
+  } finally {
+    context.document = previousDocument;
+  }
+});
+
+test("icon weather captions switch to the night icon at sunset", () => {
+  const card = Object.create(Card.prototype);
+  card.setConfig({ entity: "camera.test", captions: [{
+    show: ["weather"], weather_entity: "weather.home", weather_display: "icon_temperature",
+  }] });
+  card._rendered = true;
+  card._captionData = { caption_frames: [{}] };
+  card._hass = { states: { "weather.home": { state: "partlycloudy", attributes: {} }, "sun.sun": { state: "above_horizon" } } };
+  card._maybeSwap = () => {};
+  const updates = [];
+  card._renderCaptions = () => updates.push(true);
+  card.hass = { ...card._hass, states: { ...card._hass.states, "sun.sun": { state: "above_horizon", attributes: { elevation: 3 } } } };
+  assert.equal(updates.length, 0);
+  card.hass = { ...card._hass, states: { ...card._hass.states, "sun.sun": { state: "below_horizon" } } };
+  assert.equal(updates.length, 1);
+});
+
+test("the editor offers weather display for weather entities and saves non-default choices", () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", caption: { show: ["weather"], weather_entity: "sensor.outdoor" } });
+  assert.ok(!editor._captionSchema().some(field => field.name === "caption_weather_display"));
+  editor.setConfig({ entity: "camera.test", caption: { show: ["weather"], weather_entity: "weather.home" } });
+  const field = editor._captionSchema().find(item => item.name === "caption_weather_display");
+  assert.equal(JSON.stringify(field.selector.select.options.map(option => option.value)),
+    '["condition_temperature","icon_temperature","temperature"]');
+  assert.equal(editor._computeLabel({ name: "caption_weather_display" }), "Weather display");
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_weather_display: "icon_temperature" } } });
+  assert.equal(saved.caption.weather_display, "icon_temperature");
+  const icons = editor._captionSchema(saved.caption).find(item => item.name === "caption_weather_icons");
+  assert.equal(JSON.stringify(icons.selector.select.options.map(option => option.value)), '["yr","meteocons","home_assistant"]');
+  assert.equal(editor._computeLabel({ name: "caption_weather_icons" }), "Weather icons");
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_weather_icons: "home_assistant" } } });
+  assert.equal(saved.caption.weather_icons, "home_assistant");
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_weather_icons: "yr" } } });
+  assert.equal(saved.caption.weather_icons, undefined);
+  editor._captionChanged(0, { stopPropagation() {}, detail: { value: { caption_weather_display: "condition_temperature" } } });
+  assert.equal(saved.caption.weather_display, undefined);
+  assert.ok(!editor._captionSchema(saved.caption).some(item => item.name === "caption_weather_icons"));
+});
+
 test("weather-only overlays appear once over a paired slide", () => {
   const card = Object.create(Card.prototype);
   card.setConfig({ entity: "camera.test", captions: [{ show: ["weather"], weather_entity: "weather.home" }] });

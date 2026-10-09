@@ -162,7 +162,7 @@ Choose these in a caption's **Content > Add** picker, or list them in `caption.s
 | `date` | Photo capture date in the chosen date format |
 | `current_date` | Today's date, using Home Assistant's time zone and the chosen date format |
 | `current_time` | Live time, using Home Assistant's time zone and the chosen time format |
-| `weather` | Current condition and temperature from a selected weather entity, or the selected sensor's state and units |
+| `weather` | Current condition and temperature, a weather icon and temperature, or the temperature alone from a selected weather entity, or the selected sensor's state and units |
 | `location` | Source location or reverse-geocoded place name |
 | `description` | Photo description |
 | `camera` | Camera make and model together, without a duplicated brand |
@@ -269,12 +269,35 @@ is paused, without fetching or changing the slide. A missing, unknown, or
 unavailable source leaves the weather line hidden. Other selected caption
 fields continue to display.
 
+For a weather entity, **Weather display** (`weather_display`) chooses the format:
+
+| `weather_display` | Example |
+|---|---|
+| `condition_temperature` (default) | Partly cloudy, 22.5 C |
+| `icon_temperature` | A colored partly cloudy icon, then 22.5 C |
+| `temperature` | 22.5 C |
+
+The icon scales with the caption's font size and gets a drop shadow when
+**Text shadow** is on. After sunset (from `sun.sun`), partly cloudy shows a
+moon instead of the sun. A condition without an icon is shown as text, and a
+sensor always shows its state.
+
+With the icon display, **Weather icons** (`weather_icons`) picks the icon set:
+
+| `weather_icons` | Icons |
+|---|---|
+| `yr` (default) | [Yr weather symbols](https://github.com/metno/weathericons) (MIT license), with wind and warning icons from Meteocons |
+| `meteocons` | [Meteocons](https://github.com/basmilius/meteocons) Fill icons by Bas Milius (MIT license) |
+| `home_assistant` | The icons of Home Assistant's own weather forecast card (Apache License 2.0). They follow your theme's `--weather-icon-*` colors. An exceptional condition is shown as text |
+
 Each caption can select a different source and use its own placement and style:
 
 ```yaml
 captions:
   - show: [weather]
     weather_entity: weather.home
+    weather_display: icon_temperature
+    weather_icons: yr       # yr | meteocons | home_assistant
     position: top-right
     font_size: 18px
 ```
