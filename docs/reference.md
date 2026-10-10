@@ -20,7 +20,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Album refresh | 24 | Any positive integer (hours) | How often album contents refresh |
 | Number | Pair divider size | 8 | 0-64 (px) | Width of divider between paired images |
 | Number | Pair minimum gap | 0 (off) | 0-50 (% of album) | Above 0, shuffles pairing candidates outside a circular index gap, capped to keep candidates available. Helps avoid nearby photos but does not detect photo sessions. At 0, keeps the original nearest-candidate search |
-| Number | Navigation buffer | 2 | 0-10 (slides) | Fully rendered slides cached before and after the current frame for immediate Previous/Next navigation |
+| Number | Navigation buffer | 2 | 0-10 (slides) | Fully rendered slides cached before and after the current frame for immediate Previous/Next navigation. Pausing, interval changes and background metadata scans keep the cache; display and filter settings clear it |
 | Number | Image cache size | 75 | 50-1000 (MB) | Memory budget for downloaded image data (per album) |
 | Number | Custom lookback days | 365 | 1-36500 days | Rolling capture-date window, used only when Date filter is Custom days |
 | Number | Shuffle age bias | 0 | -100 to 100 | Negative favors older photos; positive favors newer photos; 0 preserves the original shuffle. Used only in Random order |
@@ -205,8 +205,8 @@ entity ID.
 
 | Action | Additional fields |
 |--------|-------------------|
-| `album_slideshow.previous_slide` | None; shows the previous cached frame |
-| `album_slideshow.next_slide` | None; advances to the next frame, including while paused |
+| `album_slideshow.previous_slide` | Optional `frame_id` of the slide on screen; shows the cached frame before it (default: before the camera's current frame) |
+| `album_slideshow.next_slide` | Optional `frame_id` of the slide on screen; advances from it (default: from the camera's current frame), including while paused |
 | `album_slideshow.refresh_album` | None; re-fetches the source album |
 | `album_slideshow.hide_photo` | Optional `photo_ids` list from `displayed_photo_ids`, or `position`: `first`, `second`, `both`. Optional `frame_id` rejects a stale current-frame action. |
 | `album_slideshow.undo_hide` | None |

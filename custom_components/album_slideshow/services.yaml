@@ -99,6 +99,13 @@ next_slide:
       required: true
       selector:
         text:
+    frame_id:
+      name: Displayed frame ID
+      description: Optional frame_id of the slide on screen. When it is still in the navigation buffer, the step starts from that slide.
+      selector:
+        number:
+          min: 0
+          mode: box
 
 previous_slide:
   name: Previous slide
@@ -110,6 +117,13 @@ previous_slide:
       required: true
       selector:
         text:
+    frame_id:
+      name: Displayed frame ID
+      description: Optional frame_id of the slide on screen. When it is still in the navigation buffer, the step starts from that slide.
+      selector:
+        number:
+          min: 0
+          mode: box
 
 refresh_album:
   name: Refresh album

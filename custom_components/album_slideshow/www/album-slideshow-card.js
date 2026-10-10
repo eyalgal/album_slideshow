@@ -259,8 +259,10 @@ class PhotoControls {
   async _navigate(service) {
     if (this._busy || !this._state.entryId) return false;
     const entryId = this._state.entryId;
+    // Step from the slide on screen, which may be held behind the camera.
+    const data = Number.isInteger(this._state.frameId) ? { frame_id: this._state.frameId } : {};
     this._onNavigate?.("start", entryId);
-    const success = await this._run(service, {}, entryId);
+    const success = await this._run(service, data, entryId);
     this._onNavigate?.(success ? "complete" : "failed", entryId);
     return success;
   }
@@ -1173,6 +1175,7 @@ function createAlbumSlideshowCardClass(Base) {
     this._photoControls?.update({
       entryId: attrs.entry_id,
       photoIds: this._displayedPhotoIds,
+      frameId: this._displayedFrameId,
       orientation: this._photoOrientation,
       hiddenCount: attrs.hidden_photo_count,
       canUndo: attrs.undo_hide_available,

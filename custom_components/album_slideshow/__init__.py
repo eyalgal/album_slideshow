@@ -481,7 +481,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
         cam = data.get("camera")
         if cam:
-            await cam.async_force_next()
+            await cam.async_force_next(_displayed_frame_id(call))
 
     async def _previous_slide(call) -> None:
         entry_id = call.data.get(ATTR_ENTRY_ID)
@@ -492,7 +492,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
         cam = data.get("camera")
         if cam:
-            await cam.async_force_prev()
+            await cam.async_force_prev(_displayed_frame_id(call))
 
     async def _refresh_album(call) -> None:
         entry_id = call.data.get(ATTR_ENTRY_ID)
@@ -527,6 +527,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _displayed_frame_id(call) -> int | None:
+    """Optional frame a card is showing, so navigation starts from it."""
+    frame_id = call.data.get("frame_id")
+    return frame_id if type(frame_id) is int and frame_id >= 0 else None
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

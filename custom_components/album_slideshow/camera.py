@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+import itertools
 import logging
 import math
 import random
@@ -64,6 +65,31 @@ _MAX_RENDER_ATTEMPTS = 10
 # a small percentage rounds down to zero.
 _PAIR_GAP_FLOOR = 2
 
+# Recent frame IDs remembered so navigation can start from a card's displayed slide.
+_FRAME_ID_MEMORY = 64
+
+# Store settings that change how slides look or which photos play. Changing any
+# of them discards rendered slides; other settings (interval, pause, buffer
+# size, cache size) keep the navigation history.
+_RENDER_SETTINGS = (
+    "fill_mode",
+    "portrait_mode",
+    "order_mode",
+    "shuffle_age_bias",
+    "aspect_ratio",
+    "pair_divider_px",
+    "pair_divider_color",
+    "pair_min_gap_percent",
+    "max_resolution",
+    "date_filter",
+    "custom_lookback_days",
+    "missing_date_mode",
+    "face_debug",
+    "hidden_revision",
+)
+
+_next_frame_serial = itertools.count(1).__next__
+
 
 def _pair_exclusion_radius(n: int, min_gap_percent: float) -> int:
     """Items to exclude on each side of the current index for pairing.
@@ -100,6 +126,7 @@ class _RenderedFrame:
     data: bytes
     cursor: _NavigationCursor
     meta: dict
+    serial: int = field(default_factory=_next_frame_serial, compare=False)
 
 
 def _ts_to_iso(ts_ms: int | None) -> str | None:
@@ -122,6 +149,18 @@ def _camera_metadata_attributes(item: MediaItem | None) -> dict[str, Any]:
     return {
         field: metadata.get(field) if isinstance(metadata, dict) else None
         for field in CAMERA_METADATA_FIELDS
+    }
+
+
+def _caption_frame(item: MediaItem | None) -> dict[str, Any]:
+    """Caption metadata for one photo of a slide."""
+    return {
+        "captured_at": _ts_to_iso(getattr(item, "captured_at", None)),
+        "location": getattr(item, "location", None),
+        "latitude": getattr(item, "latitude", None),
+        "longitude": getattr(item, "longitude", None),
+        "description": getattr(item, "description", None),
+        **_camera_metadata_attributes(item),
     }
 
 
@@ -225,9 +264,6 @@ class AlbumSlideshowCamera(Camera):
         )
         self._recent_urls: list[str] = []
         self._last_is_portrait: bool | None = None
-        # When the current frame is a paired image, this is [taken_a, taken_b]
-        # ISO strings (top/left first); None for single frames.
-        self._last_captured_at_pair: list[str | None] | None = None
         # Full per-half caption metadata for a paired frame: a list of two
         # dicts (top/left first) each carrying captured_at / location /
         # latitude / longitude. None for single frames. Lets the Lovelace
@@ -247,6 +283,8 @@ class AlbumSlideshowCamera(Camera):
         # has an unambiguous "new frame ready" signal even when other
         # attributes happen not to change between slides.
         self._frame_id: int = 0
+        # Recent frame IDs mapped to frame serials, oldest first.
+        self._frame_serials: dict[int, int] = {}
 
         self._interrupt_event: asyncio.Event = asyncio.Event()
         self._slide_deadline: float | None = None
@@ -276,18 +314,31 @@ class AlbumSlideshowCamera(Camera):
         self._last_nav_error: str | None = None
         self._consecutive_failures: int = 0
         self._render_task: asyncio.Task | None = None
+        self._render_settings = self._current_render_settings()
 
         def _on_coordinator_update() -> None:
+            previous_items = self._effective_cache[1] if self._effective_cache else None
             self._effective_cache = None
-            self._invalidate_timeline()
+            if self._keep_timeline(previous_items):
+                self.async_write_ha_state()
+            else:
+                self._invalidate_timeline()
 
         coordinator.async_add_listener(_on_coordinator_update)
 
         def _on_store_change() -> None:
             self._download_cache.resize(self.store.image_cache_mb * 1024 * 1024)
-            self._effective_cache = None
             self._slide_deadline = None
-            self._invalidate_timeline()
+            settings = self._current_render_settings()
+            if settings != self._render_settings:
+                self._render_settings = settings
+                self._effective_cache = None
+                self._invalidate_timeline()
+                return
+            # Interval, pause and buffer changes keep the rendered slides.
+            self._schedule_preload()
+            self._interrupt_event.set()
+            self.async_write_ha_state()
 
         store.add_listener(_on_store_change)
 
@@ -344,7 +395,11 @@ class AlbumSlideshowCamera(Camera):
         items: list[MediaItem] = self._effective_items()
         cur = items[self._index] if items and 0 <= self._index < len(items) else None
         captured_at = _ts_to_iso(getattr(cur, "captured_at", None))
-        captured_at_pair = self._last_captured_at_pair
+        caption_frames = self._caption_frames(cur)
+        captured_at_pair = (
+            [frame["captured_at"] for frame in caption_frames]
+            if self._last_pair_frames else None
+        )
         return {
             "entry_id": self.entry.entry_id,
             "displayed_photo_ids": (
@@ -389,7 +444,7 @@ class AlbumSlideshowCamera(Camera):
             # so the card can overlay an accurate date/location on each half.
             # ``pair_orientation`` tells the card how the two halves are laid
             # out: ``horizontal`` (left/right) or ``vertical`` (top/bottom).
-            "caption_frames": self._caption_frames(cur, captured_at),
+            "caption_frames": caption_frames,
             "pair_orientation": self._last_pair_orientation,
             "slide_interval": int(self.store.slide_interval),
             "fill_mode": self.store.fill_mode,
@@ -422,7 +477,7 @@ class AlbumSlideshowCamera(Camera):
             "pagination_debug": data.get("pagination_debug"),
         }
 
-    def _caption_frames(self, cur, captured_at: str | None) -> list[dict]:
+    def _caption_frames(self, cur) -> list[dict]:
         """Per-image caption metadata for the current slide.
 
         Returns a list with one dict for a normal slide, or two (top/left
@@ -430,18 +485,21 @@ class AlbumSlideshowCamera(Camera):
         string or ``None``), ``location`` (human label or ``None``), and
         ``latitude`` / ``longitude``. The card reads this to overlay an
         accurate caption on each image, including each half of a pair.
+        Paired captions are read from the live items so metadata found after
+        the slide was rendered still shows.
         """
-        if self._last_pair_frames:
+        if not self._last_pair_frames:
+            return [_caption_frame(cur)]
+        photo_ids = self._current_frame.meta.get("photo_ids", []) if self._current_frame else []
+        if len(photo_ids) != len(self._last_pair_frames):
             return self._last_pair_frames
+        live = {
+            item.photo_id: item for item in self._effective_items()
+            if item.photo_id and item.photo_id in photo_ids
+        }
         return [
-            {
-                "captured_at": captured_at,
-                "location": getattr(cur, "location", None),
-                "latitude": getattr(cur, "latitude", None),
-                "longitude": getattr(cur, "longitude", None),
-                "description": getattr(cur, "description", None),
-                **_camera_metadata_attributes(cur),
-            }
+            _caption_frame(live[photo_id]) if photo_id in live else frame
+            for photo_id, frame in zip(photo_ids, self._last_pair_frames)
         ]
 
     @property
@@ -496,15 +554,19 @@ class AlbumSlideshowCamera(Camera):
         self._effective_cache = (hash(cache_key), ordered)
         return ordered
 
-    async def async_force_next(self) -> None:
-        """Display the next buffered slide immediately."""
-        await self._async_navigate(1)
+    async def async_force_next(self, frame_id: int | None = None) -> None:
+        """Display the next buffered slide immediately.
 
-    async def async_force_prev(self) -> None:
+        ``frame_id`` is the frame a card is showing; when it is still retained,
+        the step starts from that slide rather than the camera's latest one.
+        """
+        await self._async_navigate(1, frame_id)
+
+    async def async_force_prev(self, frame_id: int | None = None) -> None:
         """Display the previous retained slide immediately."""
-        await self._async_navigate(-1)
+        await self._async_navigate(-1, frame_id)
 
-    async def _async_navigate(self, direction: int) -> None:
+    async def _async_navigate(self, direction: int, frame_id: int | None = None) -> None:
         """Serialise a manual navigation request and execute it directly."""
         direction_name = "next" if direction > 0 else "previous"
         self._navigation_pending += 1
@@ -522,11 +584,15 @@ class AlbumSlideshowCamera(Camera):
                 self._last_nav_started_at = _utc_now_iso()
                 if self._timeline_dirty:
                     await self._rebuild_current_frame()
+                rewound = self._rewind_to_displayed(frame_id)
                 changed = (
                     await self._show_next_frame()
                     if direction > 0
                     else await self._show_previous_frame()
                 )
+                if not changed and rewound:
+                    # Nothing older than the displayed slide: stay on it.
+                    self._apply_frame(self._current_frame)
                 if changed:
                     self._last_nav_committed_at = _utc_now_iso()
                     self._last_nav_outcome = "displayed"
@@ -678,6 +744,7 @@ class AlbumSlideshowCamera(Camera):
                 "captured_at_pair": None,
                 "pair_frames": None,
                 "pair_orientation": None,
+                "faces": faces[half:half + 1] if (faces := frame.meta.get("faces")) else None,
             }
             self._timeline_dirty = False
             self._apply_frame(_RenderedFrame(encoded, cursor, meta))
@@ -693,7 +760,6 @@ class AlbumSlideshowCamera(Camera):
         self._framebuffer = None
         self.store.last_frame = None
         self._last_is_portrait = None
-        self._last_captured_at_pair = None
         self._last_pair_frames = None
         self._last_pair_orientation = None
 
@@ -809,6 +875,8 @@ class AlbumSlideshowCamera(Camera):
                 composed, meta = await renderer._compose_for_index(items)
                 meta = dict(meta or {})
                 meta.setdefault("photo_ids", [getattr(items[renderer._index], "photo_id", None)])
+                # Faces used for the crop, so later face data can be detected.
+                meta.setdefault("faces", (_item_faces(items[renderer._index]),))
                 cursor = self._capture_cursor(renderer)
                 if composed is None:
                     raise RuntimeError("Image composition returned no frame")
@@ -845,10 +913,12 @@ class AlbumSlideshowCamera(Camera):
 
         meta = frame.meta
         self._last_is_portrait = meta.get("is_portrait")
-        self._last_captured_at_pair = meta.get("captured_at_pair")
         self._last_pair_frames = meta.get("pair_frames")
         self._last_pair_orientation = meta.get("pair_orientation")
         self._frame_id += 1
+        self._frame_serials[self._frame_id] = frame.serial
+        while len(self._frame_serials) > _FRAME_ID_MEMORY:
+            del self._frame_serials[next(iter(self._frame_serials))]
 
         _LOGGER.debug(
             "Album Slideshow %s: displayed buffered frame_id=%d index=%d "
@@ -885,6 +955,84 @@ class AlbumSlideshowCamera(Camera):
         self._cancel_preload()
         self._interrupt_event.set()
         self.async_write_ha_state()
+
+    def _current_render_settings(self) -> tuple:
+        return tuple(getattr(self.store, name) for name in _RENDER_SETTINGS)
+
+    def _keep_timeline(self, previous_items: list[MediaItem] | None) -> bool:
+        """Keep rendered slides that are still valid after a coordinator update.
+
+        Metadata-only updates (dates, places, captions) keep every slide. If the
+        playlist itself changed, slides already shown are kept and re-anchored
+        to their new positions, and upcoming slides are rendered again. Returns
+        False when the timeline has to be rebuilt instead.
+        """
+        current = self._current_frame
+        if current is None or self._timeline_dirty or self._navigation_lock.locked():
+            return False
+        items = self._effective_items()
+        found = {item.photo_id: (index, item) for index, item in enumerate(items) if item.photo_id}
+
+        def faces_changed(frame: _RenderedFrame) -> bool:
+            recorded = frame.meta.get("faces")
+            photo_ids = frame.meta.get("photo_ids") or []
+            return (
+                recorded is not None
+                and all(photo_id in found for photo_id in photo_ids)
+                and recorded != tuple(_item_faces(found[photo_id][1]) for photo_id in photo_ids)
+            )
+
+        if previous_items is not None and [
+            item.photo_id or item.url for item in previous_items
+        ] == [item.photo_id or item.url for item in items]:
+            return not any(
+                faces_changed(frame)
+                for frame in (*self._previous_frames, current, *self._next_frames)
+            )
+
+        def remap(frame: _RenderedFrame) -> _RenderedFrame | None:
+            photo_ids = frame.meta.get("photo_ids") or []
+            if not photo_ids or any(photo_id not in found for photo_id in photo_ids) or faces_changed(frame):
+                return None
+            return replace(frame, cursor=replace(frame.cursor, index=found[photo_ids[0]][0]))
+
+        current = remap(current)
+        if current is None:
+            return False
+        previous = [frame for frame in map(remap, self._previous_frames) if frame is not None]
+        self._timeline_generation += 1
+        self._cancel_preload()
+        self._previous_frames.clear()
+        self._previous_frames.extend(previous)
+        self._next_frames.clear()
+        self._current_frame = current
+        self._index = current.cursor.index
+        self._schedule_preload()
+        return True
+
+    def _rewind_to_displayed(self, frame_id: int | None) -> bool:
+        """Make the retained slide a card is still showing the current one.
+
+        A card holds its photo while its controls are open, so the camera may
+        already be further ahead. Navigation then starts from what is on screen.
+        """
+        serial = self._frame_serials.get(frame_id) if frame_id is not None else None
+        current = self._current_frame
+        if serial is None or current is None or current.serial == serial:
+            return False
+        timeline = [*self._previous_frames, current, *self._next_frames]
+        position = next(
+            (index for index, frame in enumerate(timeline) if frame.serial == serial),
+            None,
+        )
+        if position is None:
+            return False
+        self._previous_frames.clear()
+        self._previous_frames.extend(timeline[:position])
+        self._next_frames.clear()
+        self._next_frames.extend(timeline[position + 1:])
+        self._current_frame = timeline[position]
+        return True
 
     def _schedule_preload(self) -> None:
         """Start the single per-camera worker that fills future frames."""
@@ -1255,24 +1403,7 @@ class AlbumSlideshowCamera(Camera):
                             is_portrait_canvas, divider, divider_fill, transparent_divider,
                             self._crop_hints(cur), self._crop_hints(other_item),
                         )
-                        pair_frames = [
-                            {
-                                "captured_at": _ts_to_iso(getattr(cur, "captured_at", None)),
-                                "location": getattr(cur, "location", None),
-                                "latitude": getattr(cur, "latitude", None),
-                                "longitude": getattr(cur, "longitude", None),
-                                "description": getattr(cur, "description", None),
-                                **_camera_metadata_attributes(cur),
-                            },
-                            {
-                                "captured_at": _ts_to_iso(getattr(other_item, "captured_at", None)),
-                                "location": getattr(other_item, "location", None),
-                                "latitude": getattr(other_item, "latitude", None),
-                                "longitude": getattr(other_item, "longitude", None),
-                                "description": getattr(other_item, "description", None),
-                                **_camera_metadata_attributes(other_item),
-                            },
-                        ]
+                        pair_frames = [_caption_frame(cur), _caption_frame(other_item)]
                         pair_meta = [f["captured_at"] for f in pair_frames]
                     else:
                         composed = await self._async_image_job(
@@ -1284,6 +1415,10 @@ class AlbumSlideshowCamera(Camera):
                     "photo_ids": (
                         [getattr(cur, "photo_id", None), getattr(other_item, "photo_id", None)]
                         if pair_frames else [getattr(cur, "photo_id", None)]
+                    ),
+                    "faces": (
+                        (_item_faces(cur), _item_faces(other_item))
+                        if pair_frames else (_item_faces(cur),)
                     ),
                     "is_portrait": cur_is_portrait,
                     "captured_at_pair": pair_meta,

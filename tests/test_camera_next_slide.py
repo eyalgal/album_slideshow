@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter, deque
+import dataclasses
 import random
 import types
 
@@ -9,6 +10,7 @@ import pytest
 from PIL import Image
 
 from custom_components.album_slideshow import camera
+from custom_components.album_slideshow.coordinator import MediaItem
 from custom_components.album_slideshow.const import (
     DEFAULT_NAVIGATION_BUFFER_SIZE,
     DOMAIN,
@@ -70,8 +72,8 @@ def _make_cam(depth: int = 2, paused: bool = False):
     cam._recent_urls = []
     cam._framebuffer = None
     cam._frame_id = 0
+    cam._frame_serials = {}
     cam._last_is_portrait = None
-    cam._last_captured_at_pair = None
     cam._last_pair_frames = None
     cam._last_pair_orientation = None
     cam._current_frame = None
@@ -746,5 +748,168 @@ def test_direct_navigation_operates_while_render_loop_is_waiting():
                 pass
 
     asyncio.run(run())
+
+
+# ── history survives updates and follows the displayed slide ───────────────
+
+
+def _media(name: str) -> MediaItem:
+    return MediaItem(
+        url=f"https://example.test/{name}.jpg", width=40, height=30,
+        mime_type="image/jpeg", filename=f"{name}.jpg", source_id=name,
+    )
+
+
+def _shown(item: MediaItem, index: int, **meta) -> camera._RenderedFrame:
+    return camera._RenderedFrame(
+        data=item.photo_id.encode(),
+        cursor=_cursor(index),
+        meta={"photo_ids": [item.photo_id], **meta},
+    )
+
+
+def _history_cam(names="abcd"):
+    """A listening camera showing c, with a and b behind it and d preloaded."""
+    listeners = []
+    items = [_media(name) for name in names]
+    store = SlideshowStore(navigation_buffer_size=3, order_mode=ORDER_ALBUM)
+    coordinator = types.SimpleNamespace(
+        data={"items": items}, async_add_listener=listeners.append,
+    )
+    cam = camera.AlbumSlideshowCamera(
+        _FakeHass(), types.SimpleNamespace(entry_id="test", title="Test"), coordinator, store,
+    )
+    cam.async_write_ha_state = lambda: None
+    cam._schedule_preload = lambda: None
+    frames = [_shown(item, index, faces=(None,)) for index, item in enumerate(items)]
+    cam._previous_frames.extend(frames[:2])
+    cam._current_frame = frames[2]
+    cam._index = 2
+    cam._next_frames.extend(frames[3:])
+    cam._effective_items()
+    return cam, listeners[0], store, items, frames
+
+
+def test_every_store_setting_is_classified_for_history():
+    keeps_history = {
+        "slide_interval", "refresh_hours", "image_cache_mb", "navigation_buffer_size",
+        "paused", "last_frame", "hidden_photo_ids", "last_hidden_photo_ids",
+        "_hidden_storage", "_hidden_lock", "_listeners",
+    }
+    names = {field.name for field in dataclasses.fields(SlideshowStore)}
+    assert names == keeps_history | set(camera._RENDER_SETTINGS)
+    assert not keeps_history & set(camera._RENDER_SETTINGS)
+
+
+def test_pause_interval_and_buffer_changes_keep_history():
+    cam, _update, store, _items, frames = _history_cam()
+    for name, value in [
+        ("paused", True), ("paused", False), ("slide_interval", 20),
+        ("navigation_buffer_size", 5), ("image_cache_mb", 64),
+    ]:
+        setattr(store, name, value)
+        store.notify()
+        assert not cam._timeline_dirty
+        assert list(cam._previous_frames) == frames[:2]
+        assert cam._current_frame is frames[2]
+
+    store.fill_mode = "contain"
+    store.notify()
+    assert cam._timeline_dirty
+    assert not cam._previous_frames
+
+
+def test_metadata_updates_keep_history_and_refresh_captions():
+    cam, update, _store, items, frames = _history_cam()
+    cam._last_pair_frames = [{"location": None}, {"location": None}]
+    cam._current_frame = camera._RenderedFrame(
+        b"pair", _cursor(2), {"photo_ids": [items[2].photo_id, items[0].photo_id]},
+    )
+    items[0].location = "Lisbon, Portugal"
+    items[0].captured_at = 1_700_000_000_000
+
+    update()
+
+    assert not cam._timeline_dirty
+    assert list(cam._previous_frames) == frames[:2]
+    assert list(cam._next_frames) == frames[3:]
+    attributes = cam.extra_state_attributes
+    assert [frame["location"] for frame in attributes["caption_frames"]] == [None, "Lisbon, Portugal"]
+    assert attributes["captured_at"][1].startswith("2023-11-14")
+
+
+def test_playlist_changes_keep_shown_slides_at_their_new_positions():
+    cam, update, _store, items, frames = _history_cam()
+    serial = frames[2].serial
+    cam.coordinator.data = {"items": [_media("new"), items[3], items[0], items[2]]}
+
+    update()
+
+    assert not cam._timeline_dirty
+    assert [frame.cursor.index for frame in cam._previous_frames] == [2]
+    assert cam._current_frame.serial == serial
+    assert cam._current_frame.cursor.index == cam._index == 3
+    assert not cam._next_frames
+
+    cam.coordinator.data = {"items": [items[0], items[3]]}
+    update()
+    assert cam._timeline_dirty
+    assert not cam._previous_frames
+
+
+def test_new_face_data_rerenders_only_slides_that_used_it():
+    cam, update, _store, items, frames = _history_cam("abcde")
+    cam._next_frames.pop()
+    items[4].faces = [[0.1, 0.1, 0.3, 0.3, 1.0]]
+    update()
+    assert not cam._timeline_dirty
+    assert list(cam._previous_frames) == frames[:2]
+
+    items[1].faces = [[0.1, 0.1, 0.3, 0.3, 1.0]]
+    update()
+    assert cam._timeline_dirty
+
+
+def test_navigation_starts_from_the_slide_a_card_is_showing():
+    def camera_ahead_of_card():
+        cam = _make_cam(depth=3)
+        a, b, c = _frame(0), _frame(1), _frame(2)
+        shown = []
+        for frame in (a, b, c):
+            if cam._current_frame is not None:
+                cam._previous_frames.append(cam._current_frame)
+            cam._apply_frame(frame)
+            shown.append(cam._frame_id)
+        return cam, (a, b, c), shown
+
+    cam, (a, b, c), shown = camera_ahead_of_card()
+    asyncio.run(cam.async_force_prev(shown[1]))
+    assert cam._current_frame is a
+    assert list(cam._next_frames) == [b, c]
+    assert cam._last_nav_outcome == "displayed"
+
+    cam, (a, b, c), shown = camera_ahead_of_card()
+    asyncio.run(cam.async_force_next(shown[0]))
+    assert cam._current_frame is b
+    assert list(cam._previous_frames) == [a]
+    assert list(cam._next_frames) == [c]
+
+    cam, (a, b, c), shown = camera_ahead_of_card()
+    asyncio.run(cam.async_force_prev(shown[0]))
+    assert cam._current_frame is a
+    assert cam._frame_id == shown[2] + 1
+    assert cam._last_nav_outcome == "not_available"
+
+    cam, (a, b, c), shown = camera_ahead_of_card()
+    asyncio.run(cam.async_force_prev(999))
+    assert cam._current_frame is b
+
+
+def test_frame_id_memory_is_bounded():
+    cam = _make_cam(depth=0)
+    for index in range(camera._FRAME_ID_MEMORY + 5):
+        cam._apply_frame(_frame(index))
+    assert len(cam._frame_serials) == camera._FRAME_ID_MEMORY
+    assert min(cam._frame_serials) == 6
 
 

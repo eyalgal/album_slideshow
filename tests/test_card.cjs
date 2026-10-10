@@ -300,6 +300,24 @@ test("navigation uses existing slideshow services and the captured entry", async
   }
 });
 
+test("navigation sends the frame on screen so steps start from it", async () => {
+  const requests = [];
+  const controls = Object.create(PhotoControls.prototype);
+  controls._state = { entryId: "test", frameId: 7 };
+  controls._runAction = async action => { await action(); return true; };
+  controls._getHass = () => ({ callWS: async request => { requests.push(request); return {}; } });
+  await controls._navigate("previous_slide");
+  assert.equal(JSON.stringify(requests[0].service_data), JSON.stringify({ frame_id: 7, entry_id: "test" }));
+
+  const card = Object.create(Card.prototype);
+  let state;
+  card._photoControls = { update: value => { state = value; } };
+  card._displayedPhotoIds = ["photo"];
+  card._displayedFrameId = 7;
+  card._refreshPhotoControls({ entry_id: "test", frame_id: 9 });
+  assert.equal(state.frameId, 7);
+});
+
 test("navigation failure and busy state do not leave a frame override active", async () => {
   const controls = Object.create(PhotoControls.prototype);
   controls._state = { entryId: "test" };
