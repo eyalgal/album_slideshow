@@ -41,8 +41,13 @@ from .const import (
     CONF_IMMICH_SELECTION_TYPE,
     CONF_IMMICH_SELECTION_ID,
     CONF_IMMICH_IMAGE_SIZE,
+    CONF_IMMICH_INCLUDE_VIDEOS,
+    CONF_IMMICH_LIVE_PHOTOS,
     CONF_IMMICH_FILTER,
     DEFAULT_IMMICH_IMAGE_SIZE,
+    DEFAULT_IMMICH_INCLUDE_VIDEOS,
+    DEFAULT_IMMICH_LIVE_PHOTOS,
+    IMMICH_IMAGE_PREVIEW,
     CONF_PHOTOPRISM_URL,
     CONF_PHOTOPRISM_AUTH_METHOD,
     CONF_PHOTOPRISM_TOKEN,
@@ -162,10 +167,28 @@ class MediaItem:
     # True when ``location`` came from our OpenStreetMap lookup rather than
     # the provider, so it can be re-formatted from the place cache.
     location_geocoded: bool = False
+    # Upstream playback URL for a video item (``url`` is then its poster
+    # still), or for a Live Photo's motion clip (``live_photo``; ``url`` is
+    # the photo). Fetched server-side by the video proxy view only, so
+    # provider credentials never reach the browser. ``duration_ms`` is the
+    # clip length (videos only).
+    video_url: str | None = None
+    duration_ms: int | None = None
+    live_photo: bool = False
+    # Provider file path (Immich ``originalPath``), shown by the card's
+    # ``path`` caption.
+    source_path: str | None = None
+    # Runtime-only description of the stream a video is served as (see
+    # ``async_video_info``); not persisted.
+    video_info: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.photo_id is None:
             self.photo_id = _photo_identifier(self.source_id)
+
+    @property
+    def is_video(self) -> bool:
+        return bool(self.video_url) and not self.live_photo
 
 
 def _photo_identifier(source_id: str | None) -> str | None:
@@ -1145,6 +1168,11 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 CONF_IMMICH_URL, CONF_IMMICH_API_KEY, CONF_IMMICH_SELECTION_TYPE,
                 CONF_IMMICH_SELECTION_ID, CONF_IMMICH_FILTER, CONF_IMMICH_IMAGE_SIZE,
             )]
+            # Appended only when enabled so existing caches stay valid.
+            if entry.data.get(CONF_IMMICH_INCLUDE_VIDEOS):
+                source.append("videos")
+            if entry.data.get(CONF_IMMICH_LIVE_PHOTOS):
+                source.append("live_photos")
             self._immich_cache_source = sha256(json.dumps(source).encode()).hexdigest()
         self.album_url: str | None = entry.data.get(CONF_ALBUM_URL)
         self.local_path: str | None = entry.data.get(CONF_LOCAL_PATH)
@@ -1509,6 +1537,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     } if isinstance(raw.get("camera_metadata"), dict) else None,
                     google_location_scanned=bool(raw.get("google_location_scanned", False)),
                     location_geocoded=bool(raw.get("location_geocoded", False)),
+                    video_url=raw.get("video_url") if isinstance(raw.get("video_url"), str) else None,
+                    duration_ms=raw.get("duration_ms") if isinstance(raw.get("duration_ms"), int) else None,
+                    source_path=raw.get("source_path") if isinstance(raw.get("source_path"), str) else None,
+                    live_photo=bool(raw.get("live_photo", False)),
                 ))
             except Exception:
                 continue
@@ -1549,6 +1581,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "camera_metadata": it.camera_metadata,
                     "google_location_scanned": it.google_location_scanned,
                     "location_geocoded": it.location_geocoded,
+                    "video_url": it.video_url,
+                    "duration_ms": it.duration_ms,
+                    "source_path": it.source_path,
+                    "live_photo": it.live_photo,
                 }
                 for it in items
             ],
@@ -1788,6 +1824,12 @@ class AlbumCoordinator(DataUpdateCoordinator):
         sel_type = self.entry.data.get(CONF_IMMICH_SELECTION_TYPE)
         sel_id = self.entry.data.get(CONF_IMMICH_SELECTION_ID)
         size = self.entry.data.get(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE)
+        include_videos = bool(
+            self.entry.data.get(CONF_IMMICH_INCLUDE_VIDEOS, DEFAULT_IMMICH_INCLUDE_VIDEOS)
+        )
+        live_photos = bool(
+            self.entry.data.get(CONF_IMMICH_LIVE_PHOTOS, DEFAULT_IMMICH_LIVE_PHOTOS)
+        )
         if not url or not api_key or not sel_type:
             raise UpdateFailed("Immich provider is missing URL, API key, or selection")
 
@@ -1814,7 +1856,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self.image_request_headers = dict(client.image_headers)
 
         try:
-            assets = await client.async_collect_assets(sel_type, sel_id, filter_body)
+            assets = await client.async_collect_assets(
+                sel_type, sel_id, filter_body, include_videos
+            )
         except Exception as err:
             raise UpdateFailed(f"Error querying Immich: {err}") from err
 
@@ -1831,18 +1875,46 @@ class AlbumCoordinator(DataUpdateCoordinator):
             ) or immich_api._to_epoch_ms(a.get("fileCreatedAt"))
             w = a.get("width")
             h = a.get("height")
+            is_video = immich_api.is_video_item(a)
+            motion_id = immich_api.live_photo_video_id(a) if live_photos else None
+            if is_video:
+                video_url = immich_api.build_video_url(client.base_url, aid)
+            elif motion_id:
+                video_url = immich_api.build_video_url(client.base_url, motion_id)
+            else:
+                video_url = None
             items.append(
                 MediaItem(
-                    url=immich_api.build_image_url(client.base_url, aid, size),
+                    # A video's poster still is its preview thumbnail: the
+                    # ``original`` endpoint would return the video file and
+                    # ``fullsize`` is only generated for images.
+                    url=immich_api.build_image_url(
+                        client.base_url, aid, IMMICH_IMAGE_PREVIEW if is_video else size
+                    ),
                     width=w if isinstance(w, int) else None,
                     height=h if isinstance(h, int) else None,
                     mime_type=None,
                     filename=a.get("originalFileName"),
                     captured_at=captured,
                     source_id=aid,
+                    video_url=video_url,
+                    live_photo=bool(motion_id),
+                    duration_ms=(
+                        immich_api.parse_duration_ms(a.get("duration")) if is_video else None
+                    ),
+                    source_path=(
+                        a.get("originalPath") if isinstance(a.get("originalPath"), str) else None
+                    ),
                 )
             )
 
+        _LOGGER.debug(
+            "Immich %s: %d assets (%d videos, %d Live Photos)",
+            self.entry.title,
+            len(items),
+            sum(1 for item in items if item.is_video),
+            sum(1 for item in items if item.live_photo),
+        )
         return {
             "title": self.entry.title,
             "items": items,
@@ -2569,6 +2641,33 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 return candidate, {}
         return None, {}
 
+    async def async_video_info(self, item: MediaItem) -> dict[str, Any]:
+        """Describe the stream a video slide is served as; cached per item.
+
+        Used for the card's ``video_version`` caption: whether Immich serves
+        its transcoded copy or the original, and the stream's bitrate.
+        """
+        if item.video_info is not None:
+            return item.video_info
+        if self.provider != PROVIDER_IMMICH or not item.source_id or not item.is_video:
+            return {}
+        from . import immich as immich_api
+
+        client = immich_api.ImmichClient(
+            self.hass,
+            self.entry.data.get(CONF_IMMICH_URL),
+            self.entry.data.get(CONF_IMMICH_API_KEY),
+        )
+        content_type, served = await client.async_probe_video(item.source_id)
+        if item.byte_size is None:
+            # Enrichment may not have reached this item yet.
+            info = immich_api.parse_asset_exif(await client.async_get_asset(item.source_id))
+            item.byte_size = info.get("byte_size")
+        item.video_info = immich_api.describe_video(
+            content_type, served, item.byte_size, item.duration_ms
+        )
+        return item.video_info
+
     async def _enrich_immich_item(self, item: MediaItem) -> None:
         """Fetch Immich metadata and the face boxes used for cropping."""
         from . import immich as immich_api
@@ -2619,6 +2718,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     item.location_geocoded = False
                 if "description" in info:
                     item.description = info["description"]
+                if "byte_size" in info:
+                    item.byte_size = info["byte_size"]
                 item.exif_scanned = True
             else:
                 if asset is None:

@@ -36,8 +36,12 @@ from .const import (
     CONF_IMMICH_SELECTION_TYPE,
     CONF_IMMICH_SELECTION_ID,
     CONF_IMMICH_IMAGE_SIZE,
+    CONF_IMMICH_INCLUDE_VIDEOS,
+    CONF_IMMICH_LIVE_PHOTOS,
     CONF_IMMICH_FILTER,
     DEFAULT_IMMICH_IMAGE_SIZE,
+    DEFAULT_IMMICH_INCLUDE_VIDEOS,
+    DEFAULT_IMMICH_LIVE_PHOTOS,
     IMMICH_IMAGE_SIZE_OPTIONS,
     IMMICH_SELECTION_COMPOSITE,
     CONF_PHOTOPRISM_URL,
@@ -279,6 +283,18 @@ def _immich_select_schema(
             default=_default(CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE),
         )
     ] = vol.In(IMMICH_IMAGE_SIZE_OPTIONS)
+    fields[
+        vol.Optional(
+            CONF_IMMICH_INCLUDE_VIDEOS,
+            default=_default(CONF_IMMICH_INCLUDE_VIDEOS, DEFAULT_IMMICH_INCLUDE_VIDEOS),
+        )
+    ] = selector.BooleanSelector()
+    fields[
+        vol.Optional(
+            CONF_IMMICH_LIVE_PHOTOS,
+            default=_default(CONF_IMMICH_LIVE_PHOTOS, DEFAULT_IMMICH_LIVE_PHOTOS),
+        )
+    ] = selector.BooleanSelector()
     return vol.Schema(fields)
 
 
@@ -323,6 +339,8 @@ def _parse_immich_select(
         CONF_IMMICH_SELECTION_TYPE: IMMICH_SELECTION_COMPOSITE,
         CONF_IMMICH_SELECTION_ID: json.dumps(selection, sort_keys=True),
         CONF_IMMICH_IMAGE_SIZE: size,
+        CONF_IMMICH_INCLUDE_VIDEOS: bool(user_input.get(CONF_IMMICH_INCLUDE_VIDEOS)),
+        CONF_IMMICH_LIVE_PHOTOS: bool(user_input.get(CONF_IMMICH_LIVE_PHOTOS)),
         CONF_ALBUM_NAME: name,
         CONF_IMMICH_FILTER: raw_filter,
     }
@@ -1711,6 +1729,12 @@ class ImmichOptionsFlow(config_entries.OptionsFlow):
             CONF_IMMICH_IMAGE_SIZE: entry.data.get(
                 CONF_IMMICH_IMAGE_SIZE, DEFAULT_IMMICH_IMAGE_SIZE
             ),
+            CONF_IMMICH_INCLUDE_VIDEOS: bool(entry.data.get(
+                CONF_IMMICH_INCLUDE_VIDEOS, DEFAULT_IMMICH_INCLUDE_VIDEOS
+            )),
+            CONF_IMMICH_LIVE_PHOTOS: bool(entry.data.get(
+                CONF_IMMICH_LIVE_PHOTOS, DEFAULT_IMMICH_LIVE_PHOTOS
+            )),
         }
         if entry.data.get(CONF_IMMICH_FILTER):
             defaults[CONF_IMMICH_FILTER] = entry.data[CONF_IMMICH_FILTER]
@@ -1739,7 +1763,10 @@ def _immich_source_changed(old: dict[str, Any], new: dict[str, Any]) -> bool:
         CONF_IMMICH_FILTER,
         CONF_IMMICH_IMAGE_SIZE,
     )
-    return any(old.get(key) != new.get(key) for key in keys)
+    return any(old.get(key) != new.get(key) for key in keys) or any(
+        bool(old.get(key)) != bool(new.get(key))
+        for key in (CONF_IMMICH_INCLUDE_VIDEOS, CONF_IMMICH_LIVE_PHOTOS)
+    )
 
 
 async def _async_clear_item_cache(hass: Any, entry_id: str) -> None:

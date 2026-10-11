@@ -8,19 +8,19 @@ images, not videos. Install the integration first using the
 
 ## Choose a Provider
 
-| Provider | Best for | Date filter / ordering | Location | Description caption |
-|----------|----------|:---:|:---:|:---:|
-| [Google Photos](#google-photos) | A shared album link | Yes | Separate opt-in | Optional enrichment |
-| [Immich](#immich) | An Immich server (album, person, favorites, all, search) | Yes | Yes | Yes |
-| [PhotoPrism](#photoprism) | A PhotoPrism server (album, person, favorites, all, search) | Yes | Yes | Yes |
-| [iCloud](#icloud-shared-album) | An iCloud Shared Album public link | Yes | No | Yes |
-| [Synology](#synology-photos) | A Synology Photos library (favorites, albums, people, places, tags, subjects) | Yes | Yes | Yes |
-| [UGREEN](#ugreen-nas-ugos-photos) | A UGREEN NAS running UGOS Photos (experimental) | Yes | Yes | No |
-| [Nextcloud (folder)](#authenticated-webdav-folder) | Any folder in your Nextcloud files (WebDAV, app password) | Yes | Yes | Yes |
-| [Nextcloud (public link)](#public-album-link) | A public Nextcloud Photos album share link (no login) | Yes | Yes | Yes |
-| [Ente Photos](#ente-photos) | A public Ente album link (no login, end-to-end encrypted) | Yes | Yes | Yes |
-| [Local Folder](#local-folder-or-nas) | Files on the HA host / NAS | Yes | Yes | Yes |
-| [Media Source](#media-source) | Any HA media source with no API (local media, Jellyfin, ...) | No | No | No |
+| Provider | Best for | Date filter / ordering | Location | Description caption | Videos |
+|----------|----------|:---:|:---:|:---:|:---:|
+| [Google Photos](#google-photos) | A shared album link | Yes | Separate opt-in | Optional enrichment | No |
+| [Immich](#immich) | An Immich server (album, person, favorites, all, search) | Yes | Yes | Yes | [Optional](#immich-videos) |
+| [PhotoPrism](#photoprism) | A PhotoPrism server (album, person, favorites, all, search) | Yes | Yes | Yes | No |
+| [iCloud](#icloud-shared-album) | An iCloud Shared Album public link | Yes | No | Yes | No |
+| [Synology](#synology-photos) | A Synology Photos library (favorites, albums, people, places, tags, subjects) | Yes | Yes | Yes | No |
+| [UGREEN](#ugreen-nas-ugos-photos) | A UGREEN NAS running UGOS Photos (experimental) | Yes | Yes | No | No |
+| [Nextcloud (folder)](#authenticated-webdav-folder) | Any folder in your Nextcloud files (WebDAV, app password) | Yes | Yes | Yes | No |
+| [Nextcloud (public link)](#public-album-link) | A public Nextcloud Photos album share link (no login) | Yes | Yes | Yes | No |
+| [Ente Photos](#ente-photos) | A public Ente album link (no login, end-to-end encrypted) | Yes | Yes | Yes | No |
+| [Local Folder](#local-folder-or-nas) | Files on the HA host / NAS | Yes | Yes | Yes | No |
+| [Media Source](#media-source) | Any HA media source with no API (local media, Jellyfin, ...) | No | No | No | No |
 
 > Media Source and Google's resized display images do not provide EXIF for
 > this integration to read. Google descriptions and camera fields can be
@@ -120,6 +120,7 @@ Immich server, prefer this over the Media Source route.
 2. Add the integration and choose **Immich (direct API, full metadata)**.
 3. Enter your Immich URL (e.g. `http://192.168.1.10:2283`) and the API key.
 4. Give it a name, tick what you want to show, and choose the image quality.
+   Turn on **Include videos** to [play videos](#immich-videos) too.
 
 ### Choosing What to Show
 
@@ -141,7 +142,8 @@ everything empty to show your whole library (all photos).**
 **Advanced:** you can also add an Immich search filter (JSON) to fold its results
 into the same slideshow. It is passed to
 Immich's [`search/metadata`](https://api.immich.app/endpoints/search/searchAssets)
-endpoint (with `type` forced to images). Examples:
+endpoint (with `type` forced to images, unless videos are included; then a
+`"type": "VIDEO"` or `"type": "IMAGE"` in your filter is respected). Examples:
 
 ```json
 { "city": "Paris", "isFavorite": true }
@@ -169,12 +171,43 @@ If the stored connection fails, the flow first asks for a working URL and key.
 - **Full size** - the large rendered version.
 - **Original** - the untouched original file (largest, slowest).
 
+<a id="immich-videos"></a>
+### Videos
+
+Videos are off by default. Turn on **Include videos** when adding the source
+or later under **Configure**.
+
+- The [Album Slideshow card](card-guide.md) plays each video over a still
+  poster frame. Anything else that shows the camera (the more-info
+  dialog, picture cards, casting) shows only the poster.
+- A video slide stays up for the length of the clip. Clips shorter than 5
+  seconds loop until 5 seconds have passed. Longer clips are cut off at the
+  **Max video length** setting (default 60 seconds), which is created only
+  for Immich slideshows.
+- Videos are never paired with another photo.
+- Home Assistant streams the video from Immich's playback endpoint, so the
+  API key stays on the server. Immich serves its transcoded version when its
+  video transcoding settings require one, which is what lets iPhone HEVC
+  clips play in most browsers.
+  Each screen streams through Home Assistant, so expect more network traffic
+  than photos.
+- If a clip can't load, or the browser blocks autoplay, the poster stays up
+  and the slideshow carries on.
+- Videos play muted unless the card's `video_audio` option turns sound on;
+  see the [Card Guide](card-guide.md#full-options).
+
+**Live Photos.** Turn on **Play Live Photo motion** (also off by default) to
+play an iPhone Live Photo's motion clip over its still. A Live Photo stays a
+photo: it uses the normal slide interval and can be paired. On its own, its
+motion plays once and then fades back to the still; when paired, only the
+stills show. Live Photo motion clips are never shown as separate videos.
+
 ### Notes
 
 - The API key is sent **only as a server-side request header**, so it never
   appears in the camera's `current_url` attribute or reaches the browser. Home
-  Assistant fetches and re-serves the images; your Immich server is never
-  exposed to the dashboard client.
+  Assistant fetches and re-serves the images (and streams videos); your Immich
+  server is never exposed to the dashboard client.
 - Capture dates come from the asset list up front, so date filters and date
   ordering work immediately. Location and description are filled in by a
   background pass, so they appear
@@ -229,7 +262,7 @@ marker but do not gain face recognition.
 ### Immich Limits
 
 - Requires an Immich server reachable from Home Assistant and an API key
-- Videos are skipped
+- Videos are skipped unless **Include videos** is on, and they play only in the Album Slideshow card
 - Home Assistant fetches and re-serves images, so the Immich server does not need to be reachable from the dashboard client (and the API key never leaves the server)
 - Location and description are read per photo in the background, so they appear shortly after the first load
 

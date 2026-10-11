@@ -27,6 +27,7 @@ custom_components/album_slideshow/
 ├── select.py          # Select entities (fill mode, orientation, order, aspect ratio)
 ├── sensor.py          # Sensor entities (photo count, album title)
 ├── store.py           # Runtime settings and persisted photo exclusions
+├── video.py           # Video slides: playback timing and the streaming proxy view
 ├── services.yaml      # Service definitions
 ├── strings.json       # UI strings
 ├── translations/      # Localisation files

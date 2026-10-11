@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN, MAX_CUSTOM_LOOKBACK_DAYS
+from .const import DOMAIN, MAX_CUSTOM_LOOKBACK_DAYS, MAX_VIDEO_MAX_SECONDS, PROVIDER_IMMICH
 from .coordinator import AlbumCoordinator
 from .store import SlideshowStore
 
@@ -15,18 +15,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     store: SlideshowStore = hass.data[DOMAIN][entry.entry_id]["store"]
     coordinator: AlbumCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
 
-    async_add_entities(
-        [
-            SlideIntervalNumber(entry, store),
-            RefreshHoursNumber(entry, store, coordinator),
-            PairDividerWidthNumber(entry, store),
-            PairMinGapPercentNumber(entry, store),
-            NavigationBufferSizeNumber(entry, store),
-            ImageCacheMbNumber(entry, store),
-            CustomLookbackDaysNumber(entry, store),
-            ShuffleAgeBiasNumber(entry, store),
-        ]
-    )
+    entities = [
+        SlideIntervalNumber(entry, store),
+        RefreshHoursNumber(entry, store, coordinator),
+        PairDividerWidthNumber(entry, store),
+        PairMinGapPercentNumber(entry, store),
+        NavigationBufferSizeNumber(entry, store),
+        ImageCacheMbNumber(entry, store),
+        CustomLookbackDaysNumber(entry, store),
+        ShuffleAgeBiasNumber(entry, store),
+    ]
+    # Only providers that can surface videos get the video-length setting.
+    if getattr(coordinator, "provider", None) == PROVIDER_IMMICH:
+        entities.append(VideoMaxSecondsNumber(entry, store))
+    async_add_entities(entities)
 
 
 class _BaseNumber(NumberEntity, RestoreEntity):
@@ -99,6 +101,36 @@ class ShuffleAgeBiasNumber(_BaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         self.store.shuffle_age_bias = max(-100, min(100, int(value)))
+        self.store.notify()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        old = await self.async_get_last_state()
+        if old and old.state not in (None, "unknown", "unavailable"):
+            try:
+                await self.async_set_native_value(float(old.state))
+            except (TypeError, ValueError, OverflowError):
+                return
+
+
+class VideoMaxSecondsNumber(_BaseNumber):
+    _attr_icon = "mdi:video-outline"
+    _attr_native_min_value = 5
+    _attr_native_max_value = MAX_VIDEO_MAX_SECONDS
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "s"
+
+    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
+        super().__init__(entry, store)
+        self._attr_unique_id = f"{entry.entry_id}_video_max_seconds"
+        self._attr_name = "Max video length"
+
+    @property
+    def native_value(self):
+        return int(self.store.video_max_seconds)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.store.video_max_seconds = max(5, min(MAX_VIDEO_MAX_SECONDS, int(value)))
         self.store.notify()
 
     async def async_added_to_hass(self) -> None:

@@ -23,6 +23,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Navigation buffer | 2 | 0-10 (slides) | Fully rendered slides cached before and after the current frame for immediate Previous/Next navigation. Pausing, interval changes and background metadata scans keep the cache; display and filter settings clear it |
 | Number | Image cache size | 75 | 50-1000 (MB) | Memory budget for downloaded image data (per album) |
 | Number | Custom lookback days | 365 | 1-36500 days | Rolling capture-date window, used only when Date filter is Custom days |
+| Number | Max video length | 60 | 5-3600 (seconds) | Immich only. Longest time a [video slide](provider-setup.md#immich-videos) stays up; shorter clips play once |
 | Number | Shuffle age bias | 0 | -100 to 100 | Negative favors older photos; positive favors newer photos; 0 preserves the original shuffle. Used only in Random order |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
@@ -159,12 +160,13 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `media_count_total` | int | Total photos available before filtering |
 | `current_index` | int | Index of the current slide |
 | `current_filename` | string \| null | Source filename when known |
+| `current_path` | string \| null | The file's path on the source server (Immich only) |
 | `current_url` | string \| null | URL of the current slide. For Ente this is an internal `ente://<id>` reference, since the image is decrypted locally rather than fetched from a URL |
 | `current_is_portrait` | bool \| null | Orientation of the current slide |
 | `captured_at` | string \| list \| null | ISO-8601 capture date. List of `[primary, partner]` when paired (top/left first). For local files this is read from EXIF (or the file's mtime as a fallback). |
 | `captured_at_primary` | string \| null | Capture date of the primary image only |
 | `uploaded_at` | string \| null | ISO-8601 date when added to the album (Google Photos only) |
-| `byte_size` | int \| null | Original file size in bytes (Google Photos only) |
+| `byte_size` | int \| null | Original file size in bytes (Google Photos, and Immich once a photo's details have been read) |
 | `latitude` | float \| null | GPS latitude when supplied by the provider; Google requires the separate original-GPS opt-in |
 | `longitude` | float \| null | GPS longitude when supplied by the provider; Google requires the separate original-GPS opt-in |
 | `location` | string \| null | Place name from the photo source, or the OpenStreetMap label (e.g. `"Lisbon, Portugal"`, or `"Lisbon"` when the album hides your home country). Empty when reverse-geocoding is disabled or has not yet completed for this file. |
@@ -177,7 +179,15 @@ The slideshow camera exposes per-frame metadata as attributes (use with `state_a
 | `google_metadata_enabled` | bool | Whether optional Google photo metadata fetching is enabled for this slideshow |
 | `google_location_enabled` | bool | Whether the separate original-photo GPS opt-in is enabled; defaults to false |
 | `google_reverse_geocode_enabled` | bool | Whether both Google GPS reading and external place-name lookup are enabled; defaults to false |
-| `caption_frames` | list | Structured per-image metadata: one entry for a normal slide, two (top/left first) for a pair. Each entry has `captured_at`, `location`, `latitude`, `longitude`, `description`, and the camera/exposure fields above. The card can display these in captions. |
+| `caption_frames` | list | Structured per-image metadata: one entry for a normal slide, two (top/left first) for a pair. Each entry has `captured_at`, `location`, `latitude`, `longitude`, `description`, `filename`, `path`, the camera/exposure fields above, and for a video slide the `video_*` stream fields below. The card can display these in captions. |
+| `media_kind` | string | `video` when the current slide is a video (the camera image is then its poster frame), `live_photo` for a Live Photo with motion, otherwise `image` |
+| `video_url` | string \| null | Signed Home Assistant URL that streams the current video or Live Photo motion, for the card's player. `null` for photos |
+| `video_duration` | number \| null | Length of the current video in seconds, when known |
+| `video_hold_seconds` | number \| null | How long the current video slide stays up |
+| `video_version` | string \| null | `transcoded` when Immich serves its transcoded copy, `original` when it serves the original file, `null` when unknown or for photos |
+| `video_bitrate_mbps` | number \| null | Average bitrate of the stream being served |
+| `video_size_bytes` | int \| null | Size of the stream being served |
+| `video_content_type` | string \| null | Content type of the stream, such as `video/mp4` |
 | `pair_orientation` | string \| null | How a paired slide is split: `horizontal` (left/right) or `vertical` (top/bottom). `null` for single slides. |
 | `paused` | bool | Whether the slideshow is paused |
 | `date_filter` | string | Active date filter mode |

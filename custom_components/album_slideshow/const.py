@@ -58,6 +58,13 @@ IMMICH_IMAGE_SIZE_OPTIONS = [
     IMMICH_IMAGE_ORIGINAL,
 ]
 DEFAULT_IMMICH_IMAGE_SIZE = IMMICH_IMAGE_PREVIEW
+# Immich option: include video assets. The camera still renders a poster
+# frame for each video; the dashboard card plays the clip on top of it.
+CONF_IMMICH_INCLUDE_VIDEOS = "immich_include_videos"
+DEFAULT_IMMICH_INCLUDE_VIDEOS = False
+# Immich option: play a Live Photo's motion clip over its still.
+CONF_IMMICH_LIVE_PHOTOS = "immich_live_photos"
+DEFAULT_IMMICH_LIVE_PHOTOS = False
 # Local-folder option: when True (default) the coordinator does best-effort
 # reverse geocoding of EXIF GPS coordinates via the public Nominatim
 # (OpenStreetMap) endpoint and exposes a human-readable ``location``
@@ -351,6 +358,12 @@ DEFAULT_IMAGE_CACHE_MB = 75
 # Previous/Next can swap these JPEGs immediately without downloading,
 # composing, or encoding during the button press.
 DEFAULT_NAVIGATION_BUFFER_SIZE = 2
+# A video slide stays up for the clip's length, capped by this setting.
+# Very short clips are held (and looped by the card) for the minimum so a
+# one-second clip doesn't flash past.
+DEFAULT_VIDEO_MAX_SECONDS = 60
+MAX_VIDEO_MAX_SECONDS = 3600
+MIN_VIDEO_HOLD_SECONDS = 5
 
 MAX_RESOLUTION_OPTIONS = ["480p", "720p", "1080p", "1440p", "4K (2160p)", "original"]
 DEFAULT_MAX_RESOLUTION = "1080p"

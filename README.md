@@ -32,6 +32,7 @@ Assistant entities.
 - Browser-side transitions and date, location, or description captions when the source provides them.
 - Clock, date, and weather captions, with optional colored weather icons.
 - Random or album order, capture/upload date ordering, and date filters including **On this day**.
+- Optional Immich video and Live Photo playback in the dashboard card, with sound.
 
 <a id="-image-sources"></a><a id="️-setup-guide"></a>
 ## Supported Sources

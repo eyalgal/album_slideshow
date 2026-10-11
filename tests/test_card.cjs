@@ -1576,3 +1576,286 @@ test("tile-style content picker reorder persists only the targeted caption", () 
   }
   assert.equal(saved.length, 1);
 });
+function videoCardFixture(config = {}) {
+  const requests = [];
+  const elements = new Map();
+  const makeElement = () => {
+    const classes = new Set();
+    return {
+      src: "",
+      classes,
+      classList: {
+        add: (...names) => names.forEach(name => classes.add(name)),
+        remove: (...names) => names.forEach(name => classes.delete(name)),
+        toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)),
+      },
+      removeAttribute(name) { if (name === "src") this.src = ""; },
+      replaceChildren() {},
+      appendChild(element) { elements.set(element.id, element); },
+      remove() { elements.delete(this.id); },
+    };
+  };
+  for (const id of ["a", "b", "blur-a", "blur-b", "captions", "stage"]) {
+    elements.set(id, makeElement());
+  }
+  const video = Object.assign(makeElement(), {
+    paused: true,
+    plays: 0,
+    playResults: [],
+    getAttribute(name) { return name === "src" ? this.src || null : null; },
+    play() {
+      this.plays += 1;
+      const result = this.playResults.shift();
+      if (result) return result;
+      this.paused = false;
+      return Promise.resolve();
+    },
+    pause() { this.paused = true; },
+    load() {},
+  });
+  elements.set("video", video);
+  const icon = { icon: "", setAttribute(name, value) { this[name] = value; } };
+  const sound = Object.assign(makeElement(), {
+    hidden: true,
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    querySelector: () => icon,
+    icon,
+  });
+  elements.set("sound", sound);
+  context.document = { createElement: makeElement };
+  context.Image = class { constructor() { requests.push(this); } };
+  const card = Object.create(Card.prototype);
+  card._config = { entity: "camera.test", fit: "auto", transition: "none", duration: 0, videos: true, video_audio: "off", ...config };
+  card.shadowRoot = { getElementById: id => elements.get(id) };
+  card._loadGeneration = 0;
+  card._showing = "a";
+  card._holdSwapsUntil = 0;
+  card._displayedPhotoIds = [];
+  const attributes = {
+    entry_id: "test",
+    frame_id: 1,
+    hidden_revision: 0,
+    fill_mode: "blur",
+    displayed_photo_ids: ["clip"],
+    entity_picture: "/camera.jpg?frame=1",
+    media_kind: "video",
+    video_url: "/api/album_slideshow/video/test/clip?authSig=x",
+  };
+  card._hass = { states: { "camera.test": { attributes } } };
+  const show = frameId => {
+    attributes.frame_id = frameId;
+    attributes.entity_picture = `/camera.jpg?frame=${frameId}`;
+    card._maybeSwap();
+    requests.at(-1).onload();
+  };
+  return { card, attributes, video, sound, show };
+}
+
+test("a video slide plays over its poster once the poster has loaded", () => {
+  const { attributes, video, show } = videoCardFixture();
+  show(1);
+  assert.equal(video.src, attributes.video_url);
+  assert.equal(video.muted, true);
+  assert.equal(video.loop, true);
+  assert.equal(video.plays, 1);
+  assert.ok(video.classes.has("fit-contain"));
+  // Revealed only once frames are actually playing, so a slow or failing
+  // clip leaves the poster visible.
+  assert.ok(!video.classes.has("show"));
+  video.onplaying();
+  assert.ok(video.classes.has("show"));
+});
+
+test("the next photo stops the clip and drops its source", () => {
+  const { attributes, video, show } = videoCardFixture();
+  show(1);
+  video.onplaying();
+  Object.assign(attributes, { media_kind: "image", video_url: null, displayed_photo_ids: ["photo"] });
+  show(2);
+  assert.equal(video.src, "");
+  assert.equal(video.paused, true);
+  assert.ok(!video.classes.has("show"));
+});
+
+test("a stale clip cannot reveal itself after the slide changed", () => {
+  const { card, video, show } = videoCardFixture();
+  show(1);
+  const stalePlaying = video.onplaying;
+  card._loadGeneration += 1;
+  stalePlaying();
+  assert.ok(!video.classes.has("show"));
+});
+
+test("videos follow the slideshow pause switch", () => {
+  const { attributes, card, video, show } = videoCardFixture();
+  attributes.paused = true;
+  show(1);
+  assert.equal(video.plays, 0);
+  video.onloadeddata();
+  assert.ok(video.classes.has("show"));
+  attributes.paused = false;
+  card._maybeSwap();
+  assert.equal(video.plays, 1);
+  // Unrelated state updates don't re-trigger playback.
+  card._maybeSwap();
+  assert.equal(video.plays, 1);
+  attributes.paused = true;
+  card._maybeSwap();
+  assert.equal(video.paused, true);
+});
+
+test("cards with videos turned off show only the poster", () => {
+  const { video, show } = videoCardFixture({ videos: false });
+  show(1);
+  assert.equal(video.src, "");
+  assert.equal(video.plays, 0);
+});
+
+test("the visual editor round-trips the video setting", () => {
+  context.CustomEvent = class {
+    constructor(type, options) { this.type = type; this.detail = options.detail; }
+  };
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", videos: false });
+  const appearance = editor._schema().find(section => section.title === "Appearance");
+  assert.ok(appearance.schema.find(field => field.name === "videos"));
+  assert.equal(editor._data().videos, false);
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._valueChanged({ stopPropagation() {}, detail: { value: editor._data() } });
+  assert.equal(saved.videos, false);
+  editor._valueChanged({ stopPropagation() {}, detail: { value: { ...editor._data(), videos: true } } });
+  assert.equal(saved.videos, undefined);
+});
+
+test("re-rendering the same clip lets it play on", () => {
+  const { attributes, video, show } = videoCardFixture();
+  show(1);
+  video.onplaying();
+  // A metadata refresh re-renders the slide; the server keeps the URL.
+  show(2);
+  assert.equal(video.src, attributes.video_url);
+  assert.equal(video.plays, 1);
+  assert.ok(video.classes.has("show"));
+});
+
+test("a re-render before the clip starts still reveals it", () => {
+  const { video, show } = videoCardFixture();
+  show(1);
+  show(2);
+  video.onplaying();
+  assert.ok(video.classes.has("show"));
+});
+
+test("captions can show the file name, path, and video version", () => {
+  const card = Object.create(Card.prototype);
+  card._hass = { locale: { language: "en" } };
+  const lines = card._captionLines(
+    { filename: "IMG_1.MOV", path: "/library/2024/IMG_1.MOV", video_version: "transcoded", video_bitrate_mbps: 3.14 },
+    { show: ["filename", "path", "video_version"] },
+  );
+  assert.equal(JSON.stringify(lines), '["IMG_1.MOV","/library/2024/IMG_1.MOV","Transcoded video · 3.1 Mbps"]');
+  // Photos have no video version, and missing values leave no empty line.
+  assert.equal(card._captionLines({ filename: " " }, { show: ["filename", "path", "video_version"] }).length, 0);
+  assert.equal(card._videoVersionCaption({ video_version: "original" }), "Original video");
+  assert.equal(card._videoVersionCaption({ video_bitrate_mbps: 12 }), "Video · 12 Mbps");
+});
+
+test("a Live Photo's motion plays once, then fades back to the still", () => {
+  const { attributes, video, show } = videoCardFixture();
+  attributes.media_kind = "live_photo";
+  show(1);
+  assert.equal(video.src, attributes.video_url);
+  assert.equal(video.loop, false);
+  video.onplaying();
+  assert.ok(video.classes.has("show"));
+  video.onended();
+  assert.ok(!video.classes.has("show"));
+});
+
+test("without the sound option videos stay muted and show no speaker button", () => {
+  const { video, sound, show } = videoCardFixture();
+  show(1);
+  assert.equal(video.muted, true);
+  assert.equal(sound.hidden, true);
+});
+
+test("video sound plays unmuted when the browser allows it", () => {
+  const { video, sound, show } = videoCardFixture({ video_audio: "on" });
+  show(1);
+  assert.equal(video.muted, false);
+  assert.equal(sound.hidden, false);
+  assert.equal(sound.icon.icon, "mdi:volume-high");
+});
+
+test("blocked sound falls back to muted playback and the button unmutes", async () => {
+  const { card, video, sound, show } = videoCardFixture({ video_audio: "on" });
+  const blocked = Object.assign(new Error("blocked"), { name: "NotAllowedError" });
+  video.playResults.push(Promise.reject(blocked));
+  show(1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(video.muted, true);
+  assert.equal(video.plays, 2);
+  assert.equal(sound.icon.icon, "mdi:volume-off");
+  assert.equal(sound.attributes["aria-label"], "Unmute video");
+  card._toggleVideoSound();
+  assert.equal(video.muted, false);
+  assert.equal(sound.icon.icon, "mdi:volume-high");
+  // Muting by hand sticks for the following videos.
+  card._toggleVideoSound();
+  show(2);
+  assert.equal(card._wantsVideoSound(), false);
+});
+
+test("the video length caption reads like a clock", () => {
+  const card = Object.create(Card.prototype);
+  card._hass = { locale: { language: "en" } };
+  const lines = (frame) => card._captionLines(frame, { show: ["video_duration"] });
+  assert.equal(JSON.stringify(lines({ video_duration: 110.1 })), '["1:50"]');
+  assert.equal(JSON.stringify(lines({ video_duration: 3723 })), '["1:02:03"]');
+  assert.equal(lines({ video_duration: null }).length, 0);
+});
+
+test("muted mode starts silent and the speaker button turns sound on", () => {
+  const { card, attributes, video, sound, show } = videoCardFixture({ video_audio: "muted" });
+  show(1);
+  assert.equal(video.muted, true);
+  assert.equal(sound.hidden, false);
+  assert.equal(sound.icon.icon, "mdi:volume-off");
+  card._toggleVideoSound();
+  assert.equal(video.muted, false);
+  // The choice carries over to the next video until the page reloads.
+  attributes.video_url = "/api/album_slideshow/video/test/next?authSig=y";
+  attributes.displayed_photo_ids = ["next"];
+  show(2);
+  assert.equal(video.src, attributes.video_url);
+  assert.equal(video.muted, false);
+});
+
+test("video sound accepts the earlier true/false values", () => {
+  for (const [value, expected] of [[undefined, "off"], [false, "off"], [true, "on"], ["muted", "muted"]]) {
+    const card = Object.create(Card.prototype);
+    card.setConfig({ entity: "camera.test", video_audio: value });
+    assert.equal(card._config.video_audio, expected);
+  }
+  const card = Object.create(Card.prototype);
+  assert.throws(() => card.setConfig({ entity: "camera.test", video_audio: "loud" }), /unknown video_audio mode/);
+});
+
+test("the visual editor round-trips the video sound setting", () => {
+  context.CustomEvent = class {
+    constructor(type, options) { this.type = type; this.detail = options.detail; }
+  };
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor.setConfig({ entity: "camera.test", video_audio: true });
+  assert.equal(editor._data().video_audio, "on");
+  let saved;
+  editor.dispatchEvent = event => { saved = event.detail.config; };
+  editor._valueChanged({ stopPropagation() {}, detail: { value: { ...editor._data(), video_audio: "muted" } } });
+  assert.equal(saved.video_audio, "muted");
+  editor._valueChanged({ stopPropagation() {}, detail: { value: { ...editor._data(), video_audio: "off" } } });
+  assert.equal(saved.video_audio, undefined);
+});
