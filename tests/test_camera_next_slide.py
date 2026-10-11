@@ -793,7 +793,7 @@ def _history_cam(names="abcd"):
 def test_every_store_setting_is_classified_for_history():
     keeps_history = {
         "slide_interval", "refresh_hours", "image_cache_mb", "navigation_buffer_size",
-        "paused", "last_frame", "hidden_photo_ids", "last_hidden_photo_ids",
+        "video_max_seconds", "paused", "last_frame", "hidden_photo_ids", "last_hidden_photo_ids",
         "_hidden_storage", "_hidden_lock", "_listeners",
     }
     names = {field.name for field in dataclasses.fields(SlideshowStore)}

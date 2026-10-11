@@ -36,6 +36,7 @@ from .const import (
 )
 from . import image_processing as ip
 from . import playlist
+from . import video
 from .coordinator import AlbumCoordinator, MediaItem
 from .store import SlideshowStore
 
@@ -161,7 +162,32 @@ def _caption_frame(item: MediaItem | None) -> dict[str, Any]:
         "longitude": getattr(item, "longitude", None),
         "description": getattr(item, "description", None),
         **_camera_metadata_attributes(item),
+        **_file_attributes(item),
     }
+
+
+def _file_attributes(item: MediaItem | None) -> dict[str, Any]:
+    return {
+        "filename": getattr(item, "filename", None),
+        "path": getattr(item, "source_path", None),
+    }
+
+
+# Describe the stream a video slide is served as (see
+# ``AlbumCoordinator.async_video_info``); ``None`` for photos.
+VIDEO_INFO_FIELDS = (
+    "video_version", "video_bitrate_mbps", "video_size_bytes", "video_content_type",
+)
+
+
+def _is_video(item: Any) -> bool:
+    """A video slide (played alone). Live Photos are photos with motion."""
+    return bool(getattr(item, "video_url", None)) and not getattr(item, "live_photo", False)
+
+
+def _has_motion(item: Any) -> bool:
+    """A video, or a Live Photo whose motion clip can play over its still."""
+    return bool(getattr(item, "video_url", None))
 
 
 def _item_faces(item: MediaItem | None) -> tuple[ip.FaceBox, ...] | None:
@@ -272,6 +298,10 @@ class AlbumSlideshowCamera(Camera):
         # ``horizontal`` (side-by-side, left/right) or ``vertical`` (stacked,
         # top/bottom) for a paired frame; None for single frames.
         self._last_pair_orientation: str | None = None
+        # ``{"photo_id", "duration_ms"}`` when the current slide is a video
+        # (always unpaired); ``_video_url`` is its signed proxy URL.
+        self._last_video: dict | None = None
+        self._video_url: str | None = None
         # Cached effective playlist (after date filter + ordering). Invalidated
         # by any store change or coordinator update.
         self._effective_cache: tuple[int, list[MediaItem]] | None = None
@@ -425,6 +455,7 @@ class AlbumSlideshowCamera(Camera):
             "media_count_total": len(data.get("items", []) or []),
             "current_index": self._index,
             "current_filename": getattr(cur, "filename", None),
+            "current_path": getattr(cur, "source_path", None),
             "current_url": getattr(cur, "url", None),
             "current_is_portrait": self._last_is_portrait,
             "captured_at": captured_at_pair if captured_at_pair else captured_at,
@@ -445,6 +476,17 @@ class AlbumSlideshowCamera(Camera):
             # ``pair_orientation`` tells the card how the two halves are laid
             # out: ``horizontal`` (left/right) or ``vertical`` (top/bottom).
             "caption_frames": caption_frames,
+            # Video slides: the camera image is the poster frame; the card
+            # plays ``video_url`` over it for ``video_hold_seconds``.
+            "media_kind": (
+                ("live_photo" if self._last_video.get("live") else "video")
+                if self._last_video else "image"
+            ),
+            "video_url": self._video_url if self._last_video else None,
+            "video_hold_seconds": (
+                self._slide_hold_seconds() if self._last_video else None
+            ),
+            **self._video_info_attributes(),
             "pair_orientation": self._last_pair_orientation,
             "slide_interval": int(self.store.slide_interval),
             "fill_mode": self.store.fill_mode,
@@ -489,7 +531,7 @@ class AlbumSlideshowCamera(Camera):
         the slide was rendered still shows.
         """
         if not self._last_pair_frames:
-            return [_caption_frame(cur)]
+            return [{**_caption_frame(cur), **self._video_info_attributes()}]
         photo_ids = self._current_frame.meta.get("photo_ids", []) if self._current_frame else []
         if len(photo_ids) != len(self._last_pair_frames):
             return self._last_pair_frames
@@ -762,6 +804,8 @@ class AlbumSlideshowCamera(Camera):
         self._last_is_portrait = None
         self._last_pair_frames = None
         self._last_pair_orientation = None
+        self._last_video = None
+        self._video_url = None
 
         def blank_frame():
             with Image.new("RGB", (16, 9), "black") as image:
@@ -874,9 +918,20 @@ class AlbumSlideshowCamera(Camera):
             try:
                 composed, meta = await renderer._compose_for_index(items)
                 meta = dict(meta or {})
-                meta.setdefault("photo_ids", [getattr(items[renderer._index], "photo_id", None)])
+                shown = items[renderer._index]
+                meta.setdefault("photo_ids", [getattr(shown, "photo_id", None)])
                 # Faces used for the crop, so later face data can be detected.
-                meta.setdefault("faces", (_item_faces(items[renderer._index]),))
+                meta.setdefault("faces", (_item_faces(shown),))
+                # A paired Live Photo shows only its still.
+                if _has_motion(shown) and len(meta["photo_ids"]) == 1 and shown.photo_id:
+                    if _is_video(shown):
+                        meta["video"] = {
+                            "photo_id": shown.photo_id,
+                            "duration_ms": shown.duration_ms,
+                            **await self._video_info(shown),
+                        }
+                    else:
+                        meta["video"] = {"photo_id": shown.photo_id, "live": True}
                 cursor = self._capture_cursor(renderer)
                 if composed is None:
                     raise RuntimeError("Image composition returned no frame")
@@ -902,6 +957,7 @@ class AlbumSlideshowCamera(Camera):
 
     def _apply_frame(self, frame: _RenderedFrame) -> None:
         """Make a rendered frame current and publish it to Home Assistant."""
+        previous_frame = getattr(self, "_current_frame", None)
         self._current_frame = frame
         self._framebuffer = frame.data
         self.store.last_frame = frame.data
@@ -915,19 +971,41 @@ class AlbumSlideshowCamera(Camera):
         self._last_is_portrait = meta.get("is_portrait")
         self._last_pair_frames = meta.get("pair_frames")
         self._last_pair_orientation = meta.get("pair_orientation")
+        previous_video = getattr(self, "_last_video", None)
+        self._last_video = meta.get("video")
+        if not self._last_video:
+            self._video_url = None
+        elif not (
+            previous_video
+            and previous_video.get("photo_id") == self._last_video["photo_id"]
+            and getattr(self, "_video_url", None)
+        ):
+            # Re-rendering the same clip (metadata refreshes do this) keeps its
+            # URL, so the card lets it play on instead of restarting it.
+            self._video_url = video.sign_video_path(
+                self.hass, video.video_path(self.entry.entry_id, self._last_video["photo_id"])
+            )
         self._frame_id += 1
         self._frame_serials[self._frame_id] = frame.serial
         while len(self._frame_serials) > _FRAME_ID_MEMORY:
             del self._frame_serials[next(iter(self._frame_serials))]
+        if previous_frame is None or previous_frame.meta.get("photo_ids") != meta.get("photo_ids"):
+            # A different slide is up: restart the clock with its own hold
+            # (a video's length), whichever path put it here. Re-renders and
+            # exclusion rebuilds can swap the slide without going through the
+            # timer; a re-render of the same slide keeps the running clock.
+            self._slide_deadline = None
+            self._interrupt_event.set()
 
         _LOGGER.debug(
             "Album Slideshow %s: displayed buffered frame_id=%d index=%d "
-            "previous=%d next=%d",
+            "previous=%d next=%d hold=%.1fs",
             self.entry.title,
             self._frame_id,
             self._index,
             len(self._previous_frames),
             len(self._next_frames),
+            self._slide_hold_seconds(),
         )
         self.async_write_ha_state()
 
@@ -1248,7 +1326,7 @@ class AlbumSlideshowCamera(Camera):
         while True:
             try:
                 if self._slide_deadline is None:
-                    self._slide_deadline = loop.time() + float(int(self.store.slide_interval))
+                    self._slide_deadline = loop.time() + self._slide_hold_seconds()
                 if self._timeline_dirty:
                     async with self._navigation_lock:
                         if self._timeline_dirty:
@@ -1266,7 +1344,7 @@ class AlbumSlideshowCamera(Camera):
                             and loop.time() >= self._slide_deadline
                         ):
                             await self._show_next_frame()
-                            self._slide_deadline = loop.time() + float(int(self.store.slide_interval))
+                            self._slide_deadline = loop.time() + self._slide_hold_seconds()
                 self._consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
@@ -1278,6 +1356,40 @@ class AlbumSlideshowCamera(Camera):
                     self._consecutive_failures,
                     err,
                 )
+
+    async def _video_info(self, item: MediaItem) -> dict[str, Any]:
+        """Which stream a video is served as; empty when it can't be told."""
+        fetch = getattr(self.coordinator, "async_video_info", None)
+        if fetch is None:
+            return {}
+        try:
+            info = await fetch(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - a caption must not cost the slide
+            _LOGGER.debug("Album Slideshow: could not describe video %s: %s", item.filename, err)
+            return {}
+        return {field: info.get(field) for field in VIDEO_INFO_FIELDS if field in info}
+
+    def _video_info_attributes(self) -> dict[str, Any]:
+        video_meta = getattr(self, "_last_video", None) or {}
+        duration_ms = video_meta.get("duration_ms")
+        return {
+            "video_duration": duration_ms / 1000 if duration_ms else None,
+            **{field: video_meta.get(field) for field in VIDEO_INFO_FIELDS},
+        }
+
+    def _slide_hold_seconds(self) -> float:
+        """Seconds the current slide stays up: the interval, or the clip's length."""
+        interval = int(self.store.slide_interval)
+        if not self._last_video or self._last_video.get("live"):
+            # Photos, including Live Photos, keep the slide interval.
+            return float(interval)
+        return video.video_hold_seconds(
+            self._last_video.get("duration_ms"),
+            int(getattr(self.store, "video_max_seconds", interval)),
+            interval,
+        )
 
     @property
     def _compose_semaphore(self) -> asyncio.Semaphore:
@@ -1388,7 +1500,12 @@ class AlbumSlideshowCamera(Camera):
                 img = None
                 return await self._compose_skip_mismatch(items, width, height, fill_mode, is_portrait_canvas)
 
-            if orientation_mismatch and portrait_mode == ORIENTATION_MISMATCH_PAIR:
+            # A video plays alone, so it is never split into a pair.
+            if (
+                orientation_mismatch
+                and portrait_mode == ORIENTATION_MISMATCH_PAIR
+                and not _is_video(cur)
+            ):
                 pair = await self._find_next_mismatch_image(
                     items, is_portrait_canvas, width, height, limit=_PAIR_SEARCH_LIMIT
                 )
@@ -1592,7 +1709,7 @@ class AlbumSlideshowCamera(Camera):
             it = items[idx]
             tries += 1
 
-            if it.url in self._recent_urls:
+            if it.url in self._recent_urls or _is_video(it):
                 continue
 
             meta_portrait = ip.is_portrait_item_by_metadata(it)

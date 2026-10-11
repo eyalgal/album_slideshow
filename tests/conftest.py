@@ -39,6 +39,10 @@ _make_stub(
 import homeassistant.components.camera as _cam
 _cam.Camera = object  # type: ignore[attr-defined]
 
+_make_stub("homeassistant.components.http")
+import homeassistant.components.http as _http
+_http.HomeAssistantView = object  # type: ignore[attr-defined]
+
 import homeassistant.helpers.entity_platform as _ep
 _ep.AddEntitiesCallback = object  # type: ignore[attr-defined]
 

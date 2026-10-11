@@ -456,6 +456,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # itself never has to render a transition burst on the event loop.
     await _async_register_card(hass)
 
+    # Streams video slides to the card (provider credentials stay server-side).
+    try:
+        from .video import async_register_video_view
+
+        async_register_video_view(hass)
+    except Exception:  # noqa: BLE001 - stills keep working without it
+        _LOGGER.exception("Failed to register Album Slideshow video view")
+
     await _async_cleanup_legacy_entities(hass, entry)
 
     store = SlideshowStore()

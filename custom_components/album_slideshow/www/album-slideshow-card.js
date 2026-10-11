@@ -24,6 +24,13 @@
  *   background: ''          # CSS color shown behind contained images.
  *                           # Empty inherits theme card background.
  *   tap_action: none        # none | more-info
+ *   videos: true            # play video slides (muted, looping) and
+ *                           # Live Photo motion over the camera's still;
+ *                           # false shows only the still.
+ *   video_audio: off        # off | muted | on. ``muted`` starts videos
+ *                           # muted with a speaker button to unmute;
+ *                           # ``on`` plays with sound when the browser
+ *                           # allows it, falling back to that button.
  */
 
 const VERSION = "1.15.0";
@@ -52,6 +59,20 @@ const PHOTO_CONTROL_OPTIONS = [
   { value: "always", label: "Always" },
 ];
 
+const VIDEO_AUDIO_OPTIONS = [
+  { value: "off", label: "Off" },
+  { value: "muted", label: "Muted, tap to unmute" },
+  { value: "on", label: "On" },
+];
+
+/** ``true``/``false`` from earlier versions mean ``on``/``off``. */
+function normalizeVideoAudio(value) {
+  if (value === true) return "on";
+  if (value == null || value === false) return "off";
+  if (VIDEO_AUDIO_OPTIONS.some((option) => option.value === value)) return value;
+  throw new Error(`album-slideshow-card: unknown video_audio mode '${value}'`);
+}
+
 function normalizePhotoControls(value) {
   if (value == null || value === false) return "off";
   if (value === true) return "always";
@@ -66,8 +87,21 @@ const CAMERA_CAPTION_FIELDS = [
   "camera_make", "camera_model", "focal_length_mm", "aperture_f_number",
   "iso", "exposure_time_seconds",
 ];
-const CAPTION_FIELDS = ["date", "location", "description", "camera", ...CAMERA_CAPTION_FIELDS, "current_date", "current_time", "weather"];
+const CAPTION_FIELDS = [
+  "date", "location", "description", "camera", ...CAMERA_CAPTION_FIELDS,
+  "filename", "path", "video_duration", "video_version", "current_date", "current_time", "weather",
+];
 const LIVE_CAPTION_FIELDS = new Set(["current_date", "current_time", "weather"]);
+/** ``1:50`` / ``1:02:03`` for a clip length in seconds; empty otherwise. */
+function formatClipLength(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return "";
+  const total = Math.round(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = String(total % 60).padStart(2, "0");
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${secs}` : `${minutes}:${secs}`;
+}
+
 const CAPTION_POSITIONS = new Set([
   "top-left",
   "top-center",
@@ -669,6 +703,8 @@ function createAlbumSlideshowCardClass(Base) {
       // Empty/missing background means inherit theme.
       background: typeof config.background === "string" ? config.background : "",
       tap_action: config.tap_action === "more-info" ? "more-info" : "none",
+      videos: config.videos !== false,
+      video_audio: normalizeVideoAudio(config.video_audio),
       photo_controls: normalizePhotoControls(config.photo_controls),
       // Number of seconds the card freezes its visible slide after a
       // tap, so the more-info dialog can settle without the slideshow
@@ -766,6 +802,7 @@ function createAlbumSlideshowCardClass(Base) {
     this._loadGeneration += 1;
     this._lastFrameId = null;
     this._lastEntityPicture = null;
+    this._stopVideo();
   }
 
   set hass(hass) {
@@ -870,6 +907,35 @@ function createAlbumSlideshowCardClass(Base) {
         .layer.fit-cover { object-fit: cover; }
         .layer.fit-contain { object-fit: contain; }
         .layer.show { opacity: 1; }
+        .video {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          opacity: 0;
+          transition: opacity ${c.duration}ms ${c.easing};
+          pointer-events: none;
+        }
+        .video.fit-contain { object-fit: contain; }
+        .video.show { opacity: 1; }
+        .sound {
+          position: absolute;
+          top: 8px;
+          left: 8px;
+          z-index: 3;
+          display: grid;
+          place-items: center;
+          width: 40px;
+          height: 40px;
+          padding: 0;
+          border: none;
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.45);
+          color: #fff;
+          cursor: pointer;
+        }
+        .sound[hidden] { display: none; }
         .placeholder {
           position: absolute;
           inset: 0;
@@ -939,10 +1005,12 @@ function createAlbumSlideshowCardClass(Base) {
           <img class="blur-bg" id="blur-b" alt="" />
           <img class="layer" id="a" alt="" />
           <img class="layer" id="b" alt="" />
+          <video class="video" id="video" muted playsinline loop preload="auto" disablepictureinpicture aria-hidden="true"></video>
           <div class="captions" id="captions" aria-hidden="true"></div>
           <div class="placeholder" id="placeholder">Waiting for first frame...</div>
         </div>
         <div id="photo-controls" ${c.photo_controls === "always" ? "" : "hidden"}></div>
+        <button class="sound" id="sound" type="button" hidden aria-label="Unmute video"><ha-icon icon="mdi:volume-off"></ha-icon></button>
       </ha-card>
     `;
     this._photoControls = new PhotoControls(
@@ -950,6 +1018,11 @@ function createAlbumSlideshowCardClass(Base) {
       () => this._controlsReveal?.activity(),
       (phase, entryId) => this._controlNavigation(phase, entryId),
     );
+    this.shadowRoot.getElementById("sound").addEventListener("click", (event) => {
+      // Never let the speaker button open more-info or reveal controls.
+      event.stopPropagation();
+      this._toggleVideoSound();
+    });
     const card = this.shadowRoot.querySelector("ha-card");
     if (this._config.tap_action === "more-info") {
       card.addEventListener("click", () => this._fireMoreInfo());
@@ -1077,6 +1150,7 @@ function createAlbumSlideshowCardClass(Base) {
     }
     this._hiddenRevision = attrs.hidden_revision;
     this._refreshPhotoControls(attrs);
+    this._syncVideoPaused(attrs);
     if (attrs.empty_reason || (Array.isArray(attrs.displayed_photo_ids) && !attrs.displayed_photo_ids.length)) {
       this._clearDisplayedPhotos();
       this._setPlaceholder(attrs.empty_reason === "all_hidden" ? "All photos hidden" : attrs.empty_reason ? "No matching photos" : "Preparing next photo...");
@@ -1146,6 +1220,12 @@ function createAlbumSlideshowCardClass(Base) {
       frameId,
       hiddenRevision: attrs.hidden_revision,
       entityId: this._config.entity,
+      videoUrl:
+        this._config.videos !== false && ["video", "live_photo"].includes(attrs.media_kind) && attrs.video_url
+          ? attrs.video_url
+          : null,
+      // A Live Photo's motion plays once, then fades back to its still.
+      videoLoop: attrs.media_kind !== "live_photo",
     };
     this._loadAndSwap(url, fit, blurBackdrop, captionData, photoData);
   }
@@ -1167,6 +1247,7 @@ function createAlbumSlideshowCardClass(Base) {
       image.removeAttribute("src");
       image.classList.remove("show", "exit", "enter");
     }
+    this._stopVideo();
     this.shadowRoot.getElementById("captions").replaceChildren();
     this._refreshPhotoControls(this._hass.states[this._config.entity]?.attributes || {});
   }
@@ -1208,6 +1289,7 @@ function createAlbumSlideshowCardClass(Base) {
       this._photoEntryId = photoData.entryId;
       this._photoOrientation = photoData.orientation;
       this._performSwap(url, fit, blurBackdrop, captionData);
+      this._startVideo(photoData.videoUrl, fit, generation, photoData.videoLoop !== false);
       if (this._navigationRequest && !this._navigationRequest.pending && photoData.frameId !== this._navigationRequest.frameId) {
         this._cancelControlNavigation();
       }
@@ -1217,6 +1299,104 @@ function createAlbumSlideshowCardClass(Base) {
       if (generation === this._loadGeneration) this._setPlaceholder("Failed to load slide");
     };
     next.src = url;
+  }
+
+  /** Play a video slide over its poster frame (already swapped in). The
+   * clip fades in once it is actually playing; if it can't load or the
+   * browser blocks autoplay, the poster simply stays up. */
+  _startVideo(videoUrl, fit, generation, loop = true) {
+    const video = this.shadowRoot?.getElementById("video");
+    if (!video) return;
+    // A re-render of the same clip (metadata refreshes do this) keeps the
+    // same URL; let it play on rather than restarting it.
+    const continuing = Boolean(videoUrl) && video.getAttribute("src") === videoUrl;
+    if (!continuing) this._stopVideo();
+    if (!videoUrl) return;
+    const attrs = this._hass?.states[this._config.entity]?.attributes || {};
+    const reveal = () => {
+      if (generation === this._loadGeneration) video.classList.add("show");
+    };
+    video.classList.toggle("fit-contain", fit === "contain");
+    video.onerror = () => video.classList.remove("show");
+    // Fade in once playing, or, while paused, once the first frame is ready.
+    video.onplaying = reveal;
+    video.onloadeddata = attrs.paused ? reveal : null;
+    video.onended = loop ? null : () => {
+      if (generation === this._loadGeneration) video.classList.remove("show");
+    };
+    video.onvolumechange = () => this._updateSoundButton();
+    if (continuing) return;
+    // Browsers only autoplay muted unless the page has been interacted
+    // with; ``_playVideo`` falls back to muted. Set the properties as well
+    // as the attributes, which some browsers read only at parse time.
+    video.muted = !this._wantsVideoSound();
+    video.loop = loop;
+    video.playsInline = true;
+    video.src = videoUrl;
+    this._videoPaused = Boolean(attrs.paused);
+    this._updateSoundButton();
+    if (!attrs.paused) this._playVideo(video);
+  }
+
+  /** Sound for the next video: the speaker button's last choice this
+   * session, else the configured mode. */
+  _wantsVideoSound() {
+    if (this._config.video_audio === "off") return false;
+    return this._videoSoundChoice ?? this._config.video_audio === "on";
+  }
+
+  /** Play, falling back to muted when the browser blocks sound. */
+  _playVideo(video) {
+    video.play()?.catch((err) => {
+      if (video.muted || err?.name !== "NotAllowedError") return;
+      video.muted = true;
+      this._updateSoundButton();
+      video.play()?.catch(() => {});
+    });
+  }
+
+  _toggleVideoSound() {
+    const video = this.shadowRoot?.getElementById("video");
+    if (!video || !video.getAttribute("src")) return;
+    // The tap itself lets the browser allow sound from now on.
+    video.muted = !video.muted;
+    this._videoSoundChoice = !video.muted;
+    if (!video.muted && video.paused && !this._videoPaused) this._playVideo(video);
+    this._updateSoundButton();
+  }
+
+  _updateSoundButton() {
+    const button = this.shadowRoot?.getElementById("sound");
+    if (!button) return;
+    const video = this.shadowRoot.getElementById("video");
+    const active = this._config.video_audio !== "off" && Boolean(video?.getAttribute("src"));
+    button.hidden = !active;
+    if (!active) return;
+    button.setAttribute("aria-label", video.muted ? "Unmute video" : "Mute video");
+    button.querySelector("ha-icon")?.setAttribute("icon", video.muted ? "mdi:volume-off" : "mdi:volume-high");
+  }
+
+  /** Stop any playing clip and drop its source so it stops downloading. */
+  _stopVideo() {
+    const video = this.shadowRoot?.getElementById("video");
+    if (!video || !video.getAttribute("src")) return;
+    video.classList.remove("show");
+    video.onplaying = video.onerror = video.onloadeddata = video.onended = video.onvolumechange = null;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    this._updateSoundButton();
+  }
+
+  /** Follow the slideshow's pause switch. Acts only when it changes, since
+   * ``hass`` updates arrive for every entity in Home Assistant. */
+  _syncVideoPaused(attrs) {
+    const video = this.shadowRoot?.getElementById("video");
+    const paused = Boolean(attrs.paused);
+    if (!video || !video.getAttribute("src") || paused === this._videoPaused) return;
+    this._videoPaused = paused;
+    if (paused) video.pause();
+    else this._playVideo(video);
   }
 
   _performSwap(url, fit, blurBackdrop, captionData) {
@@ -1458,6 +1638,14 @@ function createAlbumSlideshowCardClass(Base) {
         if (frame.location) lines.push(String(frame.location));
       } else if (field === "description") {
         if (frame.description) lines.push(String(frame.description));
+      } else if (field === "filename" || field === "path") {
+        if (typeof frame[field] === "string" && frame[field].trim()) lines.push(frame[field].trim());
+      } else if (field === "video_duration") {
+        const length = formatClipLength(frame.video_duration);
+        if (length) lines.push(length);
+      } else if (field === "video_version") {
+        const version = this._videoVersionCaption(frame);
+        if (version) lines.push(version);
       } else if (field === "camera") {
         const make = typeof frame.camera_make === "string" ? frame.camera_make.trim() : "";
         const model = typeof frame.camera_model === "string" ? frame.camera_model.trim() : "";
@@ -1479,6 +1667,17 @@ function createAlbumSlideshowCardClass(Base) {
       }
     }
     return lines;
+  }
+
+  /** ``Transcoded video · 3.1 Mbps`` for a video slide; empty for photos. */
+  _videoVersionCaption(frame) {
+    const version = { original: "Original video", transcoded: "Transcoded video" }[frame.video_version];
+    const bitrate = frame.video_bitrate_mbps;
+    const rate = typeof bitrate === "number" && Number.isFinite(bitrate) && bitrate > 0
+      ? `${new Intl.NumberFormat(this._locale(), { maximumFractionDigits: 1 }).format(bitrate)} Mbps`
+      : "";
+    if (!version && !rate) return "";
+    return [version || "Video", rate].filter(Boolean).join(" · ");
   }
 
   _weatherCaption(cap) {
@@ -1805,6 +2004,10 @@ const CAPTION_SHOW_OPTIONS = [
   { value: "aperture_f_number", label: "Aperture" },
   { value: "iso", label: "ISO" },
   { value: "exposure_time_seconds", label: "Exposure time" },
+  { value: "filename", label: "File name" },
+  { value: "path", label: "File path" },
+  { value: "video_duration", label: "Video length" },
+  { value: "video_version", label: "Video version (original or transcoded)" },
   { value: "current_date", label: "Today's date" },
   { value: "current_time", label: "Current time" },
   { value: "weather", label: "Weather" },
@@ -2221,6 +2424,11 @@ function createAlbumSlideshowCardEditorClass(Base) {
             selector: { select: { mode: "dropdown", options: FIT_OPTIONS } },
           },
           { name: "background", selector: { text: {} } },
+          { name: "videos", selector: { boolean: {} } },
+          {
+            name: "video_audio",
+            selector: { select: { mode: "dropdown", options: VIDEO_AUDIO_OPTIONS } },
+          },
         ],
       },
       {
@@ -2277,6 +2485,8 @@ function createAlbumSlideshowCardEditorClass(Base) {
       fit: c.fit || DEFAULTS.fit,
       background: c.background || "",
       tap_action: c.tap_action || DEFAULTS.tap_action,
+      videos: c.videos !== false,
+      video_audio: normalizeVideoAudio(c.video_audio),
       tap_pause_seconds:
         c.tap_pause_seconds != null
           ? Number(c.tap_pause_seconds)
@@ -2668,6 +2878,8 @@ function createAlbumSlideshowCardEditorClass(Base) {
       background: "Background (optional)",
       tap_action: "Tap action",
       tap_pause_seconds: "Tap pause (seconds)",
+      videos: "Play videos",
+      video_audio: "Video sound",
       photo_controls: "Photo controls",
       caption_enabled: "Show caption overlay",
       caption_show: "Show",
@@ -2693,6 +2905,8 @@ function createAlbumSlideshowCardEditorClass(Base) {
     const helpers = {
       background: "Leave blank to inherit the dashboard theme.",
       transition: "Random picks a different effect each slide.",
+      videos: "Videos and Live Photo motion. Off shows a still frame instead. Must also be enabled in the integration.",
+      video_audio: "Muted starts videos silent with a speaker button. On plays sound when the browser allows it, otherwise shows the button.",
       tap_pause_seconds:
         "How long the card freezes its slide after a tap. 0 disables it.",
       caption_date_format:
@@ -2981,6 +3195,10 @@ function createAlbumSlideshowCardEditorClass(Base) {
 
     const ta = data.tap_action || DEFAULTS.tap_action;
     if (ta !== DEFAULTS.tap_action) n.tap_action = ta;
+
+    if (data.videos === false) n.videos = false;
+    const audio = normalizeVideoAudio(data.video_audio);
+    if (audio !== "off") n.video_audio = audio;
 
     const tps = Number(data.tap_pause_seconds);
     if (!isNaN(tps) && tps !== DEFAULTS.tap_pause_seconds) {

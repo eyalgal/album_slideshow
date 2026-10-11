@@ -129,6 +129,8 @@ fit: auto                   # auto | cover | contain
                             # auto inherits the camera's fill_mode (cover / contain / blur)
 background: '#000'          # color shown behind contained images
 tap_action: none            # none | more-info
+videos: true                # play videos and Live Photo motion; false shows only stills
+video_audio: off            # off | muted (tap to unmute) | on
 photo_controls: on_demand
 caption:                    # overlay selected photo metadata
   show: [date, location]    #   fields below; order = display order
@@ -147,6 +149,8 @@ caption:                    # overlay selected photo metadata
 
 - `transition: random` picks a different effect per slide and avoids repeating the previous one. Effects are `none`, `fade`, `slide-left`, `slide-right`, `slide-up`, `slide-down`, `wipe-left`, `wipe-right`, and `zoom`; `duration` and `easing` control the timing.
 - `fit: auto` reads the camera's `fill_mode` attribute. `blur` renders the slide as `contain` plus a blurred backdrop layer behind it.
+- `videos` (default `true`) plays [video slides](provider-setup.md#immich-videos) over the camera's poster frame, and Live Photo motion over its still, pausing them with the slideshow. Set it to `false` for a card that should only show stills, for example on a slow tablet.
+- `video_audio` (default `off`) controls video sound. `muted` starts videos silent and shows a speaker button in the top-left corner; tap it to turn sound on. `on` plays videos with sound when the browser allows it. Browsers only allow sound once the page has been tapped or clicked, so if sound is blocked the video plays muted and the same button appears. In both modes the button's last choice applies to later videos until the page reloads. Kiosk browsers such as Fully Kiosk usually have their own setting to allow autoplay with sound. (`true` and `false` from earlier versions mean `on` and `off`.)
 - `photo_controls` defaults to Off. See [Hide Photos From a Slideshow](#hide-photos-from-a-slideshow) for toolbar modes, gestures, paired-photo choices, and restore behavior.
 - **Caption overlays:** use `captions:` for multiple independently styled overlays; the original single `caption:` configuration still works. Omit both to disable captions, or set `captions: []`. Availability varies by [provider](provider-setup.md#choose-a-provider), and missing fields are skipped. Google enrichment supplies descriptions and camera metadata; generic Media Source has no equivalent metadata path. On a pair, `per_image: true` anchors each photo's own metadata to its half; set it to `false` for a single caption over the whole frame.
 - `date_format` accepts a preset name or a custom token string. Presets are locale-aware (they follow your Home Assistant language). Example custom format: `'D MMMM YYYY'` -> `29 July 2023`. The `REL` token inserts relative time, so `'D MMMM YYYY - REL'` -> `29 July 2023 - 3 years ago`.
@@ -172,6 +176,10 @@ Choose these in a caption's **Content > Add** picker, or list them in `caption.s
 | `aperture_f_number` | Aperture, such as `f/1.7` |
 | `iso` | ISO sensitivity, such as `ISO 116` |
 | `exposure_time_seconds` | Exposure, such as `1/125 s` or `2.5 s` |
+| `filename` | The original file name, such as `IMG_1234.HEIC` |
+| `path` | The file's path on the Immich server, such as `/usr/src/app/upload/library/admin/2024/IMG_1234.HEIC` (Immich only) |
+| `video_duration` | For a video slide, the clip's length, such as `1:50` |
+| `video_version` | For a video slide, whether Immich is serving its transcoded copy or the original, and the stream's average bitrate, such as `Transcoded video · 3.1 Mbps` (Immich only) |
 
 Exposure fractions are rounded for readability. Numeric metadata must be
 available as a positive finite number; missing or invalid values leave no empty

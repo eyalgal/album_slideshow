@@ -18,6 +18,11 @@ API shape (Immich v1.13x / v3, ``/api`` prefix, ``x-api-key`` header):
     keep faces whole in cover-mode crops.
 - Image bytes: ``/api/assets/{id}/thumbnail?size=preview|fullsize`` or
     ``/api/assets/{id}/original`` (all require the ``x-api-key`` header).
+- Video bytes: ``/api/assets/{id}/video/playback`` - the browser-friendly
+    (transcoded when Immich's policy requires it) stream; honours ``Range``.
+    Video list items carry ``duration``: integer milliseconds on current
+    servers, an ``"H:MM:SS.ffffff"`` string on older ones. A Live Photo is an
+    image whose ``livePhotoVideoId`` names its (hidden) motion-clip asset.
 """
 from __future__ import annotations
 
@@ -57,6 +62,97 @@ def build_image_url(base_url: str, asset_id: str, size: str) -> str:
     return f"{base}/api/assets/{asset_id}/thumbnail?size={thumb_size}"
 
 
+def build_video_url(base_url: str, asset_id: str) -> str:
+    """Build the playback URL for a video asset (key sent as a header)."""
+    return f"{normalize_base_url(base_url)}/api/assets/{asset_id}/video/playback"
+
+
+def is_video_item(item: Any) -> bool:
+    return isinstance(item, dict) and str(item.get("type", "")).upper() == "VIDEO"
+
+
+def live_photo_video_id(item: Any) -> str | None:
+    """The motion-clip asset id of a Live Photo, or ``None``."""
+    if not isinstance(item, dict) or is_video_item(item):
+        return None
+    value = item.get("livePhotoVideoId")
+    return value if isinstance(value, str) and value else None
+
+
+def stream_total_bytes(status: int, headers: Any) -> int | None:
+    """Total size of a stream from a ranged probe's response headers.
+
+    A ``206`` carries it after the slash in ``Content-Range``
+    (``bytes 0-0/12345``); a server that ignores ``Range`` answers ``200``
+    with the full ``Content-Length``.
+    """
+    raw = None
+    if status == 206:
+        content_range = headers.get("Content-Range") or ""
+        raw = content_range.rpartition("/")[2]
+    elif status == 200:
+        raw = headers.get("Content-Length")
+    try:
+        total = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return total if total > 0 else None
+
+
+def describe_video(
+    content_type: str | None,
+    served_bytes: int | None,
+    original_bytes: int | None,
+    duration_ms: int | None,
+) -> dict[str, Any]:
+    """Summarise the stream Immich serves for a video.
+
+    Immich's playback endpoint serves its transcoded copy when one exists and
+    the original file otherwise, so a stream the same size as the original is
+    the original. The bitrate is the stream's average over the clip.
+    """
+    version = None
+    if served_bytes and original_bytes:
+        version = "original" if served_bytes == original_bytes else "transcoded"
+    bitrate = None
+    if served_bytes and duration_ms:
+        bitrate = round(served_bytes * 8 / (duration_ms / 1000) / 1_000_000, 1)
+    return {
+        "video_version": version,
+        "video_bitrate_mbps": bitrate,
+        "video_size_bytes": served_bytes,
+        "video_content_type": (content_type or "").split(";", 1)[0].strip() or None,
+    }
+
+
+def parse_duration_ms(value: Any) -> int | None:
+    """Parse an Immich video duration to milliseconds.
+
+    Current servers send integer milliseconds; older ones send an
+    ``"H:MM:SS.ffffff"`` string. Returns ``None`` for missing, malformed or
+    zero durations (images report ``null``, ``0`` or ``"0:00:00.00000"``).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return int(round(value))
+    if not isinstance(value, str) or not value:
+        return None
+    parts = value.strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = int(parts[0]), int(parts[1]), float(parts[2])
+    except ValueError:
+        return None
+    if hours < 0 or minutes < 0 or not math.isfinite(seconds) or seconds < 0:
+        return None
+    total = int(round((hours * 3600 + minutes * 60 + seconds) * 1000))
+    return total if total > 0 else None
+
+
 def _to_epoch_ms(value: Any) -> int | None:
     """Parse an ISO-8601 timestamp to epoch milliseconds, or ``None``."""
     if not isinstance(value, str) or not value:
@@ -93,17 +189,20 @@ def location_label(city: Any, state: Any, country: Any) -> str | None:
     return ", ".join(parts) if parts else None
 
 
-def parse_search_page(payload: Any) -> tuple[list[dict[str, Any]], int | None]:
-    """Return ``(image_items, next_page)`` from a search/metadata response.
+def parse_search_page(
+    payload: Any, include_videos: bool = False
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Return ``(media_items, next_page)`` from a search/metadata response.
 
-    Filters out non-image assets and anything trashed/archived. ``next_page``
-    is the page number to request next, or ``None`` when done.
+    Filters out non-image assets (videos too unless ``include_videos``) and
+    anything trashed/archived. ``next_page`` is the page number to request
+    next, or ``None`` when done.
     """
     assets = (payload or {}).get("assets") if isinstance(payload, dict) else None
     if not isinstance(assets, dict):
         return [], None
     items = assets.get("items")
-    out = _filter_image_items(items)
+    out = _filter_image_items(items, include_videos)
     next_page = assets.get("nextPage")
     if isinstance(next_page, str) and next_page.isdigit():
         next_page = int(next_page)
@@ -112,31 +211,38 @@ def parse_search_page(payload: Any) -> tuple[list[dict[str, Any]], int | None]:
     return out, next_page
 
 
-def parse_random(payload: Any) -> list[dict[str, Any]]:
+def parse_random(payload: Any, include_videos: bool = False) -> list[dict[str, Any]]:
     """Return image items from a ``/api/search/random`` response.
 
     ``search/random`` returns a plain list of assets (no pagination wrapper).
     """
     if isinstance(payload, list):
-        return _filter_image_items(payload)
+        return _filter_image_items(payload, include_videos)
     # Some cores wrap it like search/metadata; handle that too.
     if isinstance(payload, dict):
         assets = payload.get("assets")
         if isinstance(assets, dict):
-            return _filter_image_items(assets.get("items"))
+            return _filter_image_items(assets.get("items"), include_videos)
     return []
 
 
-def _filter_image_items(items: Any) -> list[dict[str, Any]]:
-    """Keep only non-trashed, non-archived image assets with an id."""
+def _filter_image_items(items: Any, include_videos: bool = False) -> list[dict[str, Any]]:
+    """Keep only visible, non-trashed, non-archived image (or video) assets.
+
+    Hidden assets are Live Photo motion clips; they play with their still
+    (see ``live_photo_video_id``), never as videos of their own.
+    """
+    allowed = {"IMAGE", "VIDEO"} if include_videos else {"IMAGE"}
     out: list[dict[str, Any]] = []
     if isinstance(items, list):
         for it in items:
             if not isinstance(it, dict):
                 continue
-            if str(it.get("type", "")).upper() != "IMAGE":
+            if str(it.get("type", "")).upper() not in allowed:
                 continue
             if it.get("isTrashed") or it.get("isArchived"):
+                continue
+            if it.get("visibility") == "hidden" or it.get("isVisible") is False:
                 continue
             if not it.get("id"):
                 continue
@@ -144,19 +250,35 @@ def _filter_image_items(items: Any) -> list[dict[str, Any]]:
     return out
 
 
+def constrain_type(body: dict[str, Any], include_videos: bool = False) -> dict[str, Any]:
+    """Limit a search body to the asset types the slideshow can show.
+
+    Without videos the body is forced to ``IMAGE``. With videos, an explicit
+    ``IMAGE``/``VIDEO`` type (from a custom filter) is honoured; anything
+    else is dropped so Immich returns both kinds.
+    """
+    if not include_videos:
+        body["type"] = "IMAGE"
+    elif str(body.get("type", "")).upper() not in ("IMAGE", "VIDEO"):
+        body.pop("type", None)
+    return body
+
+
 def build_search_body(
-    selection_type: str, selection_id: str | None, filter_body: dict | None
+    selection_type: str,
+    selection_id: str | None,
+    filter_body: dict | None,
+    include_videos: bool = False,
 ) -> dict[str, Any]:
     """Build the ``search/metadata`` request body for a selection.
 
-    Always constrains to images. For ``search`` the user-supplied filter is
-    used as a base (with ``type`` forced to IMAGE). ``album``/``person`` add
-    the id filter; ``favorites`` sets ``isFavorite``; ``all`` adds nothing.
+    Constrains to images (and videos when enabled). For ``search`` the
+    user-supplied filter is used as a base. ``album``/``person`` add the id
+    filter; ``favorites`` sets ``isFavorite``; ``all`` adds nothing.
     """
-    body: dict[str, Any] = {"type": "IMAGE"}
+    body: dict[str, Any] = {}
     if selection_type == "search" and isinstance(filter_body, dict):
         body = dict(filter_body)
-        body["type"] = "IMAGE"
     elif selection_type == "album" and selection_id:
         body["albumIds"] = [selection_id]
     elif selection_type == "person" and selection_id:
@@ -164,7 +286,7 @@ def build_search_body(
     elif selection_type == "favorites":
         body["isFavorite"] = True
     # ``all`` -> no extra filter (whole library).
-    return body
+    return constrain_type(body, include_videos)
 
 
 def parse_composite_selection(selection_id: str | None) -> dict[str, Any]:
@@ -189,7 +311,9 @@ def parse_composite_selection(selection_id: str | None) -> dict[str, Any]:
 
 
 def build_composite_bodies(
-    selection_id: str | None, filter_body: dict | None = None
+    selection_id: str | None,
+    filter_body: dict | None = None,
+    include_videos: bool = False,
 ) -> list[dict[str, Any]]:
     """Build one ``search/metadata`` body per composite union member.
 
@@ -201,18 +325,16 @@ def build_composite_bodies(
     sel = parse_composite_selection(selection_id)
     bodies: list[dict[str, Any]] = []
     for aid in sel["albums"]:
-        bodies.append({"type": "IMAGE", "albumIds": [aid]})
+        bodies.append({"albumIds": [aid]})
     for pid in sel["people"]:
-        bodies.append({"type": "IMAGE", "personIds": [pid]})
+        bodies.append({"personIds": [pid]})
     if sel["favorites"]:
-        bodies.append({"type": "IMAGE", "isFavorite": True})
+        bodies.append({"isFavorite": True})
     if isinstance(filter_body, dict) and filter_body:
-        member = dict(filter_body)
-        member["type"] = "IMAGE"
-        bodies.append(member)
+        bodies.append(dict(filter_body))
     if not bodies:
-        bodies.append({"type": "IMAGE"})
-    return bodies
+        bodies.append({})
+    return [constrain_type(body, include_videos) for body in bodies]
 
 
 def parse_asset_exif(asset: Any) -> dict[str, Any]:
@@ -241,6 +363,9 @@ def parse_asset_exif(asset: Any) -> dict[str, Any]:
     desc = exif.get("description")
     if isinstance(desc, str) and desc.strip():
         out["description"] = desc.strip()
+    size = exif.get("fileSizeInByte")
+    if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+        out["byte_size"] = size
     return out
 
 
@@ -489,48 +614,58 @@ class ImmichClient:
         selection_type: str,
         selection_id: str | None = None,
         filter_body: dict | None = None,
+        include_videos: bool = False,
     ) -> list[dict[str, Any]]:
-        """Collect image assets for a selection.
+        """Collect image (and optionally video) assets for a selection.
 
         ``random`` uses ``/api/search/random`` (a single, unpaginated batch).
         Everything else pages through ``/api/search/metadata`` with a body
         built from the selection.
         """
         if selection_type == "random":
-            body = {"size": min(_PAGE_SIZE, 250), "type": "IMAGE"}
+            body: dict[str, Any] = {"size": min(_PAGE_SIZE, 250)}
             if isinstance(filter_body, dict):
                 merged = dict(filter_body)
                 merged.update(body)
                 body = merged
+            constrain_type(body, include_videos)
             payload = await self._post("/api/search/random", body)
-            return parse_random(payload)
+            return parse_random(payload, include_videos)
 
         if selection_type == "people":
             # Immich treats multiple personIds in one query as AND (only photos
             # where everyone appears together). To get OR (any of the people),
             # query each person separately and union by asset id. See #19.
             ids = [p for p in (selection_id or "").split(",") if p]
-            bodies = [{"type": "IMAGE", "personIds": [p]} for p in ids]
-            return await self._collect_union(bodies)
+            bodies = [
+                constrain_type({"personIds": [p]}, include_videos) for p in ids
+            ]
+            return await self._collect_union(bodies, include_videos)
 
         if selection_type == "albums":
             # Same OR behavior for a set of albums: query each album on its own
             # and union the results, deduped by asset id.
             ids = [a for a in (selection_id or "").split(",") if a]
-            bodies = [{"type": "IMAGE", "albumIds": [a]} for a in ids]
-            return await self._collect_union(bodies)
+            bodies = [
+                constrain_type({"albumIds": [a]}, include_videos) for a in ids
+            ]
+            return await self._collect_union(bodies, include_videos)
 
         if selection_type == "composite":
             # A mix of albums, people, favorites and/or a custom filter. Each
             # is queried on its own and unioned; an empty composite means the
             # whole library. See #19.
-            bodies = build_composite_bodies(selection_id, filter_body)
-            return await self._collect_union(bodies)
+            bodies = build_composite_bodies(selection_id, filter_body, include_videos)
+            return await self._collect_union(bodies, include_videos)
 
-        base = build_search_body(selection_type, selection_id, filter_body)
-        return await self._collect_metadata(base)
+        base = build_search_body(
+            selection_type, selection_id, filter_body, include_videos
+        )
+        return await self._collect_metadata(base, include_videos)
 
-    async def _collect_metadata(self, base: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _collect_metadata(
+        self, base: dict[str, Any], include_videos: bool = False
+    ) -> list[dict[str, Any]]:
         """Page through ``search/metadata`` for a prebuilt body."""
         collected: list[dict[str, Any]] = []
         page: int | None = 1
@@ -539,13 +674,13 @@ class ImmichClient:
             body["size"] = _PAGE_SIZE
             body["page"] = page
             payload = await self._post("/api/search/metadata", body)
-            items, next_page = parse_search_page(payload)
+            items, next_page = parse_search_page(payload, include_videos)
             collected.extend(items)
             page = next_page
         return collected
 
     async def _collect_union(
-        self, bodies: list[dict[str, Any]]
+        self, bodies: list[dict[str, Any]], include_videos: bool = False
     ) -> list[dict[str, Any]]:
         """Union several ``search/metadata`` queries (OR), deduped by asset id.
 
@@ -558,7 +693,7 @@ class ImmichClient:
         for body in bodies:
             if len(out) >= _MAX_ASSETS:
                 break
-            items = await self._collect_metadata(body)
+            items = await self._collect_metadata(body, include_videos)
             for it in items:
                 aid = it.get("id")
                 if aid and aid not in seen:
@@ -568,6 +703,24 @@ class ImmichClient:
 
     async def async_get_asset(self, asset_id: str) -> dict[str, Any]:
         return await self._get(f"/api/assets/{asset_id}")
+
+    async def async_probe_video(self, asset_id: str) -> tuple[str | None, int | None]:
+        """Return the playback stream's ``(content_type, total_bytes)``.
+
+        Requests a single byte; the body is never read, so this stays cheap
+        even against a server that ignores ``Range``.
+        """
+        session = async_get_clientsession(self.hass)
+        async with async_timeout.timeout(_TIMEOUT):
+            async with session.get(
+                build_video_url(self.base_url, asset_id),
+                headers={**self.image_headers, "Range": "bytes=0-0"},
+            ) as resp:
+                resp.raise_for_status()
+                return (
+                    resp.headers.get("Content-Type"),
+                    stream_total_bytes(resp.status, resp.headers),
+                )
 
     async def async_get_faces(self, asset_id: str) -> list[dict[str, Any]]:
         data = await self._get(f"/api/faces?id={asset_id}")

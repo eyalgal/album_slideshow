@@ -50,7 +50,9 @@
           "people": "People",
           "favorites": "Include favorites",
           "immich_filter": "Extra search filter (JSON, optional)",
-          "immich_image_size": "Image quality"
+          "immich_image_size": "Image quality",
+          "immich_include_videos": "Include videos (played by the Album Slideshow card)",
+          "immich_live_photos": "Play Live Photo motion (played by the Album Slideshow card)"
         }
       },
       "photoprism": {
@@ -225,6 +227,8 @@
           "favorites": "Include favorites",
           "immich_filter": "Extra search filter (JSON, optional)",
           "immich_image_size": "Image quality",
+          "immich_include_videos": "Include videos (played by the Album Slideshow card)",
+          "immich_live_photos": "Play Live Photo motion (played by the Album Slideshow card)",
           "reverse_geocode": "Look up EXIF GPS locations via OpenStreetMap",
           "hide_home_country": "Hide the country for places in your home country"
         }
