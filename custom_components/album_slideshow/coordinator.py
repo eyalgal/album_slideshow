@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import aiohttp
@@ -505,9 +506,12 @@ _NAME_PREFIXES = (
     "village of ", "town of ", "city of ",
 )
 
-# How many EXIF reads to perform between cache flushes. Bigger batches
-# mean fewer Store writes but more rework if HA is killed mid-scan.
+# How many EXIF reads to perform between listener updates, and the minimum
+# time between items-cache writes during a pass (the cache holds every item,
+# so writing it per batch is costly on large libraries; the pass still saves
+# when it finishes or is cancelled).
 _EXIF_BATCH_SAVE = 25
+_ENRICHMENT_SAVE_INTERVAL = 60.0
 _GEOCODE_BATCH_SAVE = 10
 
 # Cap a single Nextcloud enrichment download. EXIF/IPTC/XMP live in the first
@@ -1208,6 +1212,10 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "geocode_total": 0,
             "geocode_done": 0,
         }
+        # Per-item enrichment in flight, shared by the background pass and
+        # on-demand requests from the camera so an item is fetched once.
+        self._enrich_inflight: dict[int, asyncio.Task] = {}
+        self._last_items_save = 0.0
 
         super().__init__(
             hass,
@@ -2775,6 +2783,72 @@ class AlbumCoordinator(DataUpdateCoordinator):
             item.location_geocoded = False
         item.exif_scanned = True
 
+    async def async_enrich_item(self, item: MediaItem) -> bool:
+        """Enrich one item now, sharing the work with the background pass.
+
+        The camera calls this just before rendering a slide so faces (for
+        cropping) and caption metadata are in place without waiting for the
+        pass to reach the item. Concurrent callers await the same fetch.
+        Returns whether metadata was fetched (``False``: nothing to do).
+        """
+        if self.provider == PROVIDER_GOOGLE_SHARED or not self._needs_enrichment(item):
+            return False
+        inflight = getattr(self, "_enrich_inflight", None)
+        if inflight is None:
+            inflight = self._enrich_inflight = {}
+        key = id(item)
+        task = inflight.get(key)
+        if task is None:
+            task = self.hass.async_create_background_task(
+                self._enrich_one(item),
+                name=f"album_slideshow_enrich_item_{self.entry.entry_id}",
+            )
+            inflight[key] = task
+            task.add_done_callback(lambda _task: inflight.pop(key, None))
+        # Shielded: a cancelled caller (e.g. a dropped preload) must not
+        # abandon a fetch another caller is waiting on.
+        return await asyncio.shield(task)
+
+    async def _enrich_one(self, item: MediaItem) -> bool:
+        """Fetch one item's metadata from its provider; never raises."""
+        try:
+            if self.provider == PROVIDER_IMMICH:
+                await self._enrich_immich_item(item)
+            elif self.provider == PROVIDER_NEXTCLOUD:
+                await self._enrich_nextcloud_item(item)
+            elif self.provider == PROVIDER_UGREEN:
+                await self._enrich_ugreen_item(item)
+            elif item.url.startswith("file://"):
+                path = Path(item.url[len("file://"):])
+                info = await self.hass.async_add_executor_job(_read_local_exif, path)
+                if "captured_at" in info:
+                    item.captured_at = info["captured_at"]
+                if "description" in info:
+                    item.description = info["description"]
+                if "latitude" in info and "longitude" in info:
+                    item.latitude = info["latitude"]
+                    item.longitude = info["longitude"]
+                item.exif_scanned = True
+            else:
+                # Nothing to read for remote files without a provider API.
+                item.exif_scanned = True
+                return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("%s enrich error: %s", self.provider, err)
+            item.exif_scanned = True
+        self._enrich_progress["exif_done"] = self._enrich_progress.get("exif_done", 0) + 1
+        return True
+
+    async def _flush_enrichment(self, data: dict[str, Any]) -> None:
+        """Persist progress (at most once a minute) and notify listeners."""
+        now = time.monotonic()
+        if now - getattr(self, "_last_items_save", 0.0) >= _ENRICHMENT_SAVE_INTERVAL:
+            self._last_items_save = now
+            await self._save_cached_items(data)
+        self.async_set_updated_data(data)
+
     async def _enrich_items_background(self, data: dict[str, Any]) -> None:
         """Read EXIF for unscanned local files, then reverse-geocode.
 
@@ -2790,110 +2864,28 @@ class AlbumCoordinator(DataUpdateCoordinator):
         if not items:
             return
 
-        scanned_since_save = 0
+        pending = 0
         try:
             for idx, item in enumerate(items):
                 if not self._needs_enrichment(item):
                     # Fast path: yield occasionally so we don't starve
                     # the event loop when (re-)visiting a long list of
-                    # already-processed items.
+                    # already-processed items (including ones the camera
+                    # enriched on demand).
                     if idx % _ENRICHMENT_FAST_PATH_YIELD_EVERY == 0:
                         await asyncio.sleep(0)
                     continue
 
-                if self.provider == PROVIDER_IMMICH:
-                    try:
-                        await self._enrich_immich_item(item)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as err:  # noqa: BLE001
-                        _LOGGER.debug("Immich enrich error: %s", err)
-                        item.exif_scanned = True
-                    scanned_since_save += 1
-                    self._enrich_progress["exif_done"] = (
-                        self._enrich_progress.get("exif_done", 0) + 1
-                    )
-                    if scanned_since_save >= _EXIF_BATCH_SAVE:
-                        scanned_since_save = 0
-                        await self._save_cached_items(data)
-                        self.async_set_updated_data(data)
+                if not await self.async_enrich_item(item):
                     continue
-
-                if self.provider == PROVIDER_NEXTCLOUD:
-                    try:
-                        await self._enrich_nextcloud_item(item)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as err:  # noqa: BLE001
-                        _LOGGER.debug("Nextcloud enrich error: %s", err)
-                        item.exif_scanned = True
-                    scanned_since_save += 1
-                    self._enrich_progress["exif_done"] = (
-                        self._enrich_progress.get("exif_done", 0) + 1
-                    )
-                    if scanned_since_save >= _EXIF_BATCH_SAVE:
-                        scanned_since_save = 0
-                        await self._save_cached_items(data)
-                        self.async_set_updated_data(data)
-                    continue
-
-                if self.provider == PROVIDER_UGREEN:
-                    try:
-                        await self._enrich_ugreen_item(item)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as err:  # noqa: BLE001
-                        _LOGGER.debug("UGREEN enrich error: %s", err)
-                        item.exif_scanned = True
-                    scanned_since_save += 1
-                    self._enrich_progress["exif_done"] = (
-                        self._enrich_progress.get("exif_done", 0) + 1
-                    )
-                    if scanned_since_save >= _EXIF_BATCH_SAVE:
-                        scanned_since_save = 0
-                        await self._save_cached_items(data)
-                        self.async_set_updated_data(data)
-                    continue
-
-                url = item.url
-                if not url.startswith("file://"):
-                    item.exif_scanned = True
-                    continue
-
-                path = Path(url[len("file://"):])
-                try:
-                    info = await self.hass.async_add_executor_job(
-                        _read_local_exif, path
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.debug("EXIF: executor error for %s: %s", path, err)
-                    info = {}
-
-                if "captured_at" in info:
-                    item.captured_at = info["captured_at"]
-                if "description" in info:
-                    item.description = info["description"]
-                if "latitude" in info and "longitude" in info:
-                    item.latitude = info["latitude"]
-                    item.longitude = info["longitude"]
-                item.exif_scanned = True
-
-                scanned_since_save += 1
-                self._enrich_progress["exif_done"] = (
-                    self._enrich_progress.get("exif_done", 0) + 1
-                )
-
-                if scanned_since_save >= _EXIF_BATCH_SAVE:
-                    scanned_since_save = 0
-                    await self._save_cached_items(data)
-                    self.async_set_updated_data(data)
+                pending += 1
+                if pending >= _EXIF_BATCH_SAVE:
+                    pending = 0
+                    await self._flush_enrichment(data)
 
             # Flush any tail items before the geocode phase.
-            if scanned_since_save:
-                await self._save_cached_items(data)
-                self.async_set_updated_data(data)
+            if pending:
+                await self._flush_enrichment(data)
 
             await self._geocode_items_background(data)
         except asyncio.CancelledError:

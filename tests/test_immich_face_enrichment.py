@@ -20,7 +20,10 @@ from custom_components.album_slideshow.const import (
 
 def _coordinator(selection_id: str):
     coord = c.AlbumCoordinator.__new__(c.AlbumCoordinator)
-    coord.hass = object()
+    # Per-item enrichment runs as a tracked background task.
+    coord.hass = SimpleNamespace(
+        async_create_background_task=lambda coro, name: asyncio.ensure_future(coro),
+    )
     coord.provider = "immich"
     coord.entry = SimpleNamespace(
         entry_id="test-immich",

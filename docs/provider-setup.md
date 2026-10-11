@@ -176,9 +176,9 @@ If the stored connection fails, the flow first asks for a working URL and key.
   Assistant fetches and re-serves the images; your Immich server is never
   exposed to the dashboard client.
 - Capture dates come from the asset list up front, so date filters and date
-  ordering work immediately. Location and description are filled in by a
-  background pass, so they appear
-  shortly after the first load, the same way local-folder EXIF does.
+  ordering work immediately. Location, description and faces are fetched for
+  each photo just before it is shown, and a background pass fills in the
+  rest of the library over time.
 
 ### Face-aware Cropping
 
@@ -231,7 +231,7 @@ marker but do not gain face recognition.
 - Requires an Immich server reachable from Home Assistant and an API key
 - Videos are skipped
 - Home Assistant fetches and re-serves images, so the Immich server does not need to be reachable from the dashboard client (and the API key never leaves the server)
-- Location and description are read per photo in the background, so they appear shortly after the first load
+- Location, description and faces are read per photo: just before it is shown, and for the rest of the library by a background pass
 
 ## PhotoPrism
 
