@@ -10,10 +10,10 @@
       },
       "google_shared": {
         "title": "Google Photos",
-        "description": "Paste a Google Photos shared album share link.",
+        "description": "Paste a Google Photos shared album link. To combine several shared albums into one slideshow, paste one link per line.",
         "data": {
           "album_name": "Album name",
-          "album_url": "Shared album link"
+          "album_url": "Shared album link(s)"
         }
       },
       "local_folder": {
@@ -240,13 +240,29 @@
           "immich_url": "Immich URL (e.g. http://192.168.1.10:2283)",
           "immich_api_key": "API key"
         }
+      },
+      "google_menu": {
+        "title": "Google Photos",
+        "menu_options": {
+          "google_albums": "Shared albums",
+          "google_metadata": "Photo metadata and privacy"
+        }
+      },
+      "google_albums": {
+        "title": "Shared albums",
+        "description": "One Google Photos shared album link per line. Photos from all albums are combined into one slideshow; a photo that is in more than one album is shown once. Settings and hidden photos are kept when you change this list.",
+        "data": {
+          "album_urls": "Shared album links"
+        }
       }
     },
     "error": {
       "immich_cache_clear_failed": "Could not clear the previous photo source cache. No source settings were changed. Please try again.",
       "immich_cannot_connect": "Could not connect to Immich. Check the URL and API key.",
       "immich_invalid_auth": "Immich rejected the API key. Check that it is valid and that its permissions include server.about, album.read and person.read.",
-      "immich_filter_invalid": "The filter must be a valid JSON object. See the README for examples."
+      "immich_filter_invalid": "The filter must be a valid JSON object. See the README for examples.",
+      "invalid_album_url": "That does not look like a Google Photos shared album link.",
+      "google_cache_clear_failed": "Could not clear the saved photos from the previous albums. The album list was not changed. Please try again."
     }
   }
 }

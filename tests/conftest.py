@@ -216,6 +216,9 @@ _selector.SelectSelectorConfig = lambda **kw: kw  # type: ignore[attr-defined]
 _selector.SelectSelectorMode = types.SimpleNamespace(DROPDOWN="dropdown", LIST="list")  # type: ignore[attr-defined]
 _selector.SelectSelector = _SelectorBase  # type: ignore[attr-defined]
 _selector.BooleanSelector = _SelectorBase  # type: ignore[attr-defined]
+_selector.TextSelector = _SelectorBase  # type: ignore[attr-defined]
+_selector.TextSelectorConfig = lambda **kw: kw  # type: ignore[attr-defined]
+_selector.TextSelectorType = types.SimpleNamespace(PASSWORD="password", TEXT="text")  # type: ignore[attr-defined]
 
 
 _make_stub(

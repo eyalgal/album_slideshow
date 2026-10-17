@@ -15,11 +15,13 @@ from homeassistant.helpers import selector
 _ALL_PEOPLE = "__all_people__"
 _ALL_ALBUMS = "__all_albums__"
 
+from .google_albums import album_url_data, album_urls_from_data, parse_album_urls
 from .const import (
     DOMAIN,
     CONF_PROVIDER,
     CONF_ALBUM_NAME,
     CONF_ALBUM_URL,
+    CONF_ALBUM_URLS,
     CONF_GOOGLE_METADATA,
     DEFAULT_GOOGLE_METADATA,
     CONF_GOOGLE_LOCATION,
@@ -149,6 +151,18 @@ def _normalize_local_path(hass, path: str) -> str:
 
 
 ALBUM_URL_RE = re.compile(r"^https?://photos\.app\.goo\.gl/[^/]+/?$")
+
+def _album_urls_selector() -> Any:
+    """Multi-line text box for one or more shared-album links (one per line)."""
+    return selector.TextSelector(selector.TextSelectorConfig(multiline=True))
+
+
+def _validate_album_urls(text: Any) -> tuple[list[str], str | None]:
+    """Parse the album-links field: (links, error key or None)."""
+    urls = parse_album_urls(text if isinstance(text, str) else "")
+    if not urls or not all(ALBUM_URL_RE.match(url) for url in urls):
+        return urls, "invalid_album_url"
+    return urls, None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -486,19 +500,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            url = user_input[CONF_ALBUM_URL].strip()
+            urls, error = _validate_album_urls(user_input.get(CONF_ALBUM_URL))
             name = user_input[CONF_ALBUM_NAME].strip()
 
-            if not ALBUM_URL_RE.match(url):
-                errors[CONF_ALBUM_URL] = "invalid_album_url"
+            if error:
+                errors[CONF_ALBUM_URL] = error
             else:
-                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_GOOGLE_SHARED}:{url}:{name}")
+                # The unique id keeps using the first link, exactly as before.
+                await self.async_set_unique_id(f"{DOMAIN}:{PROVIDER_GOOGLE_SHARED}:{urls[0]}:{name}")
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=name,
                     data={
                         CONF_PROVIDER: PROVIDER_GOOGLE_SHARED,
-                        CONF_ALBUM_URL: url,
+                        **album_url_data(urls),
                         CONF_ALBUM_NAME: name,
                     },
                 )
@@ -506,7 +521,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = vol.Schema(
             {
                 vol.Required(CONF_ALBUM_NAME): str,
-                vol.Required(CONF_ALBUM_URL): str,
+                vol.Required(CONF_ALBUM_URL): _album_urls_selector(),
             }
         )
         return self.async_show_form(step_id="google_shared", data_schema=schema, errors=errors)
@@ -1517,10 +1532,63 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class GoogleOptionsFlow(config_entries.OptionsFlow):
-    """Control anonymous Google photo metadata enrichment."""
+    """Edit a Google entry's shared albums and its metadata enrichment."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        return await self.async_step_google_metadata(user_input)
+        return self.async_show_menu(
+            step_id="google_menu",
+            menu_options=["google_albums", "google_metadata"],
+        )
+
+    async def async_step_google_albums(
+        self, user_input: dict[str, Any] | None = None,
+    ) -> FlowResult:
+        """Add, remove or reorder the shared albums this slideshow combines.
+
+        The links live in ``entry.data`` (the coordinator reads them from
+        there), so they are written back into the entry data and the update
+        listener reloads the entry. The entry id is unchanged, so entities,
+        their settings and the hidden-photo list are kept.
+        """
+        entry = self.config_entry
+        errors: dict[str, str] = {}
+        current = album_urls_from_data(entry.data)
+        if user_input is not None:
+            urls, error = _validate_album_urls(user_input.get(CONF_ALBUM_URLS))
+            if error:
+                errors[CONF_ALBUM_URLS] = error
+            else:
+                if urls == current:
+                    return self.async_create_entry(title="", data=dict(entry.options))
+                try:
+                    # The disk cache is served when a refresh fails; it must
+                    # not bring back photos from a removed album. If it can't
+                    # be cleared, leave the albums unchanged (as the Immich
+                    # source editor does).
+                    await _async_clear_item_cache(self.hass, entry.entry_id)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Could not clear Google album cache for %s (%s)",
+                        entry.entry_id, type(err).__name__,
+                    )
+                    errors["base"] = "google_cache_clear_failed"
+                else:
+                    new_data = {
+                        key: value for key, value in entry.data.items()
+                        if key not in (CONF_ALBUM_URL, CONF_ALBUM_URLS)
+                    }
+                    new_data.update(album_url_data(urls))
+                    self.hass.config_entries.async_update_entry(entry, data=new_data)
+                    return self.async_create_entry(title="", data=dict(entry.options))
+        return self.async_show_form(
+            step_id="google_albums",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_ALBUM_URLS, default="\n".join(current),
+                ): _album_urls_selector(),
+            }),
+            errors=errors,
+        )
 
     async def async_step_google_metadata(
         self, user_input: dict[str, Any] | None = None,

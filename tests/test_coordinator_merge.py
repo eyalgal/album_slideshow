@@ -187,7 +187,7 @@ def test_google_options_default_on_and_preserve_other_options(options, enabled):
     flow.async_show_form = lambda **kwargs: kwargs
     flow.async_create_entry = lambda **kwargs: kwargs
 
-    form = asyncio.run(flow.async_step_init())
+    form = asyncio.run(flow.async_step_google_metadata())
     assert form["data_schema"]({}) == {
         "google_metadata": enabled, "google_location": False, "reverse_geocode": False,
         "hide_home_country": False,
@@ -198,6 +198,19 @@ def test_google_options_default_on_and_preserve_other_options(options, enabled):
         "google_metadata": not enabled, "other": "preserved",
         "google_location": False, "reverse_geocode": False, "hide_home_country": False,
     }
+
+
+def test_google_options_open_with_albums_and_metadata_menu():
+    from custom_components.album_slideshow import config_flow
+
+    entry = SimpleNamespace(data={"provider": "google_shared"}, options={})
+    flow = config_flow.ConfigFlow.async_get_options_flow(entry)
+    flow.config_entry = entry
+    flow.async_show_menu = lambda **kwargs: kwargs
+    menu = asyncio.run(flow.async_step_init())
+    assert menu == {"step_id": "google_menu", "menu_options": ["google_albums", "google_metadata"]}
+    for option in menu["menu_options"]:
+        assert hasattr(flow, f"async_step_{option}")
 
 
 def test_google_options_preserve_independent_location_choices():
@@ -211,7 +224,7 @@ def test_google_options_preserve_independent_location_choices():
     flow.config_entry = entry
     flow.async_show_form = lambda **kwargs: kwargs
     flow.async_create_entry = lambda **kwargs: kwargs
-    form = asyncio.run(flow.async_step_init())
+    form = asyncio.run(flow.async_step_google_metadata())
     assert form["data_schema"]({}) == {
         "google_metadata": False, "google_location": True, "reverse_geocode": True,
         "hide_home_country": True,

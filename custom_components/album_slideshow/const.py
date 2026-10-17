@@ -8,6 +8,9 @@ SERVICE_LIST_HIDDEN_PHOTOS = "list_hidden_photos"
 
 CONF_PROVIDER = "provider"
 CONF_ALBUM_URL = "album_url"
+# Google Photos entries that combine several shared albums store the full
+# list here; ``album_url`` keeps holding the first link.
+CONF_ALBUM_URLS = "album_urls"
 CONF_ALBUM_NAME = "album_name"
 CONF_LOCAL_PATH = "local_path"
 CONF_RECURSIVE = "recursive"
