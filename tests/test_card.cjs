@@ -2061,3 +2061,78 @@ test("the video sound button takes a corner without a caption or the toolbar", (
   assert.equal(corner(["bottom-left"], null), "top-left");
   assert.equal(corner(["top-left", "top-right", "bottom-left", "bottom-right"], null), "top-left");
 });
+
+function registrationFixture() {
+  const timers = [];
+  const registry = () => {
+    const defined = new Map();
+    return {
+      get: name => defined.get(name),
+      define(name, constructor) {
+        if (defined.has(name)) throw new Error(`${name} is already defined`);
+        defined.set(name, constructor);
+      },
+    };
+  };
+  const win = new EventTarget();
+  const doc = new EventTarget();
+  const warnings = [];
+  const swap = () => {
+    win.customElements = registry();
+    win.HTMLElement = class {};
+  };
+  swap();
+  const saved = ["window", "document", "setTimeout", "requestAnimationFrame", "console"]
+    .map(name => [name, context[name]]);
+  Object.assign(context, {
+    window: win,
+    document: doc,
+    setTimeout: (callback, delay) => timers.push({ callback, delay }),
+    requestAnimationFrame: undefined,
+    console: { ...console, warn: (...args) => warnings.push(args.join(" ")) },
+  });
+  const runUntil = limit => {
+    for (const timer of timers.filter(entry => !entry.done && entry.delay <= limit)) {
+      timer.done = true;
+      timer.callback();
+    }
+  };
+  vm.runInContext("defineAlbumSlideshowCards(); scheduleAlbumSlideshowRegistration();", context);
+  return { win, doc, warnings, swap, runUntil, restore: () => Object.assign(context, Object.fromEntries(saved)) };
+}
+
+test("the card registers again when a slow page swaps the element registry late", () => {
+  const fixture = registrationFixture();
+  try {
+    fixture.runUntil(2000);
+    fixture.swap();
+    assert.equal(fixture.win.customElements.get("album-slideshow-card"), undefined);
+    fixture.runUntil(4000);
+    const CardClass = fixture.win.customElements.get("album-slideshow-card");
+    assert.equal(Object.getPrototypeOf(CardClass), fixture.win.HTMLElement);
+    assert.ok(fixture.win.customElements.get("album-slideshow-card-editor"));
+    fixture.runUntil(60000);
+    assert.deepEqual(fixture.warnings, []);
+
+    fixture.swap();
+    fixture.win.dispatchEvent(new Event("location-changed"));
+    assert.ok(fixture.win.customElements.get("album-slideshow-card"));
+    fixture.swap();
+    fixture.doc.dispatchEvent(new Event("visibilitychange"));
+    assert.ok(fixture.win.customElements.get("album-slideshow-card"));
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("a card that still can't register after a minute logs one warning", () => {
+  const fixture = registrationFixture();
+  try {
+    fixture.win.customElements = { get: () => undefined, define() { throw new Error("rejected"); } };
+    fixture.runUntil(60000);
+    fixture.win.dispatchEvent(new Event("location-changed"));
+    assert.equal(fixture.warnings.length, 1);
+  } finally {
+    fixture.restore();
+  }
+});

@@ -3370,8 +3370,13 @@ function defineAlbumSlideshowCards() {
   }
 }
 
-defineAlbumSlideshowCards();
-if (!window.__albumSlideshowCardScheduled) {
+// On a slow load the polyfill can swap the registry seconds later, so keep
+// re-registering for a minute, then whenever the dashboard navigates or shows.
+const REGISTRATION_RETRY_MS = [0, 250, 1000, 2000, 4000, 8000, 15000, 30000];
+const REGISTRATION_LAST_RETRY_MS = 60000;
+
+function scheduleAlbumSlideshowRegistration() {
+  if (window.__albumSlideshowCardScheduled) return;
   window.__albumSlideshowCardScheduled = true;
   const retry = () => {
     try {
@@ -3384,9 +3389,22 @@ if (!window.__albumSlideshowCardScheduled) {
   if (typeof requestAnimationFrame === "function") {
     requestAnimationFrame(retry);
   }
-  setTimeout(retry, 0);
-  setTimeout(retry, 1000);
+  for (const delay of REGISTRATION_RETRY_MS) setTimeout(retry, delay);
+  setTimeout(() => {
+    retry();
+    if (!window.customElements?.get("album-slideshow-card")) {
+      console.warn(
+        "album-slideshow-card is still not registered a minute after loading; " +
+        "another script may have replaced this page's custom element registry.",
+      );
+    }
+  }, REGISTRATION_LAST_RETRY_MS);
+  window.addEventListener?.("location-changed", retry);
+  globalThis.document?.addEventListener?.("visibilitychange", retry);
 }
+
+defineAlbumSlideshowCards();
+scheduleAlbumSlideshowRegistration();
 
 window.customCards = window.customCards || [];
 if (!window.customCards.find((c) => c.type === "album-slideshow-card")) {
