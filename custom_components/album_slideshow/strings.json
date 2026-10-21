@@ -89,7 +89,7 @@
       },
       "synology": {
         "title": "Synology Photos",
-        "description": "Connect to the Photos package on your Synology NAS. Enter the DSM address (e.g. http://192.168.1.10:5000 or your HTTPS/QuickConnect URL) and an account. If the account has two-factor authentication, also enter a current 6-digit code once; a trusted-device token is then stored so future refreshes do not need a code. Choose Personal for your own photos and albums (this is also where albums shared with you appear); choose Shared Space only if your NAS has the shared team library enabled. Tip: use a dedicated Photos account rather than an admin login.",
+        "description": "Connect to the Photos package on your Synology NAS. Enter the DSM address (e.g. http://192.168.1.10:5000 or your HTTPS/QuickConnect URL) and an account. If the account has two-factor authentication, also enter a current 6-digit code once; a trusted-device token is then stored so future refreshes do not need a code. Choose Personal for your own photos and albums (this is also where albums shared with you appear); choose Shared Space to show all photos in the shared team library, if your NAS has it enabled. Tip: use a dedicated Photos account rather than an admin login.",
         "data": {
           "synology_url": "DSM URL",
           "synology_username": "Username",
@@ -109,6 +109,14 @@
           "places": "Places",
           "tags": "Tags",
           "subjects": "Subjects",
+          "synology_image_size": "Image quality"
+        }
+      },
+      "synology_shared": {
+        "title": "Synology Shared Space",
+        "description": "This slideshow shows all photos in the Shared Space; it can't be narrowed down to albums, people or tags. For albums someone shared with you, close this and add the integration again with Personal.",
+        "data": {
+          "album_name": "Album name",
           "synology_image_size": "Image quality"
         }
       },

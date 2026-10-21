@@ -1030,8 +1030,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_SYNOLOGY_SPACE, default=SYNOLOGY_SPACE_PERSONAL
                 ): vol.In(
                     {
-                        SYNOLOGY_SPACE_PERSONAL: "Personal (My Photos)",
-                        SYNOLOGY_SPACE_SHARED: "Shared Space",
+                        SYNOLOGY_SPACE_PERSONAL: "Personal (My Photos and albums shared with you)",
+                        SYNOLOGY_SPACE_SHARED: "Shared Space (all of its photos)",
                     }
                 ),
                 vol.Optional("otp_code"): str,
@@ -1152,8 +1152,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
         return self.async_show_form(
-            step_id="synology_select", data_schema=vol.Schema(fields), errors=errors
+            step_id=(
+                "synology_shared"
+                if self._syn_space == SYNOLOGY_SPACE_SHARED
+                else "synology_select"
+            ),
+            data_schema=vol.Schema(fields),
+            errors=errors,
         )
+
+    async def async_step_synology_shared(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """The Shared Space has nothing to pick, so its step only names it."""
+        return await self.async_step_synology_select(user_input)
 
     async def async_step_ugreen(
         self, user_input: dict[str, Any] | None = None

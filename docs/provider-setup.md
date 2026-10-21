@@ -395,25 +395,27 @@ The **Synology** provider connects straight to the **Photos** package on your
 Synology NAS for **full photo metadata** (capture date, GPS location and
 captions). Like the Immich and PhotoPrism providers, you can combine any mix of
 **favorites, albums (including albums shared with you), people, places, tags and
-subjects** into one slideshow, from either the **personal** ("My Photos") or
-**shared** ("Shared Space") library.
+subjects** from your **Personal** library ("My Photos") into one slideshow, or
+show everything in the **Shared Space**.
 
 1. Add the integration and choose **Synology Photos (direct API, full
    metadata)**.
 2. Enter your DSM address (e.g. `http://192.168.1.10:5000`, or your HTTPS /
    QuickConnect URL) and an account username and password.
-3. Choose the **Personal** or **Shared** library.
+3. Choose the **Personal** library (your photos, plus albums other users shared
+   with you) or the **Shared Space** (all of its photos; it can't be narrowed
+   down to albums, people or tags).
 4. If the account has **two-factor authentication**, also enter a current
    6-digit code. This is only needed once - a trusted-device token is stored so
    later refreshes never prompt for a code again.
-5. Tick what you want to show (favorites, albums, people, places, tags,
-   subjects) - or leave everything unticked for **all photos** - then name it
-  and choose an image quality.
+5. For the Personal library, tick what you want to show (favorites, albums,
+   people, places, tags, subjects), or leave everything unticked for **all
+   photos**. Then name it and choose an image quality. For the Shared Space,
+   just name it and choose an image quality.
 
 > **Combining sources.** Synology has no "OR" across categories, so the
 > integration queries each ticked album/person/place/tag/subject separately and
-> merges the results (duplicates removed). Favorites and subjects are a Personal
-> library feature.
+> merges the results (duplicates removed).
 
 ### Image Quality
 
