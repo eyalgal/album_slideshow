@@ -3,14 +3,15 @@
 [Overview](../README.md) | [Card Guide](card-guide.md) | [Reference](reference.md)
 
 Pick the provider that matches where your photos live. All providers show still
-images, not videos. Install the integration first using the
+images; only Immich can also [play videos](#immich-videos). Install the
+integration first using the
 [installation instructions](../README.md#installation).
 
 ## Choose a Provider
 
 | Provider | Best for | Date filter / ordering | Location | Description caption | Videos |
 |----------|----------|:---:|:---:|:---:|:---:|
-| [Google Photos](#google-photos) | A shared album link | Yes | Separate opt-in | Optional enrichment | No |
+| [Google Photos](#google-photos) | One or more shared album links | Yes | Separate opt-in | Optional enrichment | No |
 | [Immich](#immich) | An Immich server (album, person, favorites, all, search) | Yes | Yes | Yes | [Optional](#immich-videos) |
 | [PhotoPrism](#photoprism) | A PhotoPrism server (album, person, favorites, all, search) | Yes | Yes | Yes | No |
 | [iCloud](#icloud-shared-album) | An iCloud Shared Album public link | Yes | No | Yes | No |
@@ -62,7 +63,7 @@ several albums, the album title sensor shows the slideshow's name.
 
 Google Photos metadata enrichment is on by default, including existing entries
 without a saved preference. A previously saved off setting stays off. Use
-**Configure > Photo metadata and privacy > Fetch photo metadata (experimental)** to turn it on or off per album.
+**Configure > Photo metadata and privacy > Fetch photo metadata (experimental)** to turn it on or off per slideshow.
 The slideshow loads as usual while a separate worker reads photo descriptions,
 camera make/model, focal length, aperture, ISO, and exposure time from the
 public album. Descriptions use the existing caption option on the card.

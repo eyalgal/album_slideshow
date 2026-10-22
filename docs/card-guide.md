@@ -320,7 +320,8 @@ adds photo details without creating any sensor entities. The default remains
 `[date, location]` when captions are enabled without a field selection.
 
 For Google location captions, enable both [location privacy options](provider-setup.md#google-location-and-privacy)
-in the integration's Configure dialog, then select `location` in the card.
+under the slideshow's **Configure > Photo metadata and privacy**, then select
+`location` in the card.
 GPS reading alone supplies coordinates as attributes, not a place-name caption.
 Both location options are off by default and independent of camera metadata.
 

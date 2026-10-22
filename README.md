@@ -146,7 +146,7 @@ Without the sync blueprint, the background can lag behind the camera, so
 <a id="️-limitations"></a><a id="general"></a>
 ## Limitations and Troubleshooting
 
-- Still images only; video playback is not supported.
+- Videos play only from Immich, and only in the Album Slideshow card; other sources show still images.
 - <a id="-exif--location-local--nas--immich--photoprism--synology--nextcloud--ente"></a>Metadata varies by source. See [provider capabilities](docs/provider-setup.md#choose-a-provider) and the [EXIF privacy settings](docs/provider-setup.md#exif-capture-date-and-location).
 - HEIC/HEIF support depends on the codecs available in your Home Assistant installation.
 - <a id="google-photos-1"></a>See [Google Photos limits](docs/provider-setup.md#google-photos-limits), including the scraper fallback and cached albums.

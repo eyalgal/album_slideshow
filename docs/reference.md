@@ -145,7 +145,7 @@ For the on-card toolbar and its temporary display hold, see the
 
 ## Entities Created
 
-Each album you configure creates the following entities in Home Assistant,
+Each slideshow you configure creates the following entities in Home Assistant,
 along with the [runtime controls](#runtime-configuration) above.
 
 ### Camera
@@ -168,7 +168,7 @@ along with the [runtime controls](#runtime-configuration) above.
 
 | Entity | Source | Description |
 |--------|--------|-------------|
-| Album title | All | Title of the source album |
+| Album title | All | Title of the source album; a Google slideshow that combines several albums shows its own name |
 | Media count | All | Number of images currently available |
 | Hidden photos | All | Number of persisted exclusions for this slideshow |
 | Image cache usage *(diagnostic)* | All | Current download cache size in MB |
