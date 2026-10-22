@@ -117,6 +117,7 @@ from .const import (
     PROVIDER_ENTE,
     PROVIDER_UGREEN,
 )
+from .google_albums import album_urls_from_data
 from .store import SlideshowStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -183,6 +184,10 @@ class MediaItem:
     # Provider file path (Immich ``originalPath``), shown by the card's
     # ``path`` caption.
     source_path: str | None = None
+    # Google Photos only: the shared-album link this photo was read from.
+    # Entries can combine several albums, and per-photo metadata has to be
+    # requested from the album that actually contains the photo.
+    source_album_url: str | None = None
     # Runtime-only description of the stream a video is served as (see
     # ``async_video_info``); not persisted.
     video_info: dict[str, Any] | None = None
@@ -302,6 +307,38 @@ def _photo_base_key(url: str | None) -> str | None:
     base = url.split("?", 1)[0]
     base = _PHOTO_SIZE_SUFFIX_RE.sub("", base)
     return base or None
+
+
+def _tag_album(items: list[MediaItem], album_url: str) -> None:
+    """Record which shared album each Google item was read from."""
+    for item in items:
+        item.source_album_url = album_url
+
+
+def _merge_album_items(item_lists: list[list[MediaItem]]) -> list[MediaItem]:
+    """Combine several albums' items into one list without duplicates.
+
+    The same photo in two shared albums gets a different media key and URL in
+    each, so it is matched by when it was taken, its size and its file size;
+    photos without a date fall back to the media key or the stable part of
+    the URL. Only photos already seen in an earlier album are dropped, so
+    burst shots within one album stay. The first album that contains a photo
+    keeps it; overall order is album by album.
+    """
+    merged: list[MediaItem] = []
+    seen: set[tuple] = set()
+    for items in item_lists:
+        album_keys: set[tuple] = set()
+        for item in items:
+            keys = {("id", item.source_id or _photo_base_key(item.url) or item.url)}
+            if item.captured_at and item.width and item.height:
+                keys.add(("shot", item.captured_at, item.width, item.height, item.byte_size))
+            if keys & seen:
+                continue
+            album_keys |= keys
+            merged.append(item)
+        seen |= album_keys
+    return merged
 
 
 def _enrich_missing_dates(
@@ -1182,7 +1219,12 @@ class AlbumCoordinator(DataUpdateCoordinator):
             if entry.data.get(CONF_IMMICH_LIVE_PHOTOS):
                 source.append("live_photos")
             self._immich_cache_source = sha256(json.dumps(source).encode()).hexdigest()
-        self.album_url: str | None = entry.data.get(CONF_ALBUM_URL)
+        # Google: one or more shared-album links. ``album_url`` stays the
+        # first (primary) link for code paths that only need one.
+        self.album_urls: list[str] = album_urls_from_data(entry.data)
+        self.album_url: str | None = (
+            self.album_urls[0] if self.album_urls else entry.data.get(CONF_ALBUM_URL)
+        )
         self.local_path: str | None = entry.data.get(CONF_LOCAL_PATH)
         self.recursive: bool = bool(entry.data.get(CONF_RECURSIVE, True))
         self.media_content_id: str | None = entry.data.get(CONF_MEDIA_CONTENT_ID)
@@ -1570,6 +1612,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     duration_ms=raw.get("duration_ms") if isinstance(raw.get("duration_ms"), int) else None,
                     source_path=raw.get("source_path") if isinstance(raw.get("source_path"), str) else None,
                     live_photo=bool(raw.get("live_photo", False)),
+                    source_album_url=raw.get("source_album_url")
+                    if isinstance(raw.get("source_album_url"), str) else None,
                 ))
             except Exception:
                 continue
@@ -1618,6 +1662,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     "duration_ms": it.duration_ms,
                     "source_path": it.source_path,
                     "live_photo": it.live_photo,
+                    "source_album_url": it.source_album_url,
                 }
                 for it in items
             ],
@@ -2866,7 +2911,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
             async with aiohttp.ClientSession(
                 cookie_jar=aiohttp.DummyCookieJar(), trust_env=False,
             ) as session:
-                keys = None
+                # Metadata keys are per shared album; fetch each album's keys
+                # once, the first time one of its photos needs them.
+                keys_by_album: dict[str | None, Any] = {}
                 for item, location_job in jobs:
                     delay = next_request - loop.time()
                     if delay > 0:
@@ -2897,8 +2944,11 @@ class AlbumCoordinator(DataUpdateCoordinator):
                             item.location_geocoded = False
                             item.google_location_scanned = True
                         else:
+                            album = item.source_album_url or self.album_url
+                            keys = keys_by_album.get(album)
                             if keys is None:
-                                keys = await google_scraper.fetch_metadata_keys(session, self.album_url)
+                                keys = await google_scraper.fetch_metadata_keys(session, album)
+                                keys_by_album[album] = keys
                             metadata = await google_scraper.fetch_photo_metadata(
                                 session, keys, item.source_id,
                             )
@@ -3220,15 +3270,17 @@ class AlbumCoordinator(DataUpdateCoordinator):
         self,
         session,
         max_items: int,
+        album_url: str | None = None,
     ) -> dict[str, Any]:
         """Call the publicalbum.org API with automatic fallback on param errors.
 
         Tries with image dimensions first (1920×1080), then without them
         if the API rejects the size parameters.
         """
+        album_url = album_url or self.album_url
         param_sets: list[dict[str, Any]] = [
             {
-                "sharedLink": self.album_url,
+                "sharedLink": album_url,
                 "imageWidth": 1920,
                 "imageHeight": 1080,
                 "includeThumbnails": False,
@@ -3237,7 +3289,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 "maxResults": max_items,
             },
             {
-                "sharedLink": self.album_url,
+                "sharedLink": album_url,
                 "includeThumbnails": False,
                 "attachMetadata": True,
                 "maxResults": max_items,
@@ -3286,10 +3338,82 @@ class AlbumCoordinator(DataUpdateCoordinator):
         )
 
     async def _update_google_shared(self) -> dict[str, Any]:
-        if not self.album_url:
+        urls = getattr(self, "album_urls", None) or ([self.album_url] if self.album_url else [])
+        if not urls:
             raise UpdateFailed("Missing album URL")
 
         session = async_get_clientsession(self.hass)
+
+        if len(urls) == 1:
+            data = await self._fetch_google_album(session, urls[0])
+            _tag_album(data.get("items") or [], urls[0])
+            return data
+
+        # Several shared albums: fetch each, then merge into one pool. One
+        # album failing must not empty the slideshow, so its photos from the
+        # last successful refresh are kept until it loads again.
+        item_lists: list[list[MediaItem]] = []
+        failed: list[str] = []
+        last_error: Exception | None = None
+        for index, url in enumerate(urls, start=1):
+            try:
+                data = await self._fetch_google_album(session, url)
+            except Exception as err:  # noqa: BLE001 - one album must not sink the rest
+                last_error = err
+                failed.append(url)
+                _LOGGER.warning(
+                    "Google shared album %d of %d could not be loaded (%s); "
+                    "keeping its previously loaded photos",
+                    index, len(urls), err,
+                )
+                item_lists.append(await self._previous_album_items(url))
+                continue
+            items = data.get("items") or []
+            _tag_album(items, url)
+            item_lists.append(items)
+
+        if len(failed) == len(urls):
+            raise UpdateFailed(
+                f"None of the {len(urls)} Google shared albums could be loaded: {last_error}"
+            )
+        items = _merge_album_items(item_lists)
+        if not items:
+            raise UpdateFailed("No photos returned from the Google shared albums")
+        _LOGGER.info(
+            "Album scraper: combined %d shared albums into %d photos%s",
+            len(urls), len(items),
+            f" ({len(failed)} album(s) served from the last refresh)" if failed else "",
+        )
+        return {"title": self.entry.title, "items": items}
+
+    async def _previous_album_items(self, album_url: str) -> list[MediaItem]:
+        """Photos from ``album_url`` as of the last successful refresh.
+
+        Looks at the in-memory data first, then the on-disk items cache (after
+        a restart the in-memory data is empty, and memory may hold other
+        albums but none of this one).
+
+        Items saved before albums were tracked have no ``source_album_url``.
+        They can only come from the entry's original single album: editing
+        the album list clears the cache. So they count as the first album.
+        """
+        primary = self.album_urls[0] if getattr(self, "album_urls", None) else self.album_url
+
+        def from_album(items: list[MediaItem] | None) -> list[MediaItem]:
+            return [
+                item for item in items or []
+                if (item.source_album_url or primary) == album_url
+            ]
+
+        memory = (self.data or {}).get("items") if isinstance(self.data, dict) else None
+        matching = from_album(memory)
+        if matching:
+            return matching
+        cached = await self._load_cached_items()
+        return from_album((cached or {}).get("items"))
+
+    async def _fetch_google_album(self, session, album_url: str) -> dict[str, Any]:
+        """Fetch one Google Photos shared album: ``{"title", "items"}``."""
 
         # Try direct scrape first - paginates via Google's batchexecute RPC
         # to bypass publicalbum.org's ~300 cap.
@@ -3302,7 +3426,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             from . import google_scraper
 
             scraped_title, scraped_items, video_keys = await google_scraper.fetch_album(
-                session, self.album_url
+                session, album_url
             )
         except Exception as err:  # never let scrape failure break the integration
             _LOGGER.debug(
@@ -3324,7 +3448,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
             }
 
         try:
-            data = await self._call_publicalbum(session, 500)
+            data = await self._call_publicalbum(session, 500, album_url)
         except UpdateFailed:
             if scraped_items:
                 _LOGGER.info(

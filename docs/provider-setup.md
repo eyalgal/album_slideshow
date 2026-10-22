@@ -38,11 +38,31 @@ images, not videos. Install the integration first using the
 3. Add the integration.
 4. Paste the link.
 
+### Combining Several Albums
+
+One slideshow can show photos from several shared albums. When adding the
+integration, paste the first shared album link, then use **Add Shared album
+link** for each extra album. To change the albums of an existing slideshow, open
+**Configure > Shared albums** and add or remove links. The slideshow keeps its
+entities, settings and hidden photos.
+
+Photos from all albums are combined into one pool before ordering, date
+filters and portrait pairing are applied. A photo that is in more than one of
+the albums is shown once; it's recognized by when it was taken and its size,
+since Google gives each album's copy its own ID. With **Album order**, photos
+follow the order of the links, album by album. Photo metadata is requested
+from the album each photo came from.
+
+If one album cannot be loaded during a refresh, its photos from the last
+successful refresh are kept and the other albums update normally; the
+slideshow only falls back to its saved copy when none of the albums load. With
+several albums, the album title sensor shows the slideshow's name.
+
 ### Experimental Photo Metadata
 
 Google Photos metadata enrichment is on by default, including existing entries
 without a saved preference. A previously saved off setting stays off. Use
-**Configure > Fetch photo metadata (experimental)** to turn it on or off per album.
+**Configure > Photo metadata and privacy > Fetch photo metadata (experimental)** to turn it on or off per album.
 The slideshow loads as usual while a separate worker reads photo descriptions,
 camera make/model, focal length, aperture, ISO, and exposure time from the
 public album. Descriptions use the existing caption option on the card.
@@ -64,7 +84,7 @@ update can replace a locally installed test build.
 ### Google Location and Privacy
 
 In **Settings > Devices & services > Album Slideshow**, choose the Google
-album's **Configure** button. Location has two independent consent controls:
+album's **Configure** button, then **Photo metadata and privacy**. Location has two independent consent controls:
 
 | Setting | Default | Effect |
 |---------|---------|--------|

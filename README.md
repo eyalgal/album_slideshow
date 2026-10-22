@@ -43,7 +43,7 @@ sources provide dates, locations, and descriptions.
 
 | Source | Connection |
 |--------|------------|
-| <a id="google-photos"></a>[Google Photos](docs/provider-setup.md#google-photos) | Shared album link |
+| <a id="google-photos"></a>[Google Photos](docs/provider-setup.md#google-photos) | One or more shared album links ([combined](docs/provider-setup.md#combining-several-albums)) |
 | <a id="immich"></a><a id="choosing-what-to-show"></a><a id="image-quality"></a><a id="notes"></a>[Immich](docs/provider-setup.md#immich) | Server URL and API key; albums, people, favorites, or search |
 | <a id="photoprism"></a><a id="choosing-what-to-show-1"></a><a id="image-quality-1"></a><a id="notes-1"></a>[PhotoPrism](docs/provider-setup.md#photoprism) | App password or account; albums, people, favorites, or search |
 | <a id="icloud-shared-album"></a><a id="image-quality-2"></a><a id="notes-2"></a><a id="troubleshooting-slow-legacy-albums"></a>[iCloud](docs/provider-setup.md#icloud-shared-album) | Public Shared Album link |
