@@ -68,6 +68,10 @@ class _ExpiredLink(Exception):
 # (no metadata available) are expensive.
 _PAIR_SEARCH_LIMIT = 12
 _SKIP_SEARCH_LIMIT = 30
+# Random order looks this far for a partner not yet shown this cycle.
+_PAIR_UNSHOWN_SCAN = 2000
+# Second photos of pairs that an ordered slideshow still has to step over.
+_PAIRED_MEMORY = 64
 
 _MAX_RENDER_ATTEMPTS = 10
 
@@ -136,6 +140,7 @@ class _NavigationCursor:
     random_pos: int
     recent_urls: tuple[str, ...]
     rng_state: Any
+    paired_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +313,7 @@ class AlbumSlideshowCamera(Camera):
     _attr_should_poll = False
     # The signed stream URL and the server's file paths stay out of history.
     _unrecorded_attributes = frozenset({"video_url", "current_path"})
+    _paired_urls: tuple[str, ...] = ()
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: AlbumCoordinator, store: SlideshowStore) -> None:
         super().__init__()
@@ -796,6 +802,7 @@ class AlbumSlideshowCamera(Camera):
         self._random_order = []
         self._random_pos = 0
         self._recent_urls = []
+        self._paired_urls = ()
         items = self._effective_items()
         positions = {item.photo_id: index for index, item in enumerate(items) if item.photo_id}
         reusable = []
@@ -937,6 +944,7 @@ class AlbumSlideshowCamera(Camera):
             random_pos=int(source._random_pos),
             recent_urls=tuple(source._recent_urls),
             rng_state=source._rng.getstate(),
+            paired_urls=source._paired_urls,
         )
 
     def _make_renderer(self, cursor: _NavigationCursor):
@@ -957,6 +965,7 @@ class AlbumSlideshowCamera(Camera):
         renderer._random_order = list(cursor.random_order)
         renderer._random_pos = cursor.random_pos
         renderer._recent_urls = list(cursor.recent_urls)
+        renderer._paired_urls = cursor.paired_urls
         renderer._rng = random.Random()
         renderer._rng.setstate(cursor.rng_state)
         return renderer
@@ -1038,6 +1047,7 @@ class AlbumSlideshowCamera(Camera):
         self._random_order = list(frame.cursor.random_order)
         self._random_pos = frame.cursor.random_pos
         self._recent_urls = list(frame.cursor.recent_urls)
+        self._paired_urls = frame.cursor.paired_urls
         self._rng.setstate(frame.cursor.rng_state)
 
         meta = frame.meta
@@ -1549,18 +1559,64 @@ class AlbumSlideshowCamera(Camera):
 
         # Sequential modes (album order + sorted-by-time orderings) walk in
         # order. The list is already pre-sorted by ``order_items``, so we
-        # only need to step forward.
+        # only need to step forward, past photos a pair already showed.
         if order_mode != ORDER_RANDOM:
             self._index = (self._index + 1) % count
+            for _ in range(count - 1):
+                url = items[self._index].url
+                if url not in self._paired_urls:
+                    break
+                self._paired_urls = tuple(u for u in self._paired_urls if u != url)
+                self._index = (self._index + 1) % count
             return
 
         bias = getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
         self._index = self._next_age_weighted_index(items, bias) if bias else self._next_random_index(count)
-        cur_url = items[self._index].url
-        self._recent_urls.append(cur_url)
+        self._remember_recent(items[self._index].url, count)
+
+    def _remember_recent(self, url: str, count: int) -> None:
+        self._recent_urls.append(url)
         keep = min(20, max(1, count - 1))
         if len(self._recent_urls) > keep:
             self._recent_urls = self._recent_urls[-keep:]
+
+    def _random_cycle_active(self, count: int) -> bool:
+        """Whether plain random order is walking a shuffle cycle of ``count``."""
+        return (
+            self.store.order_mode == ORDER_RANDOM
+            and not getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
+            and len(self._random_order) == count
+        )
+
+    def _shown_this_cycle(self, items: list[MediaItem]):
+        """Return a check for photos already shown this cycle, if one applies."""
+        if self._random_cycle_active(len(items)):
+            remaining = set(self._random_order[self._random_pos:])
+            return lambda index: index not in remaining
+        if self._paired_urls:
+            paired = set(self._paired_urls)
+            return lambda index: items[index].url in paired
+        return None
+
+    def _mark_partner_shown(self, index: int, items: list[MediaItem]) -> None:
+        """Count a pair's second photo as shown, so it isn't repeated soon."""
+        count = len(items)
+        url = items[index].url
+        if self.store.order_mode != ORDER_RANDOM:
+            if url not in self._paired_urls:
+                self._paired_urls = (*self._paired_urls, url)[-_PAIRED_MEMORY:]
+            return
+        if self._random_cycle_active(count):
+            order = self._random_order
+            try:
+                position = order.index(index, self._random_pos)
+            except ValueError:
+                pass  # Already shown earlier in this cycle.
+            else:
+                pos = self._random_pos
+                order[pos], order[position] = order[position], order[pos]
+                self._random_pos += 1
+        self._remember_recent(url, count)
 
     def _peek_advance(self, count: int, items: list) -> None:
         """Advance _index without committing to random-order bookkeeping.
@@ -1808,11 +1864,18 @@ class AlbumSlideshowCamera(Camera):
         outcome and simply returns ``None``, which the caller renders as a
         single unpaired image.
 
-        This is a pure function of ``self._index``, ``self._recent_urls``
-        and ``self._rng``'s state, which is exactly what the navigation
-        buffer's cursor snapshots capture - so replaying a cached cursor
-        (Previous/Next) always reproduces the same paired frame; only
-        rendering a slide for the first time consumes new randomness.
+        A partner that was already shown this cycle (random order) or
+        already used as a partner (ordered modes) is only picked when no
+        unshown one qualifies. In random order the search for an unshown
+        partner reaches past ``limit`` positions; only downloads count
+        toward ``limit`` there. The chosen partner is then counted as shown
+        (see ``_mark_partner_shown``).
+
+        The result depends only on the ordering state that the navigation
+        buffer's cursor snapshots capture, and the cursor is captured after
+        this runs - so replaying a cached cursor (Previous/Next) always
+        reproduces the same paired frame; only rendering a slide for the
+        first time consumes new randomness.
 
         Uses metadata wherever possible - only candidates without width/height
         metadata are downloaded and decoded for their orientation. The returned
@@ -1823,23 +1886,67 @@ class AlbumSlideshowCamera(Camera):
             return None
         n = len(items)
         radius = _pair_exclusion_radius(n, self.store.pair_min_gap_percent)
+        shuffled: list[int] | None = None
         if radius > 0:
             excluded = {(self._index + d) % n for d in range(-radius, radius + 1)}
-            candidates = [idx for idx in range(n) if idx not in excluded]
-            self._rng.shuffle(candidates)
-        else:
-            candidates = (
-                (self._index + offset) % n
-                for offset in range(1, min(n, limit + 1))
-            )
+            shuffled = [idx for idx in range(n) if idx not in excluded]
+            self._rng.shuffle(shuffled)
 
+        def candidates(span: int):
+            if shuffled is not None:
+                return shuffled[:span]
+            return ((self._index + offset) % n for offset in range(1, min(n, span + 1)))
+
+        tried: set[int] = set()
+        found = None
+        shown = self._shown_this_cycle(items)
+        if shown is not None:
+            whole_cycle = self._random_cycle_active(n)
+            found = await self._scan_for_partner(
+                items,
+                candidates(_PAIR_UNSHOWN_SCAN if whole_cycle else limit),
+                is_portrait_canvas,
+                width,
+                height,
+                limit,
+                tried=tried,
+                skip=shown,
+                downloads_only=whole_cycle,
+            )
+        if found is None:
+            found = await self._scan_for_partner(
+                items, candidates(limit), is_portrait_canvas, width, height, limit, tried=tried,
+            )
+        if found is None:
+            return None
+        img, index = found
+        self._mark_partner_shown(index, items)
+        return img, items[index]
+
+    async def _scan_for_partner(
+        self,
+        items: list[MediaItem],
+        candidates,
+        is_portrait_canvas: bool,
+        width: int,
+        height: int,
+        limit: int,
+        *,
+        tried: set[int],
+        skip=None,
+        downloads_only: bool = False,
+    ) -> tuple[Image.Image, int] | None:
+        """Return the first usable partner among ``candidates`` and its index."""
         tries = 0
         for idx in candidates:
             if tries >= limit:
                 break
             it = items[idx]
-            tries += 1
+            if not downloads_only:
+                tries += 1
 
+            if idx in tried or (skip is not None and skip(idx)):
+                continue
             if it.url in self._recent_urls or _is_video(it):
                 continue
 
@@ -1848,6 +1955,9 @@ class AlbumSlideshowCamera(Camera):
                 # Metadata says this one is the wrong orientation for pairing; skip.
                 continue
 
+            if downloads_only:
+                tries += 1
+            tried.add(idx)
             b = await self._fetch_bytes(it.url)
             if not b:
                 continue
@@ -1860,7 +1970,7 @@ class AlbumSlideshowCamera(Camera):
             if ip.is_portrait_item(it, img) != is_portrait_canvas:
                 # Only the chosen partner needs faces and caption fields.
                 await self._ensure_enriched(it)
-                return img, it
+                return img, idx
             ip.safe_close(img)
 
         return None

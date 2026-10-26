@@ -7,7 +7,7 @@ import types
 import pytest
 
 from custom_components.album_slideshow import camera
-from custom_components.album_slideshow.const import DEFAULT_PAIR_MIN_GAP_PERCENT
+from custom_components.album_slideshow.const import DEFAULT_PAIR_MIN_GAP_PERCENT, ORDER_ALBUM
 from custom_components.album_slideshow.coordinator import MediaItem
 from custom_components.album_slideshow.store import SlideshowStore
 
@@ -79,7 +79,7 @@ def _stub_image_decode(monkeypatch):
 def _make_search_cam(*, index: int, pair_min_gap_percent: int, seed: int = 1):
     cam = camera.AlbumSlideshowCamera.__new__(camera.AlbumSlideshowCamera)
     cam.hass = _FakeHass()
-    cam.store = types.SimpleNamespace(pair_min_gap_percent=pair_min_gap_percent)
+    cam.store = types.SimpleNamespace(pair_min_gap_percent=pair_min_gap_percent, order_mode=ORDER_ALBUM)
     cam._index = index
     cam._recent_urls = []
     cam._rng = random.Random(seed)

@@ -75,7 +75,7 @@ and the bias control only for **Random**. Other ordering modes ignore the bias.
 
 | Mode | Behavior |
 |------|----------|
-| **Pair** | Display two mismatched images side by side |
+| **Pair** | Display two mismatched images side by side. The second photo counts as shown, so it doesn't come back later in the same pass through the album |
 | **Single** | Render single image using selected fill mode |
 | **Avoid** | Skip mismatched images |
 

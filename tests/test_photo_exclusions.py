@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -285,14 +286,16 @@ def test_hide_reuses_safe_preloaded_frame_without_rendering(monkeypatch):
 
 def test_hide_rejects_pairs_with_a_hidden_half_and_reuses_the_next_safe_pair(monkeypatch):
     async def run():
-        items = [_item(f"photo-{index}", f"https://example.com/{index}") for index in range(4)]
+        items = [_item(f"photo-{index}", f"https://example.com/{index}") for index in range(6)]
         for index, item in enumerate(items):
             item.description = f"Caption {index}"
         cam = await _camera(items, monkeypatch, paired=True)
-        unsafe = await cam._render_available_frame(cam._current_frame.cursor, items, advance=True)
+        unsafe = await cam._render_available_frame(
+            replace(cam._current_frame.cursor, index=1), items, advance=False
+        )
         safe = await cam._render_available_frame(unsafe.cursor, items, advance=True)
         assert unsafe.meta["photo_ids"] == [items[1].photo_id, items[2].photo_id]
-        assert safe.meta["photo_ids"] == [items[2].photo_id, items[3].photo_id]
+        assert safe.meta["photo_ids"] == [items[3].photo_id, items[4].photo_id]
         cam._next_frames.extend([unsafe, safe])
         renderer = AsyncMock(side_effect=AssertionError("A safe pair was already buffered"))
         cam._render_available_frame = renderer
@@ -302,8 +305,8 @@ def test_hide_rejects_pairs_with_a_hidden_half_and_reuses_the_next_safe_pair(mon
         renderer.assert_not_awaited()
         assert cam._framebuffer == safe.data
         assert cam._last_pair_frames == safe.meta["pair_frames"]
-        assert cam._index == 1
-        assert cam.extra_state_attributes["description"] == "Caption 2"
+        assert cam._index == 2
+        assert cam.extra_state_attributes["description"] == "Caption 3"
         assert cam.extra_state_attributes["displayed_photo_ids"] == safe.meta["photo_ids"]
         assert not cam._previous_frames
         assert not cam._next_frames
