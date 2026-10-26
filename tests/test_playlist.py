@@ -203,6 +203,39 @@ def test_filter_on_this_day_drops_undated():
     assert out == ["anniversary"]
 
 
+_CHICAGO = timezone(timedelta(hours=-5))
+
+
+def _at(*args: int) -> int:
+    return int(datetime(*args, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_on_this_day_uses_the_local_date():
+    # 02:00 UTC on July 15 is still the evening of July 14 in Chicago.
+    now = datetime(2026, 7, 15, 2, 0, tzinfo=timezone.utc)
+    items = [
+        _Item("evening", captured_at=_at(2020, 7, 15, 3, 0)),  # July 14, 22:00 local
+        _Item("afternoon", captured_at=_at(2020, 7, 14, 20, 0)),
+        _Item("next_morning", captured_at=_at(2020, 7, 15, 12, 0)),
+    ]
+
+    local = playlist.filter_items(items, mode=DATE_FILTER_ON_THIS_DAY, now=now, tz=_CHICAGO)
+    utc = playlist.filter_items(items, mode=DATE_FILTER_ON_THIS_DAY, now=now)
+
+    assert [it.url for it in local] == ["evening", "afternoon"]
+    assert [it.url for it in utc] == ["evening", "next_morning"]
+
+
+@pytest.mark.parametrize("mode", [DATE_FILTER_THIS_MONTH, DATE_FILTER_THIS_YEAR])
+def test_month_and_year_start_at_local_midnight(mode):
+    # New Year in UTC, but still December 31 in Chicago.
+    now = datetime(2027, 1, 1, 3, 0, tzinfo=timezone.utc)
+    items = [_Item("december", captured_at=_at(2026, 12, 20, 12, 0))]
+
+    assert playlist.filter_items(items, mode=mode, now=now, tz=_CHICAGO) == items
+    assert playlist.filter_items(items, mode=mode, now=now) == []
+
+
 @pytest.mark.parametrize("days", [1, 7, 30, 365, 1825, 36500])
 def test_custom_lookback_includes_exact_cutoff(days):
     cutoff = int((_NOW - timedelta(days=days)).timestamp() * 1000)

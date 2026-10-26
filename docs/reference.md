@@ -30,7 +30,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Select | Order mode | random | random, album_order, newest_taken, oldest_taken, newest_added, oldest_added | Slide ordering behavior |
 | Select | Aspect ratio | 16:9 | 16:9, 4:3, 1:1, 9:16, and more | Canvas aspect ratio |
 | Select | Max resolution | 4K (2160p) | 480p, 720p, 1080p, 1440p, 4K (2160p), original | Cap output resolution by short edge; use original to render at native size |
-| Select | Date filter | off | off, last_7_days, last_30_days, last_365_days, custom_days, this_month, this_year, on_this_day | Restrict the slideshow to a date window based on photo capture date |
+| Select | Date filter | off | off, last_7_days, last_30_days, last_365_days, custom_days, this_month, this_year, on_this_day | Restrict the slideshow to a date window based on photo capture date. This month, This year and On this day follow Home Assistant's time zone and move on at local midnight |
 | Text | Pair divider color | #FFFFFF | Hex, named colors, transparent | Divider color between paired images |
 | Switch | Pause slideshow | off | on / off | Hold the current frame; advances pause until turned off |
 | Switch | Pause when not viewed | off | on / off | Hold the slideshow while no dashboard card or camera view is showing it; see [Pause and navigation](#pause-and-navigation) |

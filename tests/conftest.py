@@ -91,6 +91,11 @@ _er.async_entries_for_config_entry = lambda *a, **kw: []  # type: ignore[attr-de
 import homeassistant.helpers.aiohttp_client as _aiohttp_client
 _aiohttp_client.async_get_clientsession = lambda *a, **kw: None  # type: ignore[attr-defined]
 
+_make_stub("homeassistant.util.dt")
+from datetime import timezone as _timezone
+import homeassistant.util.dt as _dt_util
+_dt_util.DEFAULT_TIME_ZONE = _timezone.utc  # type: ignore[attr-defined]
+
 import homeassistant.helpers.storage as _storage
 
 

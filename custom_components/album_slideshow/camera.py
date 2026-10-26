@@ -20,10 +20,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
     CAMERA_METADATA_FIELDS,
+    DATE_FILTER_OFF,
     DEFAULT_CUSTOM_LOOKBACK_DAYS,
     DEFAULT_SHUFFLE_AGE_BIAS,
     DEFAULT_MISSING_DATE_MODE,
@@ -634,6 +636,7 @@ class AlbumSlideshowCamera(Camera):
         """
         data = self.coordinator.data or {}
         raw: list[MediaItem] = data.get("items", []) or []
+        tz = dt_util.DEFAULT_TIME_ZONE
         cache_key = (
             id(raw),
             self.store.date_filter,
@@ -641,6 +644,10 @@ class AlbumSlideshowCamera(Camera):
             self.store.missing_date_mode,
             self.store.order_mode,
             self.store.hidden_revision,
+            # Date filters move to the next day at local midnight.
+            datetime.now(tz).toordinal()
+            if self.store.date_filter not in (None, "", DATE_FILTER_OFF)
+            else None,
         )
         if self._effective_cache is not None and self._effective_cache[0] == hash(cache_key):
             return self._effective_cache[1]
@@ -651,6 +658,7 @@ class AlbumSlideshowCamera(Camera):
             mode=self.store.date_filter,
             lookback_days=getattr(self.store, "custom_lookback_days", DEFAULT_CUSTOM_LOOKBACK_DAYS),
             missing_date=self.store.missing_date_mode,
+            tz=tz,
         )
         ordered = playlist.order_items(filtered, self.store.order_mode)
         self._effective_cache = (hash(cache_key), ordered)

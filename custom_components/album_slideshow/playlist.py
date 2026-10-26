@@ -6,7 +6,7 @@ implementation. Operates on ``MediaItem``-like objects that expose
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import math
 from typing import Iterable, TypeVar
 
@@ -115,6 +115,7 @@ def filter_items(
     missing_date: str = DEFAULT_MISSING_DATE_MODE,
     lookback_days: int = DEFAULT_CUSTOM_LOOKBACK_DAYS,
     now: datetime | None = None,
+    tz: tzinfo | None = None,
 ) -> list[T]:
     """Filter items by date according to ``mode``.
 
@@ -128,14 +129,16 @@ def filter_items(
       behaviour); the strict ``on_this_day`` still drops them.
     - ``exclude`` - drop undated photos entirely.
 
-    ``now`` is overridable for deterministic tests.
+    Calendar modes (this month, this year, on this day) use ``tz``, Home
+    Assistant's time zone, and UTC when it is omitted. ``now`` is
+    overridable for deterministic tests.
     """
     if not mode or mode == DATE_FILTER_OFF:
         return list(items)
 
-    today_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    today = (now or datetime.now(timezone.utc)).astimezone(tz or timezone.utc)
 
-    pred, strict = _build_predicate(mode, today_utc, lookback_days)
+    pred, strict = _build_predicate(mode, today, lookback_days)
     if pred is None:
         return list(items)
 
@@ -167,39 +170,39 @@ def filter_items(
 
 def _build_predicate(
     mode: str,
-    today_utc: datetime,
+    today: datetime,
     lookback_days: int = DEFAULT_CUSTOM_LOOKBACK_DAYS,
 ):
     """Return (predicate, strict). ``strict`` drops items without timestamps."""
     if mode == DATE_FILTER_CUSTOM:
         days = lookback_days if type(lookback_days) is int else DEFAULT_CUSTOM_LOOKBACK_DAYS
         days = max(1, min(MAX_CUSTOM_LOOKBACK_DAYS, days))
-        cutoff = int((today_utc - timedelta(days=days)).timestamp() * 1000)
+        cutoff = int((today - timedelta(days=days)).timestamp() * 1000)
         return (lambda timestamp: timestamp >= cutoff), False
     if mode == DATE_FILTER_LAST_7:
-        cutoff = int((today_utc - timedelta(days=7)).timestamp() * 1000)
+        cutoff = int((today - timedelta(days=7)).timestamp() * 1000)
         return (lambda ts: ts >= cutoff), False
     if mode == DATE_FILTER_LAST_30:
-        cutoff = int((today_utc - timedelta(days=30)).timestamp() * 1000)
+        cutoff = int((today - timedelta(days=30)).timestamp() * 1000)
         return (lambda ts: ts >= cutoff), False
     if mode == DATE_FILTER_LAST_365:
-        cutoff = int((today_utc - timedelta(days=365)).timestamp() * 1000)
+        cutoff = int((today - timedelta(days=365)).timestamp() * 1000)
         return (lambda ts: ts >= cutoff), False
     if mode == DATE_FILTER_THIS_MONTH:
-        start = today_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         cutoff = int(start.timestamp() * 1000)
         return (lambda ts: ts >= cutoff), False
     if mode == DATE_FILTER_THIS_YEAR:
-        start = today_utc.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        start = today.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
         cutoff = int(start.timestamp() * 1000)
         return (lambda ts: ts >= cutoff), False
     if mode == DATE_FILTER_ON_THIS_DAY:
-        # Match items whose UTC month+day equals today's. Useful for daily
+        # Match items whose local month+day equals today's. Useful for daily
         # "memories"-style rotation across all years.
-        today_md = (today_utc.month, today_utc.day)
+        today_md = (today.month, today.day)
 
         def _on_this_day(ts: int) -> bool:
-            d = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            d = datetime.fromtimestamp(ts / 1000, tz=today.tzinfo)
             return (d.month, d.day) == today_md
 
         return _on_this_day, True

@@ -133,6 +133,38 @@ def test_custom_lookback_invalidates_playlist_and_preserves_hidden_photos(monkey
     asyncio.run(run())
 
 
+def test_date_filtered_playlist_is_rebuilt_when_the_local_date_changes(monkeypatch):
+    async def run():
+        from custom_components.album_slideshow.const import DATE_FILTER_OFF, DATE_FILTER_ON_THIS_DAY
+
+        cam = await _camera([_item("photo-a")], monkeypatch)
+        zones = []
+        original = camera.playlist.filter_items
+
+        def spy(*args, **kwargs):
+            zones.append(kwargs["tz"])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(camera.playlist, "filter_items", spy)
+        # 26 hours apart, so these two zones are never on the same date.
+        east, west = timezone(timedelta(hours=14)), timezone(timedelta(hours=-12))
+        monkeypatch.setattr(camera.dt_util, "DEFAULT_TIME_ZONE", east)
+        cam.store.date_filter = DATE_FILTER_ON_THIS_DAY
+        cam._effective_items()
+        cam._effective_items()
+        monkeypatch.setattr(camera.dt_util, "DEFAULT_TIME_ZONE", west)
+        cam._effective_items()
+        assert zones == [east, west]
+
+        cam.store.date_filter = DATE_FILTER_OFF
+        cam._effective_items()
+        monkeypatch.setattr(camera.dt_util, "DEFAULT_TIME_ZONE", east)
+        cam._effective_items()
+        assert zones == [east, west, west]
+
+    asyncio.run(run())
+
+
 def test_debug_overlay_rebuilds_buffers_without_changing_exclusions(monkeypatch):
     async def run():
         cam = await _camera([_item("photo-a")], monkeypatch)
