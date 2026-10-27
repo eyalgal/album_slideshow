@@ -12,9 +12,11 @@ from pathlib import Path
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 import async_timeout
+from yarl import URL
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -215,6 +217,7 @@ _VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".3gp", ".mts", 
 # exhaust memory.
 _MEDIA_SOURCE_MAX_ITEMS = 5000
 _MEDIA_SOURCE_MAX_DEPTH = 8
+_MEDIA_LINK_LIFETIME = timedelta(minutes=5)
 
 # System/metadata folders and files that some sources (notably Synology)
 # expose but which are never user photos.
@@ -276,6 +279,14 @@ def _normalize_resolved_url(url: str, base_url: str) -> str:
     if url.startswith("/") and base_url:
         return f"{base_url.rstrip('/')}{url}"
     return url
+
+
+def _without_auth_sig(url: str) -> str:
+    """Drop an ``authSig`` saved by older versions; links are signed per download."""
+    if "authSig=" not in url:
+        return url
+    parsed = URL(url)
+    return str(parsed.with_query([(k, v) for k, v in parsed.query.items() if k != "authSig"]))
 
 _SKIP_DIR_PREFIXES = (".", "@", "#")
 
@@ -1579,12 +1590,13 @@ class AlbumCoordinator(DataUpdateCoordinator):
             return None
 
         items: list[MediaItem] = []
+        media_source = getattr(self, "provider", None) == PROVIDER_MEDIA_SOURCE
         for raw in raw_items:
             if not isinstance(raw, dict) or not raw.get("url"):
                 continue
             try:
                 items.append(MediaItem(
-                    url=raw["url"],
+                    url=_without_auth_sig(raw["url"]) if media_source else raw["url"],
                     width=raw.get("width"),
                     height=raw.get("height"),
                     mime_type=raw.get("mime_type"),
@@ -1771,12 +1783,11 @@ class AlbumCoordinator(DataUpdateCoordinator):
             if resolved is None:
                 continue
             raw = resolved[0]
-            # ``async_resolve_media`` returns an UNSIGNED ``/media/...`` path
-            # when called directly (the frontend's websocket handler is what
-            # normally signs it). Fetching an unsigned local-media path
-            # server-side gets a 401, so sign it ourselves before use.
+            # Stored unsigned and signed before each download (see
+            # ``media_link_signature``): Home Assistant's signing key changes
+            # on every restart, so a saved signature stops working.
             if isinstance(raw, str) and raw.startswith("/"):
-                raw = self._sign_media_path(raw)
+                raw = quote(raw)
             url = _normalize_resolved_url(raw, base_url)
             if not url:
                 continue
@@ -1799,28 +1810,32 @@ class AlbumCoordinator(DataUpdateCoordinator):
             "items": items,
         }
 
+    def media_link_signature(self, url: str) -> str | None:
+        """Return a fresh ``authSig`` for one of Home Assistant's own media links."""
+        if getattr(self, "provider", None) != PROVIDER_MEDIA_SOURCE:
+            return None
+        base = self._internal_base_url().rstrip("/")
+        if not base or not url.startswith(f"{base}/"):
+            return None
+        return URL(self._sign_media_path(url[len(base):])).query.get("authSig")
+
     def _sign_media_path(self, path: str) -> str:
-        """Sign a relative ``/media/...`` path so it can be fetched server-side.
+        """Sign a quoted ``/media/...`` path so it can be fetched server-side.
 
         Mirrors what Home Assistant's ``media_source/resolve_media`` websocket
-        handler does: quote the path and append an ``authSig`` signature. Uses
-        the content user so signing works from a background task with no
-        request context (the same mechanism that lets Cast devices fetch local
-        media). Signs for a window comfortably longer than the album refresh
-        interval; every refresh re-signs, so URLs stay fresh.
+        handler does: append an ``authSig`` signature. Uses the content user
+        so signing works from a background task with no request context (the
+        same mechanism that lets Cast devices fetch local media). The download
+        follows right away, so the signature only needs to live briefly.
         """
-        from urllib.parse import quote
-
         try:
             from homeassistant.components.http.auth import async_sign_path
         except Exception:  # pragma: no cover - http always present
             return path
 
-        quoted = quote(path)
-        expiration = timedelta(hours=max(48, int(self.store.refresh_hours) * 2 + 1))
         for kwargs in ({"use_content_user": True}, {}):
             try:
-                return async_sign_path(self.hass, quoted, expiration, **kwargs)
+                return async_sign_path(self.hass, path, _MEDIA_LINK_LIFETIME, **kwargs)
             except TypeError:
                 # Older/newer signature without ``use_content_user``.
                 continue

@@ -2102,11 +2102,14 @@ class AlbumSlideshowCamera(Camera):
         return None
 
     def _image_request_params(self, url: str) -> dict[str, str] | None:
-        """Session query params added at fetch time only (UGREEN ``ugk``)."""
-        params = getattr(self.coordinator, "image_request_params", None)
-        if params and isinstance(url, str) and url.startswith("http"):
-            return dict(params)
-        return None
+        """Query params added at fetch time only (UGREEN ``ugk``, media ``authSig``)."""
+        if not (isinstance(url, str) and url.startswith("http")):
+            return None
+        params = dict(getattr(self.coordinator, "image_request_params", None) or {})
+        sign = getattr(self.coordinator, "media_link_signature", None)
+        if sign is not None and (signature := sign(url)):
+            params["authSig"] = signature
+        return params or None
 
     async def _http_get(self, url: str, *, signed: bool = False) -> bytes | None:
         """Fetch one remote image with validation and a hard timeout.

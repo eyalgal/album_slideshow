@@ -705,10 +705,10 @@ def test_media_source_identity_uses_content_id_not_renewable_url(monkeypatch):
     coord._internal_base_url = lambda: "http://ha.test"
 
     async def run():
-        coord._sign_media_path = lambda path: path + "?authSig=old"
         first = (await coord._update_media_source())["items"][0]
-        coord._sign_media_path = lambda path: path + "?authSig=new"
+        coord._internal_base_url = lambda: "http://other.test"
         second = (await coord._update_media_source())["items"][0]
+        assert "authSig" not in first.url
         assert first.url != second.url
         assert first.source_id == "media-source://test/photo"
         assert first.photo_id == second.photo_id

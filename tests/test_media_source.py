@@ -215,7 +215,7 @@ def _stub_coord_with_store(refresh_hours=24):
     return coord
 
 
-def test_sign_media_path_quotes_and_signs(monkeypatch):
+def test_sign_media_path_signs_with_the_content_user(monkeypatch):
     import sys
     import types
 
@@ -223,6 +223,7 @@ def test_sign_media_path_quotes_and_signs(monkeypatch):
 
     def async_sign_path(hass, path, expiration, **kw):
         calls["path"] = path
+        calls["expiration"] = expiration
         calls["kw"] = kw
         return f"{path}?authSig=SIG"
 
@@ -231,10 +232,10 @@ def test_sign_media_path_quotes_and_signs(monkeypatch):
     monkeypatch.setitem(sys.modules, "homeassistant.components.http.auth", mod)
 
     coord = _stub_coord_with_store()
-    out = coord._sign_media_path("/media/local/a b.jpg")
-    # Path is quoted before signing, and content user is preferred.
+    out = coord._sign_media_path("/media/local/a%20b.jpg")
     assert out == "/media/local/a%20b.jpg?authSig=SIG"
     assert calls["path"] == "/media/local/a%20b.jpg"
+    assert calls["expiration"] == c._MEDIA_LINK_LIFETIME
     assert calls["kw"] == {"use_content_user": True}
 
 
@@ -261,3 +262,62 @@ def test_sign_media_path_returns_unchanged_when_signing_unavailable():
     # so signing is skipped and the path is returned as-is.
     coord = _stub_coord_with_store()
     assert coord._sign_media_path("/media/local/a.jpg") == "/media/local/a.jpg"
+
+
+# ── Signing at download time (#62) ─────────────────────────────────────────
+
+def _media_coord(provider=c.PROVIDER_MEDIA_SOURCE):
+    coord = _stub_coord_with_store()
+    coord.provider = provider
+    coord._internal_base_url = lambda: "http://ha.test:8123/"
+    return coord
+
+
+def test_media_links_are_stored_unsigned(monkeypatch):
+    from homeassistant import components
+
+    source = _FakeMediaSource({"root": [_node("local/My Photos/a", media_class="image")]})
+    monkeypatch.setattr(components, "media_source", source, raising=False)
+    coord = _media_coord()
+    coord.entry = SimpleNamespace(title="Test")
+    coord.media_content_id = "root"
+
+    def fail(path):
+        raise AssertionError("links must not be signed when the album loads")
+
+    coord._sign_media_path = fail
+    items = asyncio.run(coord._update_media_source())["items"]
+    assert [item.url for item in items] == ["http://ha.test:8123/media/local/My%20Photos/a.jpg"]
+
+
+def test_media_link_signature_is_made_for_home_assistant_links_only():
+    coord = _media_coord()
+    signed = []
+
+    def sign(path):
+        signed.append(path)
+        return f"{path}?authSig=FRESH"
+
+    coord._sign_media_path = sign
+    url = "http://ha.test:8123/immich/entry/asset/fullsize/image/jpeg"
+    assert coord.media_link_signature(url) == "FRESH"
+    assert signed == ["/immich/entry/asset/fullsize/image/jpeg"]
+    assert coord.media_link_signature("http://jellyfin.local/photo.jpg") is None
+    assert _media_coord(c.PROVIDER_IMMICH).media_link_signature(url) is None
+
+
+def test_saved_media_links_drop_signatures_from_before_a_restart():
+    saved = {"items": [{"url": "http://ha.test:8123/media/local/My Photos/a.jpg?authSig=OLD"}]}
+
+    class Storage:
+        async def async_load(self):
+            return saved
+
+    for provider, expected in (
+        (c.PROVIDER_MEDIA_SOURCE, "http://ha.test:8123/media/local/My%20Photos/a.jpg"),
+        (c.PROVIDER_GOOGLE_SHARED, saved["items"][0]["url"]),
+    ):
+        coord = _media_coord(provider)
+        coord._items_cache_store = Storage()
+        items = asyncio.run(coord._load_cached_items())["items"]
+        assert items[0].url == expected

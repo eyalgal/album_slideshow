@@ -159,6 +159,21 @@ def test_fetch_time_params_are_sent_but_kept_out_of_error_logs(make_camera, capl
     assert "SECRET" not in caplog.text
 
 
+def test_media_links_get_a_fresh_signature_for_each_download(make_camera):
+    source_url = "http://ha.test:8123/immich/entry/asset/fullsize/image/jpeg"
+    cam, _response, requests = make_camera(source_url, headers={"Content-Type": "image/jpeg"})
+    signatures = iter(["FIRST", "SECOND"])
+    cam.coordinator = SimpleNamespace(
+        image_request_headers=None, media_link_signature=lambda url: next(signatures),
+    )
+    asyncio.run(cam._http_get(source_url))
+    asyncio.run(cam._http_get(source_url))
+    assert [request[0] for request in requests] == [source_url, source_url]
+    assert [request[1]["params"] for request in requests] == [
+        {"authSig": "FIRST"}, {"authSig": "SECOND"},
+    ]
+
+
 def test_redirect_away_from_icloud_does_not_inherit_binary_exception(make_camera):
     cam, response, _requests = make_camera("https://other.example/IMG_5513.HEIC")
     assert asyncio.run(cam._http_get(_ICLOUD_URL)) is None
