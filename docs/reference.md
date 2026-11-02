@@ -48,7 +48,9 @@ added.
 With **Order mode > Random**, **Shuffle age bias** controls the frequency of
 newly selected primary photos:
 
-- **0:** the original once-through random shuffle, unchanged.
+- **0:** a once-through random shuffle: every photo is shown once per cycle,
+	and a photo waits at least half the album before it comes back. Photos added
+	or removed during a cycle don't restart it.
 - **Positive:** favors newer photos; **negative:** favors older photos.
 - **100 / -100:** relative weights range from 1 to 10 across the eligible
 	playlist's oldest-to-newest capture dates. Intermediate values reduce the

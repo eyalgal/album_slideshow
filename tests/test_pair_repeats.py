@@ -62,6 +62,7 @@ def test_random_partner_is_taken_out_of_the_rest_of_the_cycle():
     cam = _cam(ORDER_RANDOM)
     cam._random_order = [0, 7, 3, 1, 9, 2, 8, 4, 6, 5]
     cam._random_pos = 1
+    cam._cycle_ids = tuple(item.url for item in items)
 
     assert _partner(cam, items) == 1
     assert cam._random_order[:2] == [0, 1]
@@ -77,6 +78,7 @@ def test_random_prefers_an_unshown_partner_beyond_the_nearest_ones():
     cam = _cam(ORDER_RANDOM)
     cam._random_order = [1, 0] + [i for i in range(2, 40)]
     cam._random_pos = 2  # photo 1 was already shown this cycle
+    cam._cycle_ids = tuple(item.url for item in items)
 
     assert _partner(cam, items) == 30
     assert cam._random_pos == 3
@@ -89,6 +91,7 @@ def test_random_reuses_a_shown_partner_when_no_unshown_one_fits():
     cam = _cam(ORDER_RANDOM)
     cam._random_order = [1, 0] + list(range(2, 10))
     cam._random_pos = 2
+    cam._cycle_ids = tuple(item.url for item in items)
 
     assert _partner(cam, items) == 1
     assert cam._random_pos == 2
@@ -134,6 +137,37 @@ def _repeats(order_mode: str, slides: int, *, n: int = 1212, seed: int = 1) -> i
 def test_random_pairs_do_not_repeat_within_one_cycle(seed):
     # Issue #60: about 220 repeats in 634 slides before this fix.
     assert _repeats(ORDER_RANDOM, 634, seed=seed) == 0
+
+
+def _shortest_gap(slides: int, *, n: int, seed: int) -> int:
+    rng = random.Random(seed)
+    album = [_item(i, portrait=rng.random() < 0.7) for i in range(n + n // 10)]
+    items = album[:n]
+    cam = _cam(ORDER_RANDOM, seed=seed)
+    last: dict[str, int] = {}
+    shortest = slides
+    for slide in range(slides):
+        if slide == slides // 3:
+            items = album  # photos added mid-cycle
+        if slide == 2 * slides // 3:
+            items = album[n // 10:]  # and some removed
+        cam._do_advance(len(items), items)
+        shown = [items[cam._index].url]
+        if items[cam._index].height > items[cam._index].width:
+            result = asyncio.run(cam._find_next_mismatch_image(items, False, 100, 75))
+            if result is not None:
+                shown.append(result[1].url)
+        for url in shown:
+            if url in last:
+                shortest = min(shortest, slide - last[url])
+            last[url] = slide
+    return shortest
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_random_pairs_wait_about_half_the_album_across_cycles(seed):
+    # Before, photos came back within about 20 slides around cycle boundaries.
+    assert _shortest_gap(1500, n=200, seed=seed) >= 200 // 4
 
 
 def test_album_order_pairs_do_not_repeat_within_one_pass():

@@ -141,6 +141,8 @@ class _NavigationCursor:
     recent_urls: tuple[str, ...]
     rng_state: Any
     paired_urls: tuple[str, ...] = ()
+    cycle_ids: tuple[str, ...] = ()
+    cycle_held: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +213,11 @@ def _is_video(item: Any) -> bool:
 def _has_motion(item: Any) -> bool:
     """A video, or a Live Photo whose motion clip can play over its still."""
     return bool(getattr(item, "video_url", None))
+
+
+def _photo_key(item: Any) -> str:
+    """A photo's identity for the shuffle; some providers renew links on refresh."""
+    return getattr(item, "photo_id", None) or item.url
 
 
 def _item_faces(item: MediaItem | None) -> tuple[ip.FaceBox, ...] | None:
@@ -314,6 +321,10 @@ class AlbumSlideshowCamera(Camera):
     # The signed stream URL and the server's file paths stay out of history.
     _unrecorded_attributes = frozenset({"video_url", "current_path"})
     _paired_urls: tuple[str, ...] = ()
+    # Photo identities the random cycle's indices point at.
+    _cycle_ids: tuple[str, ...] = ()
+    # How many photos at the end of the cycle were held back from the last one.
+    _cycle_held: int = 0
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: AlbumCoordinator, store: SlideshowStore) -> None:
         super().__init__()
@@ -803,6 +814,8 @@ class AlbumSlideshowCamera(Camera):
         self._random_pos = 0
         self._recent_urls = []
         self._paired_urls = ()
+        self._cycle_ids = ()
+        self._cycle_held = 0
         items = self._effective_items()
         positions = {item.photo_id: index for index, item in enumerate(items) if item.photo_id}
         reusable = []
@@ -816,6 +829,8 @@ class AlbumSlideshowCamera(Camera):
                 random_order=(),
                 random_pos=0,
                 recent_urls=(),
+                cycle_ids=(),
+                cycle_held=0,
             )
             reusable.append(replace(frame, cursor=cursor))
         if reusable:
@@ -945,6 +960,8 @@ class AlbumSlideshowCamera(Camera):
             recent_urls=tuple(source._recent_urls),
             rng_state=source._rng.getstate(),
             paired_urls=source._paired_urls,
+            cycle_ids=source._cycle_ids,
+            cycle_held=source._cycle_held,
         )
 
     def _make_renderer(self, cursor: _NavigationCursor):
@@ -966,6 +983,8 @@ class AlbumSlideshowCamera(Camera):
         renderer._random_pos = cursor.random_pos
         renderer._recent_urls = list(cursor.recent_urls)
         renderer._paired_urls = cursor.paired_urls
+        renderer._cycle_ids = cursor.cycle_ids
+        renderer._cycle_held = cursor.cycle_held
         renderer._rng = random.Random()
         renderer._rng.setstate(cursor.rng_state)
         return renderer
@@ -1048,6 +1067,8 @@ class AlbumSlideshowCamera(Camera):
         self._random_pos = frame.cursor.random_pos
         self._recent_urls = list(frame.cursor.recent_urls)
         self._paired_urls = frame.cursor.paired_urls
+        self._cycle_ids = frame.cursor.cycle_ids
+        self._cycle_held = frame.cursor.cycle_held
         self._rng.setstate(frame.cursor.rng_state)
 
         meta = frame.meta
@@ -1571,7 +1592,7 @@ class AlbumSlideshowCamera(Camera):
             return
 
         bias = getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
-        self._index = self._next_age_weighted_index(items, bias) if bias else self._next_random_index(count)
+        self._index = self._next_age_weighted_index(items, bias) if bias else self._next_random_index(count, items)
         self._remember_recent(items[self._index].url, count)
 
     def _remember_recent(self, url: str, count: int) -> None:
@@ -1580,19 +1601,26 @@ class AlbumSlideshowCamera(Camera):
         if len(self._recent_urls) > keep:
             self._recent_urls = self._recent_urls[-keep:]
 
-    def _random_cycle_active(self, count: int) -> bool:
-        """Whether plain random order is walking a shuffle cycle of ``count``."""
+    def _random_cycle_active(self) -> bool:
+        """Whether plain random order is walking a shuffle cycle."""
         return (
             self.store.order_mode == ORDER_RANDOM
             and not getattr(self.store, "shuffle_age_bias", DEFAULT_SHUFFLE_AGE_BIAS)
-            and len(self._random_order) == count
+            and bool(self._cycle_ids)
+            and len(self._random_order) == len(self._cycle_ids)
         )
 
     def _shown_this_cycle(self, items: list[MediaItem]):
-        """Return a check for photos already shown this cycle, if one applies."""
-        if self._random_cycle_active(len(items)):
-            remaining = set(self._random_order[self._random_pos:])
-            return lambda index: index not in remaining
+        """Return a check for photos already shown this cycle, if one applies.
+
+        In random order, photos held back to the end of the cycle count as
+        shown until the cycle reaches them.
+        """
+        if self._random_cycle_active():
+            ids, order, pos = self._cycle_ids, self._random_order, self._random_pos
+            end = len(order) - self._cycle_held
+            remaining = {ids[index] for index in order[pos:end if pos < end else None]}
+            return lambda index: _photo_key(items[index]) not in remaining
         if self._paired_urls:
             paired = set(self._paired_urls)
             return lambda index: items[index].url in paired
@@ -1606,16 +1634,18 @@ class AlbumSlideshowCamera(Camera):
             if url not in self._paired_urls:
                 self._paired_urls = (*self._paired_urls, url)[-_PAIRED_MEMORY:]
             return
-        if self._random_cycle_active(count):
-            order = self._random_order
-            try:
-                position = order.index(index, self._random_pos)
-            except ValueError:
-                pass  # Already shown earlier in this cycle.
-            else:
-                pos = self._random_pos
-                order[pos], order[position] = order[position], order[pos]
+        if self._random_cycle_active():
+            key = _photo_key(items[index])
+            order, ids, pos = self._random_order, self._cycle_ids, self._random_pos
+            position = next((p for p in range(len(order)) if ids[order[p]] == key), None)
+            if position is not None and position >= pos:
+                if position >= len(order) - self._cycle_held:
+                    self._cycle_held -= 1
+                order.insert(pos, order.pop(position))
                 self._random_pos += 1
+            elif position is not None:
+                # Shown again this cycle, so it now counts as shown most recently.
+                order.insert(pos - 1, order.pop(position))
         self._remember_recent(url, count)
 
     def _peek_advance(self, count: int, items: list) -> None:
@@ -1866,10 +1896,11 @@ class AlbumSlideshowCamera(Camera):
 
         A partner that was already shown this cycle (random order) or
         already used as a partner (ordered modes) is only picked when no
-        unshown one qualifies. In random order the search for an unshown
-        partner reaches past ``limit`` positions; only downloads count
-        toward ``limit`` there. The chosen partner is then counted as shown
-        (see ``_mark_partner_shown``).
+        unshown one qualifies; in random order it is then the one shown
+        longest ago. The random-order search for an unshown partner reaches
+        past ``limit`` positions; only downloads count toward ``limit``
+        there. The chosen partner is then counted as shown (see
+        ``_mark_partner_shown``).
 
         The result depends only on the ordering state that the navigation
         buffer's cursor snapshots capture, and the cursor is captured after
@@ -1887,6 +1918,7 @@ class AlbumSlideshowCamera(Camera):
         n = len(items)
         radius = _pair_exclusion_radius(n, self.store.pair_min_gap_percent)
         shuffled: list[int] | None = None
+        excluded: set[int] = set()
         if radius > 0:
             excluded = {(self._index + d) % n for d in range(-radius, radius + 1)}
             shuffled = [idx for idx in range(n) if idx not in excluded]
@@ -1899,9 +1931,10 @@ class AlbumSlideshowCamera(Camera):
 
         tried: set[int] = set()
         found = None
+        whole_cycle = False
         shown = self._shown_this_cycle(items)
         if shown is not None:
-            whole_cycle = self._random_cycle_active(n)
+            whole_cycle = self._random_cycle_active()
             found = await self._scan_for_partner(
                 items,
                 candidates(_PAIR_UNSHOWN_SCAN if whole_cycle else limit),
@@ -1913,6 +1946,18 @@ class AlbumSlideshowCamera(Camera):
                 skip=shown,
                 downloads_only=whole_cycle,
             )
+        if found is None and whole_cycle:
+            found = await self._scan_for_partner(
+                items,
+                self._shown_oldest_first(items),
+                is_portrait_canvas,
+                width,
+                height,
+                limit,
+                tried=tried,
+                skip=excluded.__contains__ if excluded else None,
+                downloads_only=True,
+            )
         if found is None:
             found = await self._scan_for_partner(
                 items, candidates(limit), is_portrait_canvas, width, height, limit, tried=tried,
@@ -1922,6 +1967,17 @@ class AlbumSlideshowCamera(Camera):
         img, index = found
         self._mark_partner_shown(index, items)
         return img, items[index]
+
+    def _shown_oldest_first(self, items: list[MediaItem]):
+        """Indices of photos shown this cycle, the one shown longest ago first."""
+        where: dict[str, int] = {}
+        for index, item in enumerate(items):
+            where.setdefault(_photo_key(item), index)
+        ids = self._cycle_ids
+        for old in self._random_order[: self._random_pos]:
+            index = where.get(ids[old])
+            if index is not None and index != self._index:
+                yield index
 
     async def _scan_for_partner(
         self,
@@ -1981,7 +2037,7 @@ class AlbumSlideshowCamera(Camera):
         )
         count = len(items)
         if count <= 1 or min(weights) == max(weights):
-            return self._next_random_index(count)
+            return self._next_random_index(count, items)
         cooldown = min(5, max(1, count // 10))
         recent = set(self._recent_urls[-cooldown:])
         candidates = [
@@ -1992,24 +2048,66 @@ class AlbumSlideshowCamera(Camera):
             candidates = [index for index in range(count) if index != self._index]
         return self._rng.choices(candidates, weights=[weights[index] for index in candidates], k=1)[0]
 
-    def _next_random_index(self, count: int) -> int:
+    def _next_random_index(self, count: int, items: list[MediaItem]) -> int:
         if count <= 1:
             self._random_order = [0]
             self._random_pos = 0
+            self._cycle_ids = ()
+            self._cycle_held = 0
             return 0
 
-        needs_new_cycle = len(self._random_order) != count or self._random_pos >= len(self._random_order)
-        if needs_new_cycle:
-            self._random_order = list(range(count))
-            self._rng.shuffle(self._random_order)
-            self._random_pos = 0
-
-            if self._random_order and self._random_order[0] == self._index:
-                self._random_order.append(self._random_order.pop(0))
+        ids = tuple(_photo_key(item) for item in items)
+        if ids != self._cycle_ids and self._random_pos < len(self._random_order):
+            self._carry_cycle_over(ids)
+        if ids != self._cycle_ids or self._random_pos >= len(self._random_order):
+            self._start_random_cycle(ids)
 
         idx = self._random_order[self._random_pos]
         self._random_pos += 1
         return idx
+
+    def _carry_cycle_over(self, ids: tuple[str, ...]) -> None:
+        """Map an unfinished cycle onto a changed playlist; shown photos stay shown."""
+        old_ids, order, pos = self._cycle_ids, self._random_order, self._random_pos
+        position: dict[str, int] = {}
+        for index, key in enumerate(ids):
+            position.setdefault(key, index)
+        shown: dict[int, None] = {}
+        for old in order[:pos]:
+            new = position.get(old_ids[old]) if old < len(old_ids) else None
+            if new is not None:
+                shown.setdefault(new)
+        held_from = max(pos, len(order) - self._cycle_held)
+        held_ids = {old_ids[old] for old in order[held_from:] if old < len(old_ids)}
+        rest = [index for index in range(len(ids)) if index not in shown and ids[index] not in held_ids]
+        held = [index for index in range(len(ids)) if index not in shown and ids[index] in held_ids]
+        self._rng.shuffle(rest)
+        self._rng.shuffle(held)
+        self._random_order = [*shown, *rest, *held]
+        self._random_pos = len(shown)
+        self._cycle_ids = ids
+        self._cycle_held = len(held)
+
+    def _start_random_cycle(self, ids: tuple[str, ...]) -> None:
+        """Shuffle a new cycle with the previous cycle's last half at the end.
+
+        Every photo then waits at least half the album before it comes back.
+        """
+        old_ids = self._cycle_ids
+        previous = [old_ids[old] for old in self._random_order[: self._random_pos] if old < len(old_ids)]
+        if previous:
+            held = set(previous[-max(1, len(ids) // 2):])
+        elif 0 <= self._index < len(ids):
+            held = {ids[self._index]}
+        else:
+            held = set()
+        order = list(range(len(ids)))
+        self._rng.shuffle(order)
+        tail = [i for i in order if ids[i] in held]
+        self._random_order = [i for i in order if ids[i] not in held] + tail
+        self._random_pos = 0
+        self._cycle_ids = ids
+        self._cycle_held = len(tail)
 
     async def _fetch_bytes(self, url: str) -> bytes | None:
         key = self._download_key(url)
