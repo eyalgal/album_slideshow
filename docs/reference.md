@@ -28,8 +28,8 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
 | Select | Order mode | random | random, album_order, newest_taken, oldest_taken, newest_added, oldest_added | Slide ordering behavior |
-| Select | Aspect ratio | 16:9 | 16:9, 4:3, 1:1, 9:16, and more | Canvas aspect ratio |
-| Select | Max resolution | 4K (2160p) | 480p, 720p, 1080p, 1440p, 4K (2160p), original | Cap output resolution by short edge; use original to render at native size |
+| Select | Aspect ratio | 16:9 | 16:9, 5:3, 16:10, 3:2, 4:3, 1:1, 3:4, 2:3, 10:16, 3:5, 9:16 | Canvas aspect ratio. Match your screen so the slideshow fills it |
+| Select | Max resolution | 1080p | 480p, 720p, 1080p, 1440p, 4K (2160p), original | Cap output resolution by short edge; use original to render at native size |
 | Select | Date filter | off | off, last_7_days, last_30_days, last_365_days, custom_days, this_month, this_year, on_this_day | Restrict the slideshow to a date window based on photo capture date. This month, This year and On this day follow Home Assistant's time zone and move on at local midnight |
 | Text | Pair divider color | #FFFFFF | Hex, named colors, transparent | Divider color between paired images |
 | Switch | Pause slideshow | off | on / off | Hold the current frame; advances pause until turned off |
@@ -91,7 +91,7 @@ and the bias control only for **Random**. Other ordering modes ignore the bias.
 
 ### Layout Options
 
-- Configurable aspect ratio such as 16:9, 4:3, 1:1, 9:16
+- Configurable aspect ratio: 16:9, 5:3, 16:10, 3:2, 4:3, 1:1, and their portrait versions
 - Shuffle or album order
 - Pair divider size/color control
 

@@ -264,6 +264,10 @@ Full-screen or kiosk display and automatic screensaver activation are provided
 by your dashboard, browser, or device configuration, not by the card. The card
 supplies the slideshow and captions; it does not turn screensaver mode on.
 
+To fill the screen edge to edge, set the camera's **Aspect ratio** to your
+screen's shape and the card's `aspect_ratio` to the same value, for example
+5:3 and `5/3` for a 2000x1200 tablet.
+
 ### Weather Captions
 
 Select **Weather** in a caption's **Content > Add** picker, then choose the required

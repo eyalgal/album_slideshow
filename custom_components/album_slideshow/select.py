@@ -24,7 +24,9 @@ from .const import (
 )
 from .store import SlideshowStore
 
-ASPECT_RATIO_OPTIONS = ["16:9", "16:10", "4:3", "1:1", "3:4", "10:16", "9:16"]
+ASPECT_RATIO_OPTIONS = [
+    "16:9", "5:3", "16:10", "3:2", "4:3", "1:1", "3:4", "2:3", "10:16", "3:5", "9:16",
+]
 
 
 async def async_setup_entry(

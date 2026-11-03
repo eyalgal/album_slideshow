@@ -9,7 +9,12 @@ import pytest
 
 from custom_components.album_slideshow import store as store_module
 from custom_components.album_slideshow.number import CustomLookbackDaysNumber, ShuffleAgeBiasNumber
-from custom_components.album_slideshow.select import DateFilterSelect
+from custom_components.album_slideshow.image_processing import resolve_output_size
+from custom_components.album_slideshow.select import (
+    ASPECT_RATIO_OPTIONS,
+    AspectRatioSelect,
+    DateFilterSelect,
+)
 from custom_components.album_slideshow.const import DATE_FILTER_CUSTOM
 
 
@@ -58,6 +63,29 @@ def test_custom_date_filter_option_can_be_selected_and_restored():
     control.async_get_last_state = AsyncMock(return_value=SimpleNamespace(state=DATE_FILTER_CUSTOM))
     asyncio.run(control.async_added_to_hass())
     assert store.date_filter == DATE_FILTER_CUSTOM
+
+
+@pytest.mark.parametrize("ratio", ["5:3", "3:5", "3:2", "2:3"])
+def test_aspect_ratio_select_accepts_and_restores_new_ratios(ratio):
+    store = store_module.SlideshowStore()
+    control = AspectRatioSelect(SimpleNamespace(entry_id="album"), store)
+    asyncio.run(control.async_select_option(ratio))
+    assert store.aspect_ratio == ratio
+    assert control.current_option == ratio
+    restored_store = store_module.SlideshowStore()
+    restored = AspectRatioSelect(SimpleNamespace(entry_id="album"), restored_store)
+    restored.async_get_last_state = AsyncMock(return_value=SimpleNamespace(state=ratio))
+    asyncio.run(restored.async_added_to_hass())
+    assert restored_store.aspect_ratio == ratio
+
+
+# A malformed option would silently fall back to a 16:9 canvas.
+@pytest.mark.parametrize("ratio", ASPECT_RATIO_OPTIONS)
+def test_every_aspect_ratio_option_renders_its_ratio(ratio):
+    w, h = (int(part) for part in ratio.split(":"))
+    width, height = resolve_output_size(None, None, ratio, 1080)
+    assert min(width, height) == 1080
+    assert width / height == pytest.approx(w / h, rel=0.005)
 
 
 @pytest.fixture
