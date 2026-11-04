@@ -8,6 +8,7 @@ import itertools
 import logging
 import math
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,9 @@ _PAIR_GAP_FLOOR = 2
 
 # Recent frame IDs remembered so navigation can start from a card's displayed slide.
 _FRAME_ID_MEMORY = 64
+
+# Longest the first slide waits for Home Assistant to restore the settings.
+_SETTINGS_RESTORE_WAIT = 30.0
 
 # Store settings that change how slides look or which photos play. Changing any
 # of them discards rendered slides; other settings (interval, pause, buffer
@@ -325,6 +329,14 @@ class AlbumSlideshowCamera(Camera):
     _cycle_ids: tuple[str, ...] = ()
     # How many photos at the end of the cycle were held back from the last one.
     _cycle_held: int = 0
+    # Wall-clock time the current slide went up.
+    _shown_at: float = 0.0
+    # When the slide resumed after a restart went up, so it keeps the time it had left.
+    _resume_anchor: float | None = None
+    # Partner index tried first when resuming a paired slide.
+    _preferred_partner: int | None = None
+    # The first slide after setup resumes the saved one.
+    _starting: bool = False
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: AlbumCoordinator, store: SlideshowStore) -> None:
         super().__init__()
@@ -340,6 +352,7 @@ class AlbumSlideshowCamera(Camera):
         self._index = 0
         self._random_order: list[int] = []
         self._random_pos = 0
+        self._starting = True
 
         self._download_cache = _DownloadCache(
             max_bytes=store.image_cache_mb * 1024 * 1024
@@ -475,6 +488,13 @@ class AlbumSlideshowCamera(Camera):
                 await preload_task
             except asyncio.CancelledError:
                 pass
+        # A reload reads the position back right away, so don't leave it pending.
+        flush = getattr(self.store, "async_flush_position", None)
+        if flush is not None:
+            try:
+                await flush()
+            except Exception as err:  # noqa: BLE001 - never block unloading
+                _LOGGER.debug("Album Slideshow: could not save the current slide: %s", err)
 
     @property
     def device_info(self):
@@ -995,6 +1015,7 @@ class AlbumSlideshowCamera(Camera):
         items: list[MediaItem],
         *,
         advance: bool,
+        partner: int | None = None,
     ) -> _RenderedFrame:
         """Render the current or next usable slide from ``cursor``.
 
@@ -1014,6 +1035,8 @@ class AlbumSlideshowCamera(Camera):
             renderer._index %= len(items)
             if should_advance:
                 renderer._do_advance(len(items), items)
+            else:
+                renderer._preferred_partner = partner
 
             composed: Image.Image | None = None
             try:
@@ -1100,6 +1123,9 @@ class AlbumSlideshowCamera(Camera):
             # timer; a re-render of the same slide keeps the running clock.
             self._slide_deadline = None
             self._interrupt_event.set()
+            self._resume_anchor = None
+            self._shown_at = time.time()
+            self._save_position()
 
         _LOGGER.debug(
             "Album Slideshow %s: displayed buffered frame_id=%d index=%d "
@@ -1361,19 +1387,45 @@ class AlbumSlideshowCamera(Camera):
             await self._clear_current_frame()
             return False
 
-        cursor = (
-            self._current_frame.cursor
-            if self._current_frame is not None
-            else self._capture_cursor()
+        resume = None
+        advance = False
+        if self._current_frame is not None:
+            cursor = self._current_frame.cursor
+        else:
+            cursor = self._capture_cursor()
+            if self._starting:
+                cursor, advance, resume = self._starting_position(cursor, items)
+        frame = await self._render_available_frame(
+            cursor, items, advance=advance, partner=resume["partner"] if resume else None
         )
-        frame = await self._render_available_frame(cursor, items, advance=False)
         if generation != self._timeline_generation:
             return False
         self._previous_frames.clear()
         self._next_frames.clear()
+        self._starting = False
         self._apply_frame(frame)
+        if resume and (frame.meta.get("photo_ids") or [None])[0] == resume["photo_id"]:
+            self._resume_anchor = self._shown_at = resume["shown_at"]
+            self._save_position()
         self._schedule_preload()
         return True
+
+    def _starting_position(
+        self, cursor: _NavigationCursor, items: list[MediaItem]
+    ) -> tuple[_NavigationCursor, bool, dict | None]:
+        """Start on the slide saved before a restart, else a random photo in random order."""
+        saved = getattr(self.store, "resume_point", None)
+        if saved:
+            positions = {item.photo_id: index for index, item in enumerate(items) if item.photo_id}
+            first, *rest = saved["photo_ids"]
+            if first in positions:
+                resume = {
+                    "photo_id": first,
+                    "partner": positions.get(rest[0]) if rest else None,
+                    "shown_at": saved["shown_at"],
+                }
+                return replace(cursor, index=positions[first]), False, resume
+        return cursor, self.store.order_mode == ORDER_RANDOM, None
 
     async def _wait_or_interrupt(self, timeout: float) -> bool:
         """Wait for configuration/navigation or for the slide timer to expire."""
@@ -1386,6 +1438,8 @@ class AlbumSlideshowCamera(Camera):
             return True
         try:
             if self._held:
+                # Once it plays again, a held slide gets a full interval.
+                self._resume_anchor = None
                 await self._interrupt_event.wait()
             else:
                 await asyncio.wait_for(
@@ -1420,12 +1474,20 @@ class AlbumSlideshowCamera(Camera):
         # Wake the render loop; a returning viewer gets a full interval on
         # the slide they find.
         self._slide_deadline = None
+        self._resume_anchor = None
         self._interrupt_event.set()
         self.async_write_ha_state()
 
     async def _render_loop(self, initial_delay: float = 0.0) -> None:
         """Display buffered frames on command/timer and refill them in the background."""
         loop = asyncio.get_running_loop()
+        restored = getattr(self.store, "settings_restored", None)
+        if restored is not None:
+            # Restored settings decide which slide comes first.
+            try:
+                await asyncio.wait_for(restored.wait(), _SETTINGS_RESTORE_WAIT)
+            except TimeoutError:
+                pass
         if initial_delay > 0:
             await asyncio.sleep(initial_delay)
 
@@ -1457,7 +1519,7 @@ class AlbumSlideshowCamera(Camera):
         while True:
             try:
                 if self._slide_deadline is None:
-                    self._slide_deadline = loop.time() + self._slide_hold_seconds()
+                    self._slide_deadline = loop.time() + self._remaining_hold()
                 if self._timeline_dirty:
                     async with self._navigation_lock:
                         if self._timeline_dirty:
@@ -1549,6 +1611,18 @@ class AlbumSlideshowCamera(Camera):
             int(getattr(self.store, "video_max_seconds", interval)),
             interval,
         )
+
+    def _remaining_hold(self) -> float:
+        """Seconds left on the current slide; a resumed one keeps the time it had left."""
+        hold = self._slide_hold_seconds()
+        if self._resume_anchor is None:
+            return hold
+        return min(hold, max(0.0, hold - (time.time() - self._resume_anchor)))
+
+    def _save_position(self) -> None:
+        save = getattr(self.store, "save_position", None)
+        if save is not None and self._current_frame is not None:
+            save(self._current_frame.meta.get("photo_ids") or [], self._shown_at)
 
     @property
     def _compose_semaphore(self) -> asyncio.Semaphore:
@@ -1931,9 +2005,13 @@ class AlbumSlideshowCamera(Camera):
 
         tried: set[int] = set()
         found = None
+        if self._preferred_partner is not None:
+            found = await self._scan_for_partner(
+                items, (self._preferred_partner,), is_portrait_canvas, width, height, 1, tried=tried,
+            )
         whole_cycle = False
         shown = self._shown_this_cycle(items)
-        if shown is not None:
+        if found is None and shown is not None:
             whole_cycle = self._random_cycle_active()
             found = await self._scan_for_partner(
                 items,

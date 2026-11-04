@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import logging
+import math
 from typing import Callable, Iterable
 
 from homeassistant.helpers.storage import Store
@@ -29,6 +31,38 @@ from .const import (
 
 
 Listener = Callable[[], None]
+
+_LOGGER = logging.getLogger(__name__)
+
+# Home Assistant also writes a pending position at shutdown, so frequent slide
+# changes don't each cost a disk write.
+_POSITION_SAVE_DELAY = 300
+
+
+def _storage_key(entry_id: str, name: str) -> str:
+    return f"{DOMAIN}.{entry_id}.{name}"
+
+
+def _valid_position(data) -> dict | None:
+    """Return a saved slide position, or None when it is missing or malformed."""
+    if not isinstance(data, dict):
+        return None
+    photo_ids, shown_at = data.get("photo_ids"), data.get("shown_at")
+    if (
+        not isinstance(photo_ids, list)
+        or not 1 <= len(photo_ids) <= 2
+        or not all(isinstance(photo_id, str) and photo_id for photo_id in photo_ids)
+        or type(shown_at) not in (int, float)
+        or not math.isfinite(shown_at)
+    ):
+        return None
+    return {"photo_ids": photo_ids, "shown_at": float(shown_at)}
+
+
+async def async_remove_saved_data(hass, entry_id: str) -> None:
+    """Delete an album's hidden photos and saved slide position."""
+    for name in ("hidden", "position"):
+        await Store(hass, 1, _storage_key(entry_id, name)).async_remove()
 
 
 @dataclass
@@ -68,15 +102,46 @@ class SlideshowStore:
     # the previous slide instantly across a camera reload.
     last_frame: bytes | None = None
 
+    # The slide that was up before a restart and when it went up.
+    resume_point: dict | None = field(default=None, init=False)
+    # Set once Home Assistant has restored these settings at startup.
+    settings_restored: asyncio.Event | None = field(default=None, init=False, repr=False)
+
     hidden_photo_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     last_hidden_photo_ids: tuple[str, ...] = field(default=(), init=False)
     hidden_revision: int = field(default=0, init=False)
     _hidden_storage: Store | None = field(default=None, init=False, repr=False)
     _hidden_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _position_storage: Store | None = field(default=None, init=False, repr=False)
+    _position_data: dict | None = field(default=None, init=False, repr=False)
     _listeners: list[Listener] = field(default_factory=list)
 
+    async def async_load_position(self, hass, entry_id: str) -> None:
+        self._position_storage = Store(hass, 1, _storage_key(entry_id, "position"))
+        try:
+            data = await self._position_storage.async_load()
+        except Exception as err:  # noqa: BLE001 - a lost position only restarts the slideshow
+            _LOGGER.debug("Album Slideshow: could not read the saved slide: %s", err)
+            data = None
+        self.resume_point = _valid_position(data)
+
+    def save_position(self, photo_ids: list[str | None], shown_at: float) -> None:
+        """Remember the slide on screen; photos without an ID can't be resumed."""
+        if self._position_storage is None:
+            return
+        ids = [photo_id for photo_id in photo_ids if photo_id] if photo_ids and photo_ids[0] else []
+        data = {"photo_ids": ids, "shown_at": shown_at} if ids else {}
+        self._position_data = data
+        self._position_storage.async_delay_save(lambda: data, _POSITION_SAVE_DELAY)
+
+    async def async_flush_position(self) -> None:
+        """Write a pending position now, before the album reloads."""
+        data, self._position_data = self._position_data, None
+        if self._position_storage is not None and data is not None:
+            await self._position_storage.async_save(data)
+
     async def async_load_hidden_photos(self, hass, entry_id: str) -> None:
-        self._hidden_storage = Store(hass, 1, f"{DOMAIN}.{entry_id}.hidden")
+        self._hidden_storage = Store(hass, 1, _storage_key(entry_id, "hidden"))
         data = await self._hidden_storage.async_load()
         if data is None:
             return

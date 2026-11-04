@@ -546,7 +546,7 @@ def test_metadata_updates_do_not_restart_slide_timer(monkeypatch, interrupt_at_d
     waits = []
     advances = []
 
-    async def render(cursor, _items, *, advance):
+    async def render(cursor, _items, *, advance, partner=None):
         if advance:
             advances.append(elapsed)
         return _frame((cursor.index + int(advance)) % 2)
@@ -618,7 +618,7 @@ def test_manual_navigation_gets_full_interval_without_double_advance(monkeypatch
 
     cam._apply_frame = display
 
-    async def render(cursor, _items, *, advance):
+    async def render(cursor, _items, *, advance, partner=None):
         nonlocal elapsed
         if manual_finished is None:
             elapsed += 15.0
@@ -796,6 +796,7 @@ def test_every_store_setting_is_classified_for_history():
         "slide_interval", "refresh_hours", "image_cache_mb", "navigation_buffer_size",
         "video_max_seconds", "paused", "pause_when_unwatched", "last_frame", "hidden_photo_ids",
         "last_hidden_photo_ids", "_hidden_storage", "_hidden_lock", "_listeners",
+        "resume_point", "settings_restored", "_position_storage", "_position_data",
     }
     names = {field.name for field in dataclasses.fields(SlideshowStore)}
     assert names == keeps_history | set(camera._RENDER_SETTINGS)

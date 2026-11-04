@@ -33,7 +33,7 @@
  *                           # allows it, falling back to that button.
  */
 
-const VERSION = "1.16.1";
+const VERSION = "1.17.0";
 
 const ANIMATED_TRANSITIONS = [
   "fade",
@@ -2379,7 +2379,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
         selector: {
           number: this._liveNumberConfig(s.slide_interval, {
             min: 3,
-            max: 3600,
+            max: 86400,
             step: 1,
             unit: "s",
           }),

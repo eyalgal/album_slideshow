@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN, MAX_CUSTOM_LOOKBACK_DAYS, MAX_VIDEO_MAX_SECONDS, PROVIDER_IMMICH
+from .const import DOMAIN, MAX_CUSTOM_LOOKBACK_DAYS, MAX_SLIDE_INTERVAL, MAX_VIDEO_MAX_SECONDS, PROVIDER_IMMICH
 from .coordinator import AlbumCoordinator
 from .store import SlideshowStore
 
@@ -146,7 +146,7 @@ class VideoMaxSecondsNumber(_BaseNumber):
 class SlideIntervalNumber(_BaseNumber):
     _attr_icon = "mdi:timer-outline"
     _attr_native_min_value = 3
-    _attr_native_max_value = 3600
+    _attr_native_max_value = MAX_SLIDE_INTERVAL
     _attr_native_step = 1
 
     def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:

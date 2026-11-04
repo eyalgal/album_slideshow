@@ -21,7 +21,7 @@ from .const import (
     SERVICE_RESTORE_ALL_PHOTOS,
     SERVICE_LIST_HIDDEN_PHOTOS,
 )
-from .store import SlideshowStore
+from .store import SlideshowStore, async_remove_saved_data
 from .viewers import async_register_websocket as async_register_viewer_websocket
 
 _LOGGER = logging.getLogger(__name__)
@@ -473,6 +473,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await store.async_load_hidden_photos(hass, entry.entry_id)
     except Exception as err:
         raise ConfigEntryNotReady("Could not load hidden photos; slideshow has not started") from err
+    await store.async_load_position(hass, entry.entry_id)
+    store.settings_restored = asyncio.Event()
     coordinator = AlbumCoordinator(hass, entry, store)
     await coordinator.async_config_entry_first_refresh()
 
@@ -531,6 +533,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     store.notify()
+    store.settings_restored.set()
 
     return True
 
@@ -561,3 +564,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not entry_keys:
             domain_data.pop("compose_semaphore", None)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await async_remove_saved_data(hass, entry.entry_id)

@@ -600,11 +600,11 @@ def test_hide_cancels_an_inflight_preload(monkeypatch):
         started = asyncio.Event()
         original_render = cam._render_available_frame
 
-        async def render(cursor, media, *, advance):
+        async def render(cursor, media, *, advance, partner=None):
             if advance:
                 started.set()
                 await asyncio.Event().wait()
-            return await original_render(cursor, media, advance=advance)
+            return await original_render(cursor, media, advance=advance, partner=partner)
 
         cam._render_available_frame = render
         preload = asyncio.create_task(cam._preload_loop(cam._timeline_generation))

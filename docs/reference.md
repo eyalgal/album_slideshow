@@ -16,7 +16,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 
 | Entity Type | Name | Default | Accepted Values | Description |
 |-------------|------|---------|----------------|-------------|
-| Number | Slide interval | 60 | Any positive integer (seconds) | Time between slides |
+| Number | Slide interval | 60 | 3-86400 (seconds) | Time between slides, up to a day |
 | Number | Album refresh | 24 | Any positive integer (hours) | How often album contents refresh |
 | Number | Pair divider size | 8 | 0-64 (px) | Width of divider between paired images |
 | Number | Pair minimum gap | 0 (off) | 0-50 (% of album) | Above 0, shuffles pairing candidates outside a circular index gap, capped to keep candidates available. Helps avoid nearby photos but does not detect photo sessions. At 0, keeps the original nearest-candidate search |
@@ -117,6 +117,8 @@ When transparency is used, the integration outputs PNG to preserve alpha.
 - Previous and Next swap pre-rendered frames for immediate navigation
 - A configurable navigation buffer retains previous frames and pre-renders upcoming frames (even in random order)
 - Pause state survives Home Assistant restarts
+- After a restart, the slideshow picks up on the slide it was showing, with the time that slide had left. If that photo is gone, random order starts on a random photo
+- For a new photo at a set time each day, turn on **Pause slideshow** and add an automation that presses **Next slide** (or calls `album_slideshow.next_slide`) at that time
 
 ### Pause When Not Viewed
 

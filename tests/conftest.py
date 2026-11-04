@@ -109,6 +109,9 @@ class _Store:
     async def async_save(self, *a, **kw):
         return None
 
+    def async_delay_save(self, *a, **kw):
+        return None
+
     async def async_remove(self):
         return None
 
