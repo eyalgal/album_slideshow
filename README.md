@@ -3,6 +3,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/eyalgal/album_slideshow)](https://github.com/eyalgal/album_slideshow/releases)
 [![GitHub Downloads](https://img.shields.io/github/downloads/eyalgal/album_slideshow/total.svg)](https://github.com/eyalgal/album_slideshow/releases)
+[![Integration Usage](https://img.shields.io/badge/dynamic/json?color=41BDF5&logo=home-assistant&label=integration%20usage&suffix=%20installs&cacheSeconds=15600&url=https://analytics.home-assistant.io/custom_integrations.json&query=$.album_slideshow.total)](https://analytics.home-assistant.io/custom_integrations.json)
 [![Community Forum](https://img.shields.io/badge/Community-Forum-5294E2.svg)](https://community.home-assistant.io/t/album-slideshow-google-photos-local/996986)
 [![Buy Me A Coffee](https://img.shields.io/badge/buy_me_a-coffee-yellow)](https://www.buymeacoffee.com/eyalgal)
 
