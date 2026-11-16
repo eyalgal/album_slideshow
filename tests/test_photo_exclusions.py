@@ -134,6 +134,20 @@ def test_custom_lookback_invalidates_playlist_and_preserves_hidden_photos(monkey
     asyncio.run(run())
 
 
+def test_a_photo_listed_twice_is_in_the_playlist_once(monkeypatch):
+    async def run():
+        items = [
+            _item("a", "https://example.test/a"),
+            _item("b", "https://example.test/b"),
+            _item("a", "https://example.test/a-renewed"),
+        ]
+        cam = await _camera(items, monkeypatch)
+        assert cam._effective_items() == items[:2]
+        assert cam.extra_state_attributes["media_count"] == 2
+
+    asyncio.run(run())
+
+
 def test_date_filtered_playlist_is_rebuilt_when_the_local_date_changes(monkeypatch):
     async def run():
         from custom_components.album_slideshow.const import DATE_FILTER_OFF, DATE_FILTER_ON_THIS_DAY

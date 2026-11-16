@@ -706,7 +706,15 @@ class AlbumSlideshowCamera(Camera):
             missing_date=self.store.missing_date_mode,
             tz=tz,
         )
-        ordered = playlist.order_items(filtered, self.store.order_mode)
+        # A photo listed twice would keep coming back as a pair partner.
+        seen: set[str] = set()
+        unique: list[MediaItem] = []
+        for item in filtered:
+            key = _photo_key(item)
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+        ordered = playlist.order_items(unique, self.store.order_mode)
         self._effective_cache = (hash(cache_key), ordered)
         return ordered
 

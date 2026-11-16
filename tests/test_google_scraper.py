@@ -90,6 +90,29 @@ def test_parse_dedupes_repeated_urls():
     assert len(items) == 1
 
 
+def test_fetch_album_skips_a_photo_listed_again_with_a_new_link(monkeypatch):
+    def entry(key, path):
+        return gs._parse_album_item([key, [f"https://lh3.googleusercontent.com/{path}", 100, 100]])
+
+    pages = {
+        None: ([entry("key-1", "a"), entry("key-2", "b")], "page-2"),
+        "page-2": ([entry("key-1", "a-renewed"), entry("key-3", "c")], None),
+    }
+
+    async def fake_keys(session, share_url, *, timeout):
+        return gs._AlbumKeys("album", "auth"), "Title"
+
+    async def fake_page(session, keys, page_id, *, timeout, video_keys=None):
+        return pages[page_id]
+
+    monkeypatch.setattr(gs, "_fetch_album_keys", fake_keys)
+    monkeypatch.setattr(gs, "_fetch_album_page", fake_page)
+
+    _title, items, _videos = asyncio.run(gs.fetch_album(None, "https://photos.app.goo.gl/album"))
+
+    assert [item.source_id for item in items] == ["key-1", "key-2", "key-3"]
+
+
 def test_parse_returns_empty_on_missing_data():
     html = "<html><body>Nothing to see here.</body></html>"
     assert gs.parse_album_html(html) == []

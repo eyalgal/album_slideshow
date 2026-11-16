@@ -93,6 +93,7 @@ async def fetch_album(
 
     items: list[MediaItem] = []
     seen_urls: set[str] = set()
+    seen_keys: set[str] = set()
     page_id: str | None = None
     page_no = 0
     while True:
@@ -110,9 +111,12 @@ async def fetch_album(
 
         added = 0
         for it in page_items:
-            if it.url in seen_urls:
+            # The same photo can come back with a different link.
+            if it.url in seen_urls or it.source_id in seen_keys:
                 continue
             seen_urls.add(it.url)
+            if it.source_id:
+                seen_keys.add(it.source_id)
             items.append(it)
             added += 1
             if len(items) >= _MAX_ITEMS:
