@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -86,30 +86,34 @@ def _day_of(month, day):
     return datetime(2001, month, day).timetuple().tm_yday
 
 
-def test_local_year_day_reads_the_calendar_day():
-    assert camera._local_year_day(_ms(2023, 1, 1), timezone.utc) == (2023, 1)
-    assert camera._local_year_day(_ms(2023, 12, 31), timezone.utc) == (2023, 365)
-    assert camera._local_year_day(_ms(2020, 12, 31), timezone.utc) == (2020, 365)
-    assert camera._local_year_day(_ms(2019, 7, 14), timezone.utc) == (2019, _day_of(7, 14))
+def _on(year, month, day):
+    return date(year, month, day).toordinal()
 
 
-def test_local_year_day_files_february_29_as_february_28():
-    assert camera._local_year_day(_ms(2024, 2, 29), timezone.utc) == (2024, _day_of(2, 28))
-    assert camera._local_year_day(_ms(2024, 3, 1), timezone.utc) == (2024, _day_of(3, 1))
+def test_local_day_reads_the_calendar_day():
+    assert camera._local_day(_ms(2023, 1, 1), timezone.utc) == (_on(2023, 1, 1), 1)
+    assert camera._local_day(_ms(2023, 12, 31), timezone.utc) == (_on(2023, 12, 31), 365)
+    assert camera._local_day(_ms(2020, 12, 31), timezone.utc) == (_on(2020, 12, 31), 365)
+    assert camera._local_day(_ms(2019, 7, 14), timezone.utc) == (_on(2019, 7, 14), _day_of(7, 14))
 
 
-def test_local_year_day_uses_the_given_time_zone():
+def test_local_day_files_february_29_as_february_28():
+    assert camera._local_day(_ms(2024, 2, 29), timezone.utc) == (_on(2024, 2, 29), _day_of(2, 28))
+    assert camera._local_day(_ms(2024, 3, 1), timezone.utc) == (_on(2024, 3, 1), _day_of(3, 1))
+
+
+def test_local_day_uses_the_given_time_zone():
     # 03:00 UTC on 15 July is still the evening of 14 July in Los Angeles.
     taken = _ms(2023, 7, 15, hour=3)
-    assert camera._local_year_day(taken, timezone.utc) == (2023, _day_of(7, 15))
-    assert camera._local_year_day(taken, LA) == (2023, _day_of(7, 14))
+    assert camera._local_day(taken, timezone.utc) == (_on(2023, 7, 15), _day_of(7, 15))
+    assert camera._local_day(taken, LA) == (_on(2023, 7, 14), _day_of(7, 14))
     # 03:00 UTC on 1 January is still New Year's Eve in Los Angeles.
-    assert camera._local_year_day(_ms(2024, 1, 1, hour=3), LA) == (2023, 365)
+    assert camera._local_day(_ms(2024, 1, 1, hour=3), LA) == (_on(2023, 12, 31), 365)
 
 
-def test_local_year_day_without_a_date():
-    assert camera._local_year_day(None, timezone.utc) is None
-    assert camera._local_year_day(10**20, timezone.utc) is None
+def test_local_day_without_a_date():
+    assert camera._local_day(None, timezone.utc) is None
+    assert camera._local_day(10**20, timezone.utc) is None
 
 
 def test_ring_days_wrap_across_the_new_year():
@@ -131,7 +135,10 @@ def _index_cam():
 def test_same_day_index_groups_dated_photos_by_day():
     items = [_dated(0, _ms(2019, 7, 14)), _dated(1, None), _dated(2, _ms(2023, 7, 14)), _dated(3, _ms(2023, 7, 15))]
     index = _index_cam()._same_day_index(items)
-    assert index == {_day_of(7, 14): [(0, 2019), (2, 2023)], _day_of(7, 15): [(3, 2023)]}
+    assert index == {
+        _day_of(7, 14): [(0, _on(2019, 7, 14)), (2, _on(2023, 7, 14))],
+        _day_of(7, 15): [(3, _on(2023, 7, 15))],
+    }
 
 
 def test_same_day_index_is_kept_until_the_playlist_changes(monkeypatch):
@@ -144,7 +151,7 @@ def test_same_day_index_is_kept_until_the_playlist_changes(monkeypatch):
     assert rebuilt is not first and rebuilt == first
     # So does a change of Home Assistant's time zone.
     monkeypatch.setattr(camera.dt_util, "DEFAULT_TIME_ZONE", LA)
-    assert cam._same_day_index(items) == {_day_of(7, 14): [(0, 2023)]}
+    assert cam._same_day_index(items) == {_day_of(7, 14): [(0, _on(2023, 7, 14))]}
 
 
 # ── Same day, other years search ────────────────────────────────────────────
@@ -240,6 +247,17 @@ def test_beyond_seven_days_falls_back_to_the_default_search():
     assert _partner(_cam(), items) == "item-1"
 
 
+def test_days_later_across_new_year_is_the_same_occasion_not_another_year():
+    # 30 Dec 2023 and 2 Jan 2024 are three days apart, not years apart.
+    items = _album(30, _ms(2023, 12, 30), {1: None, 20: _ms(2024, 1, 2)})
+    assert _partner(_cam(), items) == "item-1"
+    items = _album(30, _ms(2024, 1, 2), {1: None, 20: _ms(2023, 12, 30)})
+    assert _partner(_cam(), items) == "item-1"
+    # A year earlier is another year, even within the same calendar year.
+    items = _album(30, _ms(2023, 12, 30), {1: None, 20: _ms(2023, 1, 2)})
+    assert _partner(_cam(), items) == "item-20"
+
+
 def test_search_wraps_across_the_new_year():
     items = _album(30, _ms(2023, 12, 30), {1: None, 20: _ms(2021, 1, 2)})
     assert _partner(_cam(), items) == "item-20"
@@ -263,13 +281,40 @@ def test_days_are_matched_in_home_assistants_time_zone(monkeypatch):
     assert _partner(_cam(), items) == "item-20"
 
 
-def test_only_photos_in_the_playlist_are_considered():
-    # The search sees only the list it is given: _effective_items, with hidden
-    # and date-filtered photos already removed. A same-day photo filtered out
-    # of that list is never the partner.
-    items = _album(30, TODAY, {1: None, 20: _ms(2019, 7, 14)})
-    filtered = [item for item in items if item.url != "item-20"]
-    assert _partner(_cam(), filtered) == "item-1"
+def _playlist_cam(raw):
+    for item in raw:
+        item.photo_id = item.url
+    cam = _cam()
+    store = SlideshowStore()
+    store.order_mode = ORDER_ALBUM
+    store.pair_partner = PAIR_PARTNER_SAME_DAY
+    cam.store = store
+    cam.coordinator = SimpleNamespace(data={"items": raw})
+    cam._effective_cache = None
+    return cam
+
+
+def _hide(cam, *photo_ids):
+    cam.store.hidden_photo_ids = frozenset(photo_ids)
+    cam.store.hidden_revision += 1
+    cam._paired_urls = ()
+
+
+def test_hiding_a_photo_keeps_the_day_index_in_step_with_the_playlist():
+    # Hiding an earlier photo shifts every later position in the filtered
+    # playlist (_effective_items); the day index must follow, or it would
+    # point one past the same-day photo, at the undated portrait 21.
+    cam = _playlist_cam(_album(30, TODAY, {1: None, 20: _ms(2019, 7, 14), 21: None}))
+    assert _partner(cam, cam._effective_items()) == "item-20"
+    _hide(cam, "item-5")
+    assert _partner(cam, cam._effective_items()) == "item-20"
+
+
+def test_hidden_photos_never_become_partners():
+    cam = _playlist_cam(_album(30, TODAY, {1: None, 20: _ms(2019, 7, 14)}))
+    assert _partner(cam, cam._effective_items()) == "item-20"
+    _hide(cam, "item-20")
+    assert _partner(cam, cam._effective_items()) == "item-1"
 
 
 def test_unshown_photos_come_before_shown_ones():
@@ -315,12 +360,26 @@ def test_the_same_state_replays_the_same_partner():
         assert _partner(_cam(seed=seed), items) == _partner(_cam(seed=seed), items)
 
 
-@pytest.mark.parametrize("gap", [0, 50])
-def test_default_mode_is_unchanged(gap):
+@pytest.mark.parametrize("omit_partner", [True, False])
+def test_default_mode_pairs_exactly_as_before(omit_partner):
     items = _album(40, TODAY, {3: None, 12: _ms(2019, 7, 14), 30: None})
-    plain, chosen = _cam(gap=gap, seed=4, omit_partner=True), _cam(partner=PAIR_PARTNER_DEFAULT, gap=gap, seed=4)
-    assert _partner(plain, items) == _partner(chosen, items)
-    assert plain._rng.getstate() == chosen._rng.getstate()
+    cam = _cam(partner=PAIR_PARTNER_DEFAULT, seed=4, omit_partner=omit_partner)
+    untouched = random.Random(4).getstate()
+    # Nearest portrait, as before, and no random numbers drawn.
+    assert _partner(cam, items) == "item-3"
+    assert cam._rng.getstate() == untouched
+
+
+@pytest.mark.parametrize("gap", [0, 50])
+def test_default_mode_never_runs_the_same_day_search(gap):
+    items = _album(40, TODAY, {3: None, 12: _ms(2019, 7, 14), 30: None})
+    cam = _cam(partner=PAIR_PARTNER_DEFAULT, gap=gap)
+
+    def _refuse(_items):
+        raise AssertionError("same-day search ran in default mode")
+
+    cam._same_day_candidates = _refuse
+    _partner(cam, items)
 
 
 def _random_cam(items, shown_first):

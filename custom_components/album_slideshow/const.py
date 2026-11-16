@@ -353,7 +353,8 @@ DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"
 DEFAULT_PAIR_MIN_GAP_PERCENT = 0
 # How a paired slide's second photo is chosen. ``default`` keeps the search
 # above; ``same_day_other_years`` first looks for a photo taken on the same
-# calendar day in another year and falls back to it.
+# calendar day in another year, falling back to the search above when there
+# is none.
 PAIR_PARTNER_DEFAULT = "default"
 PAIR_PARTNER_SAME_DAY = "same_day_other_years"
 PAIR_PARTNER_OPTIONS = [PAIR_PARTNER_DEFAULT, PAIR_PARTNER_SAME_DAY]

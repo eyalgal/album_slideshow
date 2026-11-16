@@ -30,10 +30,10 @@ from .const import (
     DEFAULT_CUSTOM_LOOKBACK_DAYS,
     DEFAULT_SHUFFLE_AGE_BIAS,
     DEFAULT_MISSING_DATE_MODE,
-    MAX_RESOLUTION_SHORT_EDGE,
-    ORIENTATION_MISMATCH_PAIR,
     DEFAULT_PAIR_PARTNER,
     PAIR_PARTNER_SAME_DAY,
+    MAX_RESOLUTION_SHORT_EDGE,
+    ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_AVOID,
     ORDER_ALBUM,
     ORDER_RANDOM,
@@ -126,11 +126,12 @@ _SAME_DAY_MAX_DAYS = 7
 _DAYS_IN_RING = 365
 
 
-def _local_year_day(captured_at: int | None, tz) -> tuple[int, int] | None:
-    """Local year and day of a 365-day year for a capture time (epoch ms).
+def _local_day(captured_at: int | None, tz) -> tuple[int, int] | None:
+    """Local date (as an ordinal) and day of a 365-day year for a capture time.
 
-    February 29 counts as February 28, so leap-day photos pair with the
-    28th of other years. ``None`` when there is no usable date.
+    ``captured_at`` is epoch milliseconds. February 29 counts as February 28
+    of the ring, so leap-day photos pair with the 28th of other years.
+    ``None`` when there is no usable date.
     """
     if captured_at is None:
         return None
@@ -139,7 +140,7 @@ def _local_year_day(captured_at: int | None, tz) -> tuple[int, int] | None:
     except (OverflowError, OSError, ValueError):
         return None
     day = 28 if (local.month, local.day) == (2, 29) else local.day
-    return local.year, date(2001, local.month, day).timetuple().tm_yday
+    return local.toordinal(), date(2001, local.month, day).timetuple().tm_yday
 
 
 def _ring_days(day: int, distance: int) -> tuple[int, ...]:
@@ -369,7 +370,7 @@ class AlbumSlideshowCamera(Camera):
     _resume_anchor: float | None = None
     # Partner index tried first when resuming a paired slide.
     _preferred_partner: int | None = None
-    # (playlist, time zone, day -> [(index, year)]) for Same day, other years.
+    # (playlist, time zone, day -> [(index, date ordinal)]) for Same day, other years.
     _day_index: tuple[list, Any, dict[int, list[tuple[int, int]]]] | None = None
     # The first slide after setup resumes the saved one.
     _starting: bool = False
@@ -2132,32 +2133,34 @@ class AlbumSlideshowCamera(Camera):
         """Partner indices for Same day, other years, nearest day first.
 
         Each day's distance lists the photos not yet shown, shuffled, before
-        the ones already shown, shown longest ago first. Photos from the
-        current photo's own year never count. Empty when the current photo
-        has no date.
+        the ones already shown, shown longest ago first. A photo counts only
+        when it was taken about a year or more apart, so the days around the
+        current photo never count, even across New Year. Empty when the
+        current photo has no date.
         """
-        here = _local_year_day(
+        here = _local_day(
             getattr(items[self._index], "captured_at", None), dt_util.DEFAULT_TIME_ZONE,
         )
         if here is None:
             return []
-        year, day = here
+        today, day = here
         index = self._same_day_index(items)
         shown = self._shown_this_cycle(items)
-        age = self._shown_age(items) if shown is not None else {}
+        age: dict[int, int] | None = None
         candidates: list[int] = []
         for distance in range(_SAME_DAY_MAX_DAYS + 1):
             tier = [
                 position
                 for ring_day in _ring_days(day, distance)
                 for position, taken in index.get(ring_day, ())
-                if taken != year and position != self._index
+                if abs(taken - today) > _SAME_DAY_MAX_DAYS and position != self._index
             ]
             fresh = [position for position in tier if shown is None or not shown(position)]
-            seen = sorted(
-                (position for position in tier if shown is not None and shown(position)),
-                key=lambda position: age.get(position, len(items)),
-            )
+            seen = [position for position in tier if shown is not None and shown(position)]
+            if seen:
+                if age is None:
+                    age = self._shown_age(items)
+                seen.sort(key=lambda position: age.get(position, len(items)))
             self._rng.shuffle(fresh)
             candidates.extend(fresh)
             candidates.extend(seen)
@@ -2189,10 +2192,10 @@ class AlbumSlideshowCamera(Camera):
             return cached[2]
         index: dict[int, list[tuple[int, int]]] = {}
         for position, item in enumerate(items):
-            found = _local_year_day(getattr(item, "captured_at", None), tz)
+            found = _local_day(getattr(item, "captured_at", None), tz)
             if found is not None:
-                year, day = found
-                index.setdefault(day, []).append((position, year))
+                taken, day = found
+                index.setdefault(day, []).append((position, taken))
         self._day_index = (items, tz, index)
         return index
 
