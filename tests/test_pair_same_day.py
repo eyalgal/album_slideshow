@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from custom_components.album_slideshow import camera
 from custom_components.album_slideshow.coordinator import MediaItem
 from custom_components.album_slideshow.const import (
     DEFAULT_PAIR_PARTNER,
+    ORDER_ALBUM,
+    ORDER_RANDOM,
     PAIR_PARTNER_DEFAULT,
     PAIR_PARTNER_OPTIONS,
     PAIR_PARTNER_SAME_DAY,
@@ -140,3 +145,200 @@ def test_same_day_index_is_kept_until_the_playlist_changes(monkeypatch):
     # So does a change of Home Assistant's time zone.
     monkeypatch.setattr(camera.dt_util, "DEFAULT_TIME_ZONE", LA)
     assert cam._same_day_index(items) == {_day_of(7, 14): [(0, 2023)]}
+
+
+# ── Same day, other years search ────────────────────────────────────────────
+
+
+
+class _FakeHass:
+    def __init__(self):
+        self.data = {}
+
+    async def async_add_executor_job(self, func, *args):
+        return func(*args)
+
+
+@pytest.fixture(autouse=True)
+def _stub_image_decode(monkeypatch):
+    # Every item carries width/height, so orientation resolves from metadata.
+    monkeypatch.setattr(camera.ip, "open_image", lambda data, size: object())
+
+
+def _photo(idx, taken=None, *, portrait=True):
+    w, h = (100, 200) if portrait else (200, 100)
+    return MediaItem(url=f"item-{idx}", width=w, height=h, mime_type="image/jpeg",
+                     filename=f"item-{idx}.jpg", captured_at=taken)
+
+
+def _album(n, current_taken, placed):
+    """n landscape photos; the current one (index 0) is dated; ``placed`` maps
+    index -> portrait photo's capture time (None = undated portrait)."""
+    items = [_photo(i, portrait=False) for i in range(n)]
+    items[0] = _photo(0, current_taken)
+    for idx, taken in placed.items():
+        items[idx] = _photo(idx, taken)
+    return items
+
+
+def _cam(*, partner=PAIR_PARTNER_SAME_DAY, gap=0, seed=1, index=0, omit_partner=False, order=ORDER_ALBUM):
+    cam = camera.AlbumSlideshowCamera.__new__(camera.AlbumSlideshowCamera)
+    cam.hass = _FakeHass()
+    store = SimpleNamespace(pair_min_gap_percent=gap, order_mode=order, shuffle_age_bias=0)
+    if not omit_partner:
+        store.pair_partner = partner
+    cam.store = store
+    cam._index = index
+    cam._recent_urls = []
+    cam._rng = random.Random(seed)
+
+    async def _fetch_bytes(url):
+        return b"fake-bytes"
+
+    cam._fetch_bytes = _fetch_bytes
+    return cam
+
+
+def _partner(cam, items):
+    result = asyncio.run(cam._find_next_mismatch_image(items, is_portrait_canvas=False, width=100, height=100))
+    return None if result is None else result[1].url
+
+
+TODAY = _ms(2023, 7, 14)
+
+
+def test_exact_day_in_another_year_beats_nearer_photos():
+    items = _album(30, TODAY, {1: None, 2: _ms(2020, 7, 15), 20: _ms(2019, 7, 14)})
+    for seed in range(10):
+        assert _partner(_cam(seed=seed), items) == "item-20"
+
+
+def test_the_same_year_never_counts():
+    items = _album(30, TODAY, {2: None, 9: _ms(2023, 7, 14), 15: _ms(2023, 7, 16)})
+    # No other year within 7 days: the default search takes the nearest portrait.
+    assert _partner(_cam(), items) == "item-2"
+    items[25] = _photo(25, _ms(2018, 7, 20))
+    assert _partner(_cam(), items) == "item-25"
+
+
+@pytest.mark.parametrize("days", [1, 3, 7])
+def test_search_widens_up_to_seven_days(days):
+    items = _album(30, TODAY, {1: None, 20: _ms(2019, 7, 14 + days)})
+    assert _partner(_cam(), items) == "item-20"
+    items = _album(30, TODAY, {1: None, 20: _ms(2019, 7, 14 - days)})
+    assert _partner(_cam(), items) == "item-20"
+
+
+def test_nearer_day_wins_over_further_day():
+    items = _album(30, TODAY, {5: _ms(2019, 7, 20), 20: _ms(2018, 7, 12)})
+    for seed in range(10):
+        assert _partner(_cam(seed=seed), items) == "item-20"
+
+
+def test_beyond_seven_days_falls_back_to_the_default_search():
+    items = _album(30, TODAY, {1: None, 20: _ms(2019, 7, 22)})
+    assert _partner(_cam(), items) == "item-1"
+
+
+def test_search_wraps_across_the_new_year():
+    items = _album(30, _ms(2023, 12, 30), {1: None, 20: _ms(2021, 1, 2)})
+    assert _partner(_cam(), items) == "item-20"
+    items = _album(30, _ms(2023, 1, 2), {1: None, 20: _ms(2019, 12, 30)})
+    assert _partner(_cam(), items) == "item-20"
+
+
+def test_february_29_pairs_with_february_28():
+    items = _album(30, _ms(2024, 2, 29), {1: _ms(2019, 3, 1), 20: _ms(2021, 2, 28)})
+    assert _partner(_cam(), items) == "item-20"
+    items = _album(30, _ms(2023, 2, 28), {1: _ms(2019, 3, 1), 20: _ms(2020, 2, 29)})
+    assert _partner(_cam(), items) == "item-20"
+
+
+def test_days_are_matched_in_home_assistants_time_zone(monkeypatch):
+    # Taken 14 July 2023 at 8 PM in Los Angeles: 15 July in UTC.
+    current = _ms(2023, 7, 15, hour=3)
+    items = _album(30, current, {5: _ms(2019, 7, 15, hour=12), 20: _ms(2019, 7, 14, hour=12)})
+    assert _partner(_cam(), items) == "item-5"
+    monkeypatch.setattr(camera.dt_util, "DEFAULT_TIME_ZONE", LA)
+    assert _partner(_cam(), items) == "item-20"
+
+
+def test_only_photos_in_the_playlist_are_considered():
+    # The search sees only the list it is given: _effective_items, with hidden
+    # and date-filtered photos already removed. A same-day photo filtered out
+    # of that list is never the partner.
+    items = _album(30, TODAY, {1: None, 20: _ms(2019, 7, 14)})
+    filtered = [item for item in items if item.url != "item-20"]
+    assert _partner(_cam(), filtered) == "item-1"
+
+
+def test_unshown_photos_come_before_shown_ones():
+    items = _album(30, TODAY, {10: _ms(2019, 7, 14), 20: _ms(2018, 7, 14)})
+    cam = _cam()
+    cam._paired_urls = ("item-10",)
+    assert _partner(cam, items) == "item-20"
+
+
+def test_when_every_match_was_shown_the_one_shown_longest_ago_wins():
+    items = _album(30, TODAY, {1: None, 10: _ms(2019, 7, 14), 20: _ms(2018, 7, 14)})
+    for older, newer in (("item-20", "item-10"), ("item-10", "item-20")):
+        cam = _cam()
+        cam._paired_urls = (older, newer, "item-1")
+        assert _partner(cam, items) == older
+
+
+def test_recently_shown_photos_are_still_skipped():
+    # The slideshow's last ~20 slides are never partners, in any mode.
+    items = _album(30, TODAY, {1: None, 20: _ms(2019, 7, 14)})
+    cam = _cam()
+    cam._recent_urls = ["item-20"]
+    assert _partner(cam, items) == "item-1"
+
+
+@pytest.mark.parametrize("gap", [0, 50])
+def test_no_match_uses_the_default_search_with_its_gap(gap):
+    items = _album(30, TODAY, {1: None, 15: None})
+    assert _partner(_cam(gap=gap), items) == _partner(_cam(partner=PAIR_PARTNER_DEFAULT, gap=gap), items)
+    assert _partner(_cam(gap=gap), items) == ("item-1" if gap == 0 else "item-15")
+
+
+def test_an_undated_photo_uses_the_default_search():
+    items = _album(30, None, {1: None, 20: _ms(2019, 7, 14)})
+    assert _partner(_cam(), items) == "item-1"
+
+
+def test_the_same_state_replays_the_same_partner():
+    items = _album(40, TODAY, {i: _ms(2000 + i % 20, 7, 14) for i in range(5, 35, 3)})
+    picks = {_partner(_cam(seed=seed), items) for seed in range(30)}
+    assert len(picks) > 1  # ties are shuffled
+    for seed in range(5):
+        assert _partner(_cam(seed=seed), items) == _partner(_cam(seed=seed), items)
+
+
+@pytest.mark.parametrize("gap", [0, 50])
+def test_default_mode_is_unchanged(gap):
+    items = _album(40, TODAY, {3: None, 12: _ms(2019, 7, 14), 30: None})
+    plain, chosen = _cam(gap=gap, seed=4, omit_partner=True), _cam(partner=PAIR_PARTNER_DEFAULT, gap=gap, seed=4)
+    assert _partner(plain, items) == _partner(chosen, items)
+    assert plain._rng.getstate() == chosen._rng.getstate()
+
+
+def _random_cam(items, shown_first):
+    """Random order, with ``shown_first`` (then the current photo) shown this cycle."""
+    cam = _cam(order=ORDER_RANDOM)
+    rest = [i for i in range(len(items)) if i not in shown_first and i != 0]
+    cam._random_order = [*shown_first, 0, *rest]
+    cam._random_pos = len(shown_first) + 1
+    cam._cycle_ids = tuple(item.url for item in items)
+    return cam
+
+
+def test_random_order_prefers_a_same_day_photo_not_yet_shown_this_cycle():
+    items = _album(30, TODAY, {1: None, 10: _ms(2019, 7, 14), 20: _ms(2018, 7, 14)})
+    assert _partner(_random_cam(items, [10]), items) == "item-20"
+
+
+def test_random_order_reuses_the_same_day_photo_shown_longest_ago():
+    items = _album(30, TODAY, {1: None, 10: _ms(2019, 7, 14), 20: _ms(2018, 7, 14)})
+    assert _partner(_random_cam(items, [20, 10]), items) == "item-20"
+    assert _partner(_random_cam(items, [10, 20]), items) == "item-10"
