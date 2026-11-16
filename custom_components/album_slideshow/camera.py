@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import itertools
 import logging
 import math
@@ -117,6 +117,37 @@ _RENDER_SETTINGS = (
 )
 
 _next_frame_serial = itertools.count(1).__next__
+
+# Same day, other years pairing looks this many days either side of the
+# photo's calendar day before falling back to the default search.
+_SAME_DAY_MAX_DAYS = 7
+_DAYS_IN_RING = 365
+
+
+def _local_year_day(captured_at: int | None, tz) -> tuple[int, int] | None:
+    """Local year and day of a 365-day year for a capture time (epoch ms).
+
+    February 29 counts as February 28, so leap-day photos pair with the
+    28th of other years. ``None`` when there is no usable date.
+    """
+    if captured_at is None:
+        return None
+    try:
+        local = datetime.fromtimestamp(captured_at / 1000, tz).date()
+    except (OverflowError, OSError, ValueError):
+        return None
+    day = 28 if (local.month, local.day) == (2, 29) else local.day
+    return local.year, date(2001, local.month, day).timetuple().tm_yday
+
+
+def _ring_days(day: int, distance: int) -> tuple[int, ...]:
+    """Days exactly ``distance`` away from ``day``, wrapping across the new year."""
+    if distance == 0:
+        return (day,)
+    return tuple(sorted({
+        (day - 1 - distance) % _DAYS_IN_RING + 1,
+        (day - 1 + distance) % _DAYS_IN_RING + 1,
+    }))
 
 
 def _pair_exclusion_radius(n: int, min_gap_percent: float) -> int:
@@ -336,6 +367,8 @@ class AlbumSlideshowCamera(Camera):
     _resume_anchor: float | None = None
     # Partner index tried first when resuming a paired slide.
     _preferred_partner: int | None = None
+    # (playlist, time zone, day -> [(index, year)]) for Same day, other years.
+    _day_index: tuple[list, Any, dict[int, list[tuple[int, int]]]] | None = None
     # The first slide after setup resumes the saved one.
     _starting: bool = False
     # An album update waiting for the current slide change to finish.
@@ -2076,6 +2109,27 @@ class AlbumSlideshowCamera(Camera):
         img, index = found
         self._mark_partner_shown(index, items)
         return img, items[index]
+
+    def _same_day_index(self, items: list[MediaItem]) -> dict[int, list[tuple[int, int]]]:
+        """Photos of the playlist by local calendar day, for Same day, other years.
+
+        ``items`` is the filtered playlist from ``_effective_items``, which
+        hands out the same list until the album, filters, hidden photos or
+        order change; the index is rebuilt whenever that list is replaced or
+        Home Assistant's time zone changes. Undated photos are left out.
+        """
+        tz = dt_util.DEFAULT_TIME_ZONE
+        cached = self._day_index
+        if cached is not None and cached[0] is items and cached[1] == tz:
+            return cached[2]
+        index: dict[int, list[tuple[int, int]]] = {}
+        for position, item in enumerate(items):
+            found = _local_year_day(getattr(item, "captured_at", None), tz)
+            if found is not None:
+                year, day = found
+                index.setdefault(day, []).append((position, year))
+        self._day_index = (items, tz, index)
+        return index
 
     def _shown_oldest_first(self, items: list[MediaItem]):
         """Indices of photos shown this cycle, the one shown longest ago first."""
