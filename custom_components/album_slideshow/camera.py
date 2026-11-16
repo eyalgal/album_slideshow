@@ -337,6 +337,9 @@ class AlbumSlideshowCamera(Camera):
     _preferred_partner: int | None = None
     # The first slide after setup resumes the saved one.
     _starting: bool = False
+    # An album update waiting for the current slide change to finish.
+    _update_task: asyncio.Task | None = None
+    _update_previous_items: list[MediaItem] | None = None
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: AlbumCoordinator, store: SlideshowStore) -> None:
         super().__init__()
@@ -420,10 +423,14 @@ class AlbumSlideshowCamera(Camera):
         def _on_coordinator_update() -> None:
             previous_items = self._effective_cache[1] if self._effective_cache else None
             self._effective_cache = None
-            if self._keep_timeline(previous_items):
-                self.async_write_ha_state()
-            else:
-                self._invalidate_timeline()
+            if not self._navigation_lock.locked():
+                self._apply_coordinator_update(previous_items)
+            elif self._update_task is None or self._update_task.done():
+                # Rebuilding the slide being changed would show its photo again.
+                self._update_previous_items = previous_items
+                self._update_task = self.hass.async_create_background_task(
+                    self._async_apply_pending_update(), name="album_slideshow_album_update",
+                )
 
         coordinator.async_add_listener(_on_coordinator_update)
 
@@ -475,6 +482,8 @@ class AlbumSlideshowCamera(Camera):
         if self._unsub_viewers is not None:
             self._unsub_viewers()
             self._unsub_viewers = None
+        if self._update_task is not None:
+            self._update_task.cancel()
         preload_task = self._preload_task
         self._cancel_preload()
         if self._render_task is not None:
@@ -1167,6 +1176,18 @@ class AlbumSlideshowCamera(Camera):
     def _current_render_settings(self) -> tuple:
         return tuple(getattr(self.store, name) for name in _RENDER_SETTINGS)
 
+    def _apply_coordinator_update(self, previous_items: list[MediaItem] | None) -> None:
+        if self._keep_timeline(previous_items):
+            self.async_write_ha_state()
+        else:
+            self._invalidate_timeline()
+
+    async def _async_apply_pending_update(self) -> None:
+        """Apply an album update that arrived while a slide was changing."""
+        async with self._navigation_lock:
+            previous_items, self._update_previous_items = self._update_previous_items, None
+            self._apply_coordinator_update(previous_items)
+
     def _keep_timeline(self, previous_items: list[MediaItem] | None) -> bool:
         """Keep rendered slides that are still valid after a coordinator update.
 
@@ -1176,7 +1197,7 @@ class AlbumSlideshowCamera(Camera):
         False when the timeline has to be rebuilt instead.
         """
         current = self._current_frame
-        if current is None or self._timeline_dirty or self._navigation_lock.locked():
+        if current is None or self._timeline_dirty:
             return False
         items = self._effective_items()
         found = {item.photo_id: (index, item) for index, item in enumerate(items) if item.photo_id}

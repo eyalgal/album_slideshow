@@ -872,6 +872,32 @@ def test_new_face_data_rerenders_only_slides_that_used_it():
     assert cam._timeline_dirty
 
 
+def test_album_updates_during_a_slide_change_wait_for_it():
+    async def run(change_playlist):
+        cam, update, _store, items, frames = _history_cam()
+        async with cam._navigation_lock:
+            if change_playlist:
+                cam.coordinator.data = {"items": [items[0], items[3]]}
+            else:
+                items[0].location = "Lisbon, Portugal"
+            update()
+            update()
+            # Rebuilding the slide on screen now would show its photo again.
+            assert not cam._timeline_dirty
+            assert cam._current_frame is frames[2]
+        await cam._update_task
+        return cam, frames
+
+    cam, frames = asyncio.run(run(change_playlist=False))
+    assert not cam._timeline_dirty
+    assert list(cam._previous_frames) == frames[:2]
+    assert cam._current_frame is frames[2]
+    assert list(cam._next_frames) == frames[3:]
+
+    cam, _frames = asyncio.run(run(change_playlist=True))
+    assert cam._timeline_dirty
+
+
 def test_navigation_starts_from_the_slide_a_card_is_showing():
     def camera_ahead_of_card():
         cam = _make_cam(depth=3)
