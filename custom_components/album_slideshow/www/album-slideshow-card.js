@@ -2152,6 +2152,7 @@ const LIVE_FIELDS = [
   "shuffle_age_bias",
   "missing_date_mode",
   "portrait_mode",
+  "pair_partner",
   "order_mode",
   "slide_interval",
   "pair_divider_px",
@@ -2167,6 +2168,7 @@ const LIVE_SUFFIX = {
   shuffle_age_bias: "_shuffle_age_bias",
   missing_date_mode: "_missing_date_mode",
   portrait_mode: "_portrait_mode",
+  pair_partner: "_pair_partner",
   order_mode: "_order_mode",
   slide_interval: "_interval",
   pair_divider_px: "_pair_divider_px",
@@ -2185,6 +2187,7 @@ const LIVE_LABELS = {
   live_shuffle_age_bias: "Shuffle age bias (older - / newer +)",
   live_missing_date_mode: "Missing capture date",
   live_portrait_mode: "Orientation mismatch mode",
+  live_pair_partner: "Pair partner",
   live_order_mode: "Order mode",
   live_slide_interval: "Slide interval (seconds)",
   live_pair_divider_px: "Pair divider size (px)",
@@ -2346,6 +2349,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
       ["date_filter", s.date_filter],
       ["missing_date_mode", s.missing_date_mode],
       ["portrait_mode", s.portrait_mode],
+      ["pair_partner", s.pair_partner],
       ["order_mode", s.order_mode],
     ]) {
       if (id) {
@@ -2906,7 +2910,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
         out[`live_${f}`] = !!e && e.state === "on";
       }
     }
-    for (const f of ["date_filter", "missing_date_mode", "portrait_mode", "order_mode"]) {
+    for (const f of ["date_filter", "missing_date_mode", "portrait_mode", "pair_partner", "order_mode"]) {
       if (s[f]) {
         const e = st(s[f]);
         out[`live_${f}`] = e ? e.state : "";
@@ -3181,6 +3185,7 @@ function createAlbumSlideshowCardEditorClass(Base) {
       field === "date_filter" ||
       field === "missing_date_mode" ||
       field === "portrait_mode" ||
+      field === "pair_partner" ||
       field === "order_mode"
     ) {
       hass.callService("select", "select_option", {

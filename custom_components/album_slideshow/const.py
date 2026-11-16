@@ -351,6 +351,13 @@ DEFAULT_PAIR_DIVIDER_COLOR = "#FFFFFF"
 # search; a positive value switches to a shuffled search that excludes the
 # cooldown zone around the current index.
 DEFAULT_PAIR_MIN_GAP_PERCENT = 0
+# How a paired slide's second photo is chosen. ``default`` keeps the search
+# above; ``same_day_other_years`` first looks for a photo taken on the same
+# calendar day in another year and falls back to it.
+PAIR_PARTNER_DEFAULT = "default"
+PAIR_PARTNER_SAME_DAY = "same_day_other_years"
+PAIR_PARTNER_OPTIONS = [PAIR_PARTNER_DEFAULT, PAIR_PARTNER_SAME_DAY]
+DEFAULT_PAIR_PARTNER = PAIR_PARTNER_DEFAULT
 DEFAULT_RECURSIVE = True
 # Per-album download cache. Multiple albums add up: 4 × 150 MB = 600 MB
 # of just-in-case downloaded JPEGs. 75 MB caches roughly 10-20 photos

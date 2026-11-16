@@ -20,6 +20,7 @@ from .const import (
     DEFAULT_PAIR_DIVIDER_PX,
     DEFAULT_PAIR_DIVIDER_COLOR,
     DEFAULT_PAIR_MIN_GAP_PERCENT,
+    DEFAULT_PAIR_PARTNER,
     DEFAULT_IMAGE_CACHE_MB,
     DEFAULT_NAVIGATION_BUFFER_SIZE,
     DEFAULT_MAX_RESOLUTION,
@@ -77,6 +78,7 @@ class SlideshowStore:
     pair_divider_px: int = DEFAULT_PAIR_DIVIDER_PX
     pair_divider_color: str = DEFAULT_PAIR_DIVIDER_COLOR
     pair_min_gap_percent: int = DEFAULT_PAIR_MIN_GAP_PERCENT
+    pair_partner: str = DEFAULT_PAIR_PARTNER
     image_cache_mb: int = DEFAULT_IMAGE_CACHE_MB
     navigation_buffer_size: int = DEFAULT_NAVIGATION_BUFFER_SIZE
     max_resolution: str = DEFAULT_MAX_RESOLUTION
