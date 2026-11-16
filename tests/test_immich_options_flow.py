@@ -155,6 +155,7 @@ def test_reverse_geocoding_option_remains_editable(monkeypatch):
 
     assert result["data"] == {
         CONF_REVERSE_GEOCODE: True, CONF_HIDE_HOME_COUNTRY: True, "other": "kept",
+        "osm_place_names": False,
     }
     assert flow.hass.config_entries.updates[0]["options"] == result["data"]
 

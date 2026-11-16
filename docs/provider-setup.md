@@ -181,6 +181,15 @@ filter, name, or image quality. The reverse-geocoding privacy toggle and the
 home-country option remain available. Saving reloads that slideshow without
 changing its entry ID, entities, runtime settings, or hidden-photo list.
 
+**Use OpenStreetMap place names instead of Immich's** (off by default) shows
+OpenStreetMap's place name for every photo with GPS. Immich names a place
+after the nearest town in its own list, which near a town line can be the
+neighbouring town; OpenStreetMap follows town boundaries. It needs the
+reverse-geocoding toggle on, and the first pass looks up about one place a
+second (photos taken close together share a lookup). A photo OpenStreetMap
+can't name keeps Immich's name. Turning it off again re-reads your photos'
+details from Immich so its names come back.
+
 Saved albums and people that cannot currently be listed remain selected and
 are marked **unavailable**. They are not silently removed. Deselecting all
 sources and clearing the filter deliberately selects the entire library.

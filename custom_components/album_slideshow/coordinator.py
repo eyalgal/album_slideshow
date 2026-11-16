@@ -39,6 +39,8 @@ from .const import (
     CONF_REVERSE_GEOCODE,
     CONF_HIDE_HOME_COUNTRY,
     DEFAULT_HIDE_HOME_COUNTRY,
+    CONF_OSM_PLACE_NAMES,
+    DEFAULT_OSM_PLACE_NAMES,
     CONF_IMMICH_URL,
     CONF_IMMICH_API_KEY,
     CONF_IMMICH_SELECTION_TYPE,
@@ -1469,6 +1471,14 @@ class AlbumCoordinator(DataUpdateCoordinator):
         return bool(options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE))
 
     @property
+    def _osm_replaces_service_places(self) -> bool:
+        """True when OpenStreetMap names replace the photo service's own."""
+        options = getattr(getattr(self, "entry", None), "options", None) or {}
+        return self.reverse_geocode_enabled and bool(
+            options.get(CONF_OSM_PLACE_NAMES, DEFAULT_OSM_PLACE_NAMES)
+        )
+
+    @property
     def _hidden_home_country(self) -> str | None:
         """Country code to leave out of place labels, if the user asked for that."""
         options = getattr(getattr(self, "entry", None), "options", None) or {}
@@ -1480,7 +1490,7 @@ class AlbumCoordinator(DataUpdateCoordinator):
         """True for items with GPS whose place isn't cached yet."""
         if item.latitude is None or item.longitude is None:
             return False
-        if item.location and not item.location_geocoded:
+        if item.location and not item.location_geocoded and not self._osm_replaces_service_places:
             return False  # The provider's own label.
         return _geocode_cache_key(item.latitude, item.longitude) not in self._geocode_cache
 
@@ -1491,23 +1501,28 @@ class AlbumCoordinator(DataUpdateCoordinator):
         stay visible until a new lookup replaces them.
         """
         home = self._hidden_home_country
+        replace = self._osm_replaces_service_places
         changed = 0
         for item in items:
             if item.latitude is None or item.longitude is None:
                 continue
             key = _geocode_cache_key(item.latitude, item.longitude)
             legacy = self._geocode_legacy.get(key)
-            if item.location and not item.location_geocoded:
+            service_label = bool(item.location) and not item.location_geocoded
+            if service_label and not replace:
                 if item.location != legacy:
                     continue
                 item.location_geocoded = True
+                service_label = False
             place = self._geocode_cache.get(key)
             if place is None:
-                if legacy and not item.location:
+                if legacy and (service_label or not item.location):
                     item.location, item.location_geocoded = legacy, True
                     changed += 1
                 continue
             label = _format_place(place, home)
+            if label is None and service_label:
+                continue
             if label != item.location or not item.location_geocoded:
                 item.location, item.location_geocoded = label, True
                 changed += 1
@@ -2868,7 +2883,9 @@ class AlbumCoordinator(DataUpdateCoordinator):
                 if "latitude" in info and "longitude" in info:
                     item.latitude = info["latitude"]
                     item.longitude = info["longitude"]
-                if "location" in info:
+                if "location" in info and not (
+                    item.location_geocoded and self._osm_replaces_service_places
+                ):
                     item.location = info["location"]
                     item.location_geocoded = False
                 if "description" in info:
@@ -3202,6 +3219,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
                     self._geocode_cache[key] = place
                     label = _format_place(place, home)
                     for item in group:
+                        if label is None and item.location and not item.location_geocoded:
+                            continue  # Keep the service's name over none.
                         item.location, item.location_geocoded = label, True
                     unsaved += 1
 
