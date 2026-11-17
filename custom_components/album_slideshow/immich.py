@@ -36,7 +36,10 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _TIMEOUT = 30
 _PAGE_SIZE = 1000
-_MAX_ASSETS = 20_000
+# Safety ceiling, not a selection: a whole library is often well past 20,000
+# photos, and search/metadata returns newest first, so a lower cap would
+# silently drop the oldest years.
+_MAX_ASSETS = 100_000
 
 
 def normalize_base_url(url: str) -> str:
