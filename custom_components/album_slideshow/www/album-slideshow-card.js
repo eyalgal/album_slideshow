@@ -1187,12 +1187,26 @@ function createAlbumSlideshowCardClass(Base) {
       return;
     }
     const attrs = state.attributes || {};
-    if (this._hiddenRevision !== undefined && attrs.hidden_revision !== this._hiddenRevision) {
-      this._clearDisplayedPhotos();
+    // An unavailable camera reports no ``hidden_revision`` at all; that is
+    // not a hide, so it neither clears the photo nor resets the counter.
+    if (attrs.hidden_revision !== undefined) {
+      if (this._hiddenRevision !== undefined && attrs.hidden_revision !== this._hiddenRevision) {
+        this._clearDisplayedPhotos();
+      }
+      this._hiddenRevision = attrs.hidden_revision;
     }
-    this._hiddenRevision = attrs.hidden_revision;
     this._refreshPhotoControls(attrs);
     this._syncVideoPaused(attrs);
+    // While the integration reloads it briefly has no frame (unavailable,
+    // then no photo yet). Keep the photo on screen until the next one is
+    // ready instead of blanking to a placeholder. Hiding a photo still
+    // clears it above, through ``hidden_revision``.
+    if (
+      this._displayedPhotoIds?.length && !attrs.empty_reason &&
+      (!attrs.entity_picture || (Array.isArray(attrs.displayed_photo_ids) && !attrs.displayed_photo_ids.length))
+    ) {
+      return;
+    }
     if (attrs.empty_reason || (Array.isArray(attrs.displayed_photo_ids) && !attrs.displayed_photo_ids.length)) {
       this._clearDisplayedPhotos();
       this._setPlaceholder(attrs.empty_reason === "all_hidden" ? "All photos hidden" : attrs.empty_reason ? "No matching photos" : "Preparing next photo...");
