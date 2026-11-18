@@ -37,3 +37,27 @@ def test_still_stops_at_the_safety_ceiling():
 
     assert len(items) == immich._MAX_ASSETS
     assert len(pages) == immich._MAX_ASSETS // 1000
+
+
+def test_logs_when_the_limit_leaves_photos_out(caplog):
+    client, _ = _client(immich._MAX_ASSETS + 1)
+
+    asyncio.run(client._collect_metadata({}))
+
+    assert "reached the limit" in caplog.text
+
+
+def test_logs_when_the_limit_skips_selected_sources(caplog):
+    client, _ = _client(immich._MAX_ASSETS)
+
+    asyncio.run(client._collect_union([{}, {}]))
+
+    assert "reached the limit" in caplog.text
+
+
+def test_reading_everything_logs_nothing(caplog):
+    client, _ = _client(immich._MAX_ASSETS)
+
+    asyncio.run(client._collect_union([{}]))
+
+    assert "reached the limit" not in caplog.text

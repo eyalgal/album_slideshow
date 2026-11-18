@@ -292,6 +292,7 @@ marker but do not gain face recognition.
 ### Immich Limits
 
 - Requires an Immich server reachable from Home Assistant and an API key
+- Up to 50,000 photos per selection; if there are more, the rest are left out and a warning is logged
 - Videos are skipped unless **Include videos** is on, and they play only in the Album Slideshow card
 - Home Assistant fetches and re-serves images, so the Immich server does not need to be reachable from the dashboard client (and the API key never leaves the server)
 - Location, description and faces are read per photo: just before it is shown, and for the rest of the library by a background pass

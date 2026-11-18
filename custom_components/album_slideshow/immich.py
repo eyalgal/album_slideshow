@@ -27,6 +27,7 @@ API shape (Immich v1.13x / v3, ``/api`` prefix, ``x-api-key`` header):
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import datetime, timezone
 from typing import Any
@@ -34,12 +35,12 @@ from typing import Any
 import async_timeout
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+_LOGGER = logging.getLogger(__name__)
+
 _TIMEOUT = 30
 _PAGE_SIZE = 1000
-# Safety ceiling, not a selection: a whole library is often well past 20,000
-# photos, and search/metadata returns newest first, so a lower cap would
-# silently drop the oldest years.
-_MAX_ASSETS = 100_000
+# Safety ceiling per selection; anything past it is left out (and logged).
+_MAX_ASSETS = 50_000
 
 
 def normalize_base_url(url: str) -> str:
@@ -680,6 +681,12 @@ class ImmichClient:
             items, next_page = parse_search_page(payload, include_videos)
             collected.extend(items)
             page = next_page
+        if page is not None:
+            _LOGGER.warning(
+                "Immich: reached the limit of %d photos, "
+                "so some photos in this selection won't be shown",
+                _MAX_ASSETS,
+            )
         return collected
 
     async def _collect_union(
@@ -695,6 +702,11 @@ class ImmichClient:
         out: list[dict[str, Any]] = []
         for body in bodies:
             if len(out) >= _MAX_ASSETS:
+                _LOGGER.warning(
+                    "Immich: reached the limit of %d photos, "
+                    "so some photos in this selection won't be shown",
+                    _MAX_ASSETS,
+                )
                 break
             items = await self._collect_metadata(body, include_videos)
             for it in items:
