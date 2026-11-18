@@ -646,6 +646,21 @@ def test_geocode_looks_up_each_place_once(monkeypatch):
     assert coord._needs_geocode_lookup(items[2])
 
 
+def test_geocode_saves_the_photo_list_once_per_pass(monkeypatch):
+    places = {(float(i), float(i)): _LISBON for i in range(25)}
+    coord, lookup = _geocode_coordinator(monkeypatch, places)
+    coord._save_cached_items = AsyncMock()
+    coord._save_geocode_cache = AsyncMock(wraps=coord._save_geocode_cache)
+    items = [_item(f"file:///{i}.jpg", latitude=float(i), longitude=float(i)) for i in range(25)]
+
+    asyncio.run(coord._geocode_items_background({"items": items}))
+
+    assert lookup.await_count == 25
+    assert coord._save_geocode_cache.await_count == 3
+    assert coord._save_cached_items.await_count == 1
+    assert {it.location for it in items} == {"Lisbon, Portugal"}
+
+
 def test_geocode_keeps_place_names_from_the_photo_service(monkeypatch):
     coord, lookup = _geocode_coordinator(monkeypatch, {(45.9636, -66.6431): _FREDERICTON})
     item = _item("file:///a.jpg", latitude=45.9636, longitude=-66.6431, location="Fredericton, NB")

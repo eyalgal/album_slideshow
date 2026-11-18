@@ -3228,8 +3228,8 @@ class AlbumCoordinator(DataUpdateCoordinator):
 
                 if unsaved >= _GEOCODE_BATCH_SAVE:
                     unsaved = 0
+                    # The place cache relabels photos, so save the full list only at the end.
                     await self._save_geocode_cache()
-                    await self._save_cached_items(data)
                     self.async_set_updated_data(data)
         finally:
             if unsaved:
