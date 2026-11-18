@@ -27,6 +27,7 @@ The following entities allow you to adjust slideshow behavior without restarting
 | Number | Shuffle age bias | 0 | -100 to 100 | Negative favors older photos; positive favors newer photos; 0 preserves the original shuffle. Used only in Random order |
 | Select | Fill mode | blur | blur, cover, contain | How images fill the canvas |
 | Select | Orientation mismatch | pair | pair, single, avoid | Handling of portrait and landscape mismatch |
+| Select | Pair partner | default | default, same_day_other_years | How a paired slide's second photo is chosen. same_day_other_years prefers one taken on the same calendar day in another year (in Home Assistant's time zone), widening up to 7 days either side, nearest day first; when there is none, the default search runs, including Pair minimum gap |
 | Select | Order mode | random | random, album_order, newest_taken, oldest_taken, newest_added, oldest_added | Slide ordering behavior |
 | Select | Aspect ratio | 16:9 | 16:9, 5:3, 16:10, 3:2, 4:3, 1:1, 3:4, 2:3, 10:16, 3:5, 9:16 | Canvas aspect ratio. Match your screen so the slideshow fills it |
 | Select | Max resolution | 1080p | 480p, 720p, 1080p, 1440p, 4K (2160p), original | Cap output resolution by short edge; use original to render at native size |

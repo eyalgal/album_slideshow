@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import itertools
 import logging
 import math
@@ -30,6 +30,8 @@ from .const import (
     DEFAULT_CUSTOM_LOOKBACK_DAYS,
     DEFAULT_SHUFFLE_AGE_BIAS,
     DEFAULT_MISSING_DATE_MODE,
+    DEFAULT_PAIR_PARTNER,
+    PAIR_PARTNER_SAME_DAY,
     MAX_RESOLUTION_SHORT_EDGE,
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_AVOID,
@@ -107,6 +109,7 @@ _RENDER_SETTINGS = (
     "pair_divider_px",
     "pair_divider_color",
     "pair_min_gap_percent",
+    "pair_partner",
     "max_resolution",
     "date_filter",
     "custom_lookback_days",
@@ -116,6 +119,38 @@ _RENDER_SETTINGS = (
 )
 
 _next_frame_serial = itertools.count(1).__next__
+
+# Same day, other years pairing looks this many days either side of the
+# photo's calendar day before falling back to the default search.
+_SAME_DAY_MAX_DAYS = 7
+_DAYS_IN_RING = 365
+
+
+def _local_day(captured_at: int | None, tz) -> tuple[int, int] | None:
+    """Local date (as an ordinal) and day of a 365-day year for a capture time.
+
+    ``captured_at`` is epoch milliseconds. February 29 counts as February 28
+    of the ring, so leap-day photos pair with the 28th of other years.
+    ``None`` when there is no usable date.
+    """
+    if captured_at is None:
+        return None
+    try:
+        local = datetime.fromtimestamp(captured_at / 1000, tz).date()
+    except (OverflowError, OSError, ValueError):
+        return None
+    day = 28 if (local.month, local.day) == (2, 29) else local.day
+    return local.toordinal(), date(2001, local.month, day).timetuple().tm_yday
+
+
+def _ring_days(day: int, distance: int) -> tuple[int, ...]:
+    """Days exactly ``distance`` away from ``day``, wrapping across the new year."""
+    if distance == 0:
+        return (day,)
+    return tuple(sorted({
+        (day - 1 - distance) % _DAYS_IN_RING + 1,
+        (day - 1 + distance) % _DAYS_IN_RING + 1,
+    }))
 
 
 def _pair_exclusion_radius(n: int, min_gap_percent: float) -> int:
@@ -335,6 +370,8 @@ class AlbumSlideshowCamera(Camera):
     _resume_anchor: float | None = None
     # Partner index tried first when resuming a paired slide.
     _preferred_partner: int | None = None
+    # (playlist, time zone, day -> [(index, date ordinal)]) for Same day, other years.
+    _day_index: tuple[list, Any, dict[int, list[tuple[int, int]]]] | None = None
     # The first slide after setup resumes the saved one.
     _starting: bool = False
     # An album update waiting for the current slide change to finish.
@@ -610,6 +647,7 @@ class AlbumSlideshowCamera(Camera):
             "pair_divider_px": int(self.store.pair_divider_px),
             "pair_divider_color": self.store.pair_divider_color,
             "pair_min_gap_percent": int(self.store.pair_min_gap_percent),
+            "pair_partner": self.store.pair_partner,
             "frame_id": self._frame_id,
             "navigation_buffer_size": self._buffer_depth,
             "previous_frames_cached": len(self._previous_frames),
@@ -2005,6 +2043,11 @@ class AlbumSlideshowCamera(Camera):
         there. The chosen partner is then counted as shown (see
         ``_mark_partner_shown``).
 
+        With Pair partner set to Same day, other years, a photo taken on
+        the same calendar day in another year is tried first, widening up to
+        ``_SAME_DAY_MAX_DAYS`` either side (see ``_same_day_candidates``);
+        when none qualifies the search above runs unchanged.
+
         The result depends only on the ordering state that the navigation
         buffer's cursor snapshots capture, and the cursor is captured after
         this runs - so replaying a cached cursor (Previous/Next) always
@@ -2037,6 +2080,17 @@ class AlbumSlideshowCamera(Camera):
         if self._preferred_partner is not None:
             found = await self._scan_for_partner(
                 items, (self._preferred_partner,), is_portrait_canvas, width, height, 1, tried=tried,
+            )
+        if found is None and getattr(self.store, "pair_partner", DEFAULT_PAIR_PARTNER) == PAIR_PARTNER_SAME_DAY:
+            found = await self._scan_for_partner(
+                items,
+                self._same_day_candidates(items),
+                is_portrait_canvas,
+                width,
+                height,
+                limit,
+                tried=tried,
+                downloads_only=True,
             )
         whole_cycle = False
         shown = self._shown_this_cycle(items)
@@ -2074,6 +2128,76 @@ class AlbumSlideshowCamera(Camera):
         img, index = found
         self._mark_partner_shown(index, items)
         return img, items[index]
+
+    def _same_day_candidates(self, items: list[MediaItem]) -> list[int]:
+        """Partner indices for Same day, other years, nearest day first.
+
+        Each day's distance lists the photos not yet shown, shuffled, before
+        the ones already shown, shown longest ago first. A photo counts only
+        when it was taken about a year or more apart, so the days around the
+        current photo never count, even across New Year. Empty when the
+        current photo has no date.
+        """
+        here = _local_day(
+            getattr(items[self._index], "captured_at", None), dt_util.DEFAULT_TIME_ZONE,
+        )
+        if here is None:
+            return []
+        today, day = here
+        index = self._same_day_index(items)
+        shown = self._shown_this_cycle(items)
+        age: dict[int, int] | None = None
+        candidates: list[int] = []
+        for distance in range(_SAME_DAY_MAX_DAYS + 1):
+            tier = [
+                position
+                for ring_day in _ring_days(day, distance)
+                for position, taken in index.get(ring_day, ())
+                if abs(taken - today) > _SAME_DAY_MAX_DAYS and position != self._index
+            ]
+            fresh = [position for position in tier if shown is None or not shown(position)]
+            seen = [position for position in tier if shown is not None and shown(position)]
+            if seen:
+                if age is None:
+                    age = self._shown_age(items)
+                seen.sort(key=lambda position: age.get(position, len(items)))
+            self._rng.shuffle(fresh)
+            candidates.extend(fresh)
+            candidates.extend(seen)
+        return candidates
+
+    def _shown_age(self, items: list[MediaItem]) -> dict[int, int]:
+        """Rank of each shown photo by when it was shown, longest ago = 0."""
+        if self._random_cycle_active():
+            ranks: dict[int, int] = {}
+            for rank, index in enumerate(self._shown_oldest_first(items)):
+                ranks.setdefault(index, rank)
+            return ranks
+        where: dict[str, int] = {}
+        for index, item in enumerate(items):
+            where.setdefault(item.url, index)
+        return {where[url]: rank for rank, url in enumerate(self._paired_urls) if url in where}
+
+    def _same_day_index(self, items: list[MediaItem]) -> dict[int, list[tuple[int, int]]]:
+        """Photos of the playlist by local calendar day, for Same day, other years.
+
+        ``items`` is the filtered playlist from ``_effective_items``, which
+        hands out the same list until the album, filters, hidden photos or
+        order change; the index is rebuilt whenever that list is replaced or
+        Home Assistant's time zone changes. Undated photos are left out.
+        """
+        tz = dt_util.DEFAULT_TIME_ZONE
+        cached = self._day_index
+        if cached is not None and cached[0] is items and cached[1] == tz:
+            return cached[2]
+        index: dict[int, list[tuple[int, int]]] = {}
+        for position, item in enumerate(items):
+            found = _local_day(getattr(item, "captured_at", None), tz)
+            if found is not None:
+                taken, day = found
+                index.setdefault(day, []).append((position, taken))
+        self._day_index = (items, tz, index)
+        return index
 
     def _shown_oldest_first(self, items: list[MediaItem]):
         """Indices of photos shown this cycle, the one shown longest ago first."""

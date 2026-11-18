@@ -15,6 +15,7 @@ from .const import (
     ORIENTATION_MISMATCH_PAIR,
     ORIENTATION_MISMATCH_SINGLE,
     ORIENTATION_MISMATCH_AVOID,
+    PAIR_PARTNER_OPTIONS,
     ORDER_OPTIONS,
     ORDER_RANDOM,
     DATE_FILTER_OPTIONS,
@@ -39,6 +40,7 @@ async def async_setup_entry(
         [
             FillModeSelect(entry, store),
             PortraitModeSelect(entry, store),
+            PairPartnerSelect(entry, store),
             OrderModeSelect(entry, store),
             AspectRatioSelect(entry, store),
             MaxResolutionSelect(entry, store),
@@ -132,6 +134,34 @@ class PortraitModeSelect(_BaseSelect):
             if restored in self.options:
                 self.store.portrait_mode = restored
                 self.store.notify()
+
+
+class PairPartnerSelect(_BaseSelect):
+    _attr_icon = "mdi:calendar-sync"
+
+    def __init__(self, entry: ConfigEntry, store: SlideshowStore) -> None:
+        super().__init__(entry, store)
+        self._attr_unique_id = f"{entry.entry_id}_pair_partner"
+        self._attr_name = "Pair partner"
+        self._attr_options = list(PAIR_PARTNER_OPTIONS)
+
+    @property
+    def current_option(self):
+        value = self.store.pair_partner
+        return value if value in self.options else self.options[0]
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in self.options:
+            return
+        self.store.pair_partner = option
+        self.store.notify()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        old = await self.async_get_last_state()
+        if old and old.state in self.options:
+            self.store.pair_partner = old.state
+            self.store.notify()
 
 
 class OrderModeSelect(_BaseSelect):

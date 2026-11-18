@@ -2054,6 +2054,44 @@ test("the editor offers Pause when not viewed beside Pause and drives its switch
   ]));
 });
 
+test("the editor offers Pair partner beside Orientation mismatch mode and drives its select", async () => {
+  const Editor = vm.runInContext("createAlbumSlideshowCardEditorClass(class { attachShadow() {} })", context);
+  const editor = new Editor();
+  editor._config = { entity: "camera.album" };
+  editor._hass = {
+    entities: { "camera.album": { device_id: "device" } },
+    callWS: async () => [
+      { device_id: "device", unique_id: "entry_portrait_mode", entity_id: "select.orientation" },
+      { device_id: "device", unique_id: "entry_pair_partner", entity_id: "select.partner" },
+    ],
+    states: {
+      "select.orientation": { state: "pair", attributes: { options: ["pair", "single", "avoid"] } },
+      "select.partner": { state: "same_day_other_years", attributes: { options: ["default", "same_day_other_years"] } },
+    },
+  };
+  await editor._loadSiblings();
+  assert.equal(editor._siblings.pair_partner, "select.partner");
+  const fields = editor._liveSchema();
+  const names = fields.map(field => field.name);
+  assert.equal(names[names.indexOf("live_portrait_mode") + 1], "live_pair_partner");
+  assert.equal(
+    JSON.stringify(fields.find(field => field.name === "live_pair_partner").selector.select.options),
+    JSON.stringify([
+      { value: "default", label: "Default" },
+      { value: "same_day_other_years", label: "Same Day Other Years" },
+    ]),
+  );
+  assert.equal(editor._liveDataFromStates().live_pair_partner, "same_day_other_years");
+  editor._liveData = editor._liveDataFromStates();
+  const calls = [];
+  editor._hass.callService = (...args) => calls.push(args);
+  editor.dispatchEvent = () => { throw new Error("Live setting leaked into card YAML"); };
+  editor._valueChanged({ stopPropagation() {}, detail: { value: { ...editor._liveData, live_pair_partner: "default" } } });
+  assert.equal(JSON.stringify(calls), JSON.stringify([
+    ["select", "select_option", { entity_id: "select.partner", option: "default" }],
+  ]));
+});
+
 test("the video sound button takes a corner without a caption or the toolbar", () => {
   const corner = vm.runInContext("soundButtonCorner", context);
   assert.equal(corner(["top-left", "top-right", "bottom-right"], "top-right"), "bottom-left");
