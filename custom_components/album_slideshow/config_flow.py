@@ -33,6 +33,8 @@ from .const import (
     CONF_REVERSE_GEOCODE,
     CONF_HIDE_HOME_COUNTRY,
     DEFAULT_HIDE_HOME_COUNTRY,
+    CONF_OSM_PLACE_NAMES,
+    DEFAULT_OSM_PLACE_NAMES,
     CONF_IMMICH_URL,
     CONF_IMMICH_API_KEY,
     CONF_IMMICH_SELECTION_TYPE,
@@ -1782,8 +1784,23 @@ class ImmichOptionsFlow(config_entries.OptionsFlow):
                 }
                 if not new_data[CONF_IMMICH_FILTER]:
                     new_data.pop(CONF_IMMICH_FILTER)
+                osm_names = bool(user_input.get(
+                    CONF_OSM_PLACE_NAMES,
+                    entry.options.get(CONF_OSM_PLACE_NAMES, DEFAULT_OSM_PLACE_NAMES),
+                ))
+                geocode = bool(user_input.get(
+                    CONF_REVERSE_GEOCODE,
+                    entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE),
+                ))
+                # When OpenStreetMap names stop replacing Immich's, re-read
+                # every photo so Immich's own names come back; the cache
+                # holds only ours.
+                osm_names_dropped = not (osm_names and geocode) and bool(
+                    entry.options.get(CONF_OSM_PLACE_NAMES, DEFAULT_OSM_PLACE_NAMES)
+                    and entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE)
+                )
                 try:
-                    if _immich_source_changed(entry.data, new_data):
+                    if osm_names_dropped or _immich_source_changed(entry.data, new_data):
                         await _async_clear_item_cache(self.hass, entry.entry_id)
                 except Exception as err:
                     _LOGGER.warning(
@@ -1794,14 +1811,12 @@ class ImmichOptionsFlow(config_entries.OptionsFlow):
                 else:
                     options = {
                         **entry.options,
-                        CONF_REVERSE_GEOCODE: user_input.get(
-                            CONF_REVERSE_GEOCODE,
-                            entry.options.get(CONF_REVERSE_GEOCODE, DEFAULT_REVERSE_GEOCODE),
-                        ),
+                        CONF_REVERSE_GEOCODE: geocode,
                         CONF_HIDE_HOME_COUNTRY: user_input.get(
                             CONF_HIDE_HOME_COUNTRY,
                             entry.options.get(CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY),
                         ),
+                        CONF_OSM_PLACE_NAMES: osm_names,
                     }
                     self.hass.config_entries.async_update_entry(
                         entry, data=new_data, title=fields[CONF_ALBUM_NAME], options=options
@@ -1831,6 +1846,9 @@ class ImmichOptionsFlow(config_entries.OptionsFlow):
             ))): bool,
             vol.Required(CONF_HIDE_HOME_COUNTRY, default=bool(entry.options.get(
                 CONF_HIDE_HOME_COUNTRY, DEFAULT_HIDE_HOME_COUNTRY,
+            ))): bool,
+            vol.Required(CONF_OSM_PLACE_NAMES, default=bool(entry.options.get(
+                CONF_OSM_PLACE_NAMES, DEFAULT_OSM_PLACE_NAMES,
             ))): bool,
         })
         return self.async_show_form(

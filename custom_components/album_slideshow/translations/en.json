@@ -238,7 +238,8 @@
           "immich_include_videos": "Include videos (played by the Album Slideshow card)",
           "immich_live_photos": "Play Live Photo motion (played by the Album Slideshow card)",
           "reverse_geocode": "Look up EXIF GPS locations via OpenStreetMap",
-          "hide_home_country": "Hide the country for places in your home country"
+          "hide_home_country": "Hide the country for places in your home country",
+          "osm_place_names": "Use OpenStreetMap place names instead of Immich's"
         }
       },
       "connection": {

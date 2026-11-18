@@ -79,6 +79,11 @@ DEFAULT_REVERSE_GEOCODE = True
 # Assistant's configured country.
 CONF_HIDE_HOME_COUNTRY = "hide_home_country"
 DEFAULT_HIDE_HOME_COUNTRY = False
+# Immich option: replace the service's own place names with OpenStreetMap's,
+# which follow town boundaries (Immich names the nearest town in its list).
+# Only applies while reverse geocoding is on.
+CONF_OSM_PLACE_NAMES = "osm_place_names"
+DEFAULT_OSM_PLACE_NAMES = False
 
 PROVIDER_GOOGLE_SHARED = "google_shared"
 PROVIDER_LOCAL_FOLDER = "local_folder"
