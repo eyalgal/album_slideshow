@@ -575,6 +575,50 @@ test("a replacement frame clears the preparing placeholder after hiding", () => 
   assert.equal(JSON.stringify(card._displayedPhotoIds), '["replacement-photo"]');
 });
 
+test("the photo on screen stays while the slideshow reloads", () => {
+  const requests = [];
+  const elements = new Map();
+  const makeElement = () => ({
+    src: "",
+    classList: { add() {}, remove() {} },
+    removeAttribute(name) { if (name === "src") this.src = ""; },
+    replaceChildren() {},
+    appendChild(element) { elements.set(element.id, element); },
+    remove() { elements.delete(this.id); },
+  });
+  for (const id of ["a", "b", "blur-a", "blur-b", "captions", "stage"]) {
+    elements.set(id, makeElement());
+  }
+  context.document = { createElement: makeElement };
+  context.Image = class { constructor() { requests.push(this); } };
+  const card = Object.create(Card.prototype);
+  card._config = { entity: "camera.test", fit: "contain", transition: "none" };
+  card.shadowRoot = { getElementById: id => elements.get(id) };
+  card._hiddenRevision = 0;
+  card._loadGeneration = 0;
+  card._lastFrameId = 40;
+  card._lastEntityPicture = "/camera.jpg?frame=40";
+  card._displayedPhotoIds = ["on-screen"];
+  card._showing = "a";
+  card._holdSwapsUntil = 0;
+  elements.get("a").src = card._lastEntityPicture;
+  const state = { attributes: {} };
+  card._hass = { states: { "camera.test": state } };
+  // Unavailable while the integration reloads, then a moment with no frame yet.
+  card._maybeSwap();
+  state.attributes = { frame_id: 0, hidden_revision: 0, displayed_photo_ids: [], entity_picture: "/camera.jpg?frame=0" };
+  card._maybeSwap();
+  assert.equal(elements.has("placeholder"), false);
+  assert.equal(elements.get("a").src, "/camera.jpg?frame=40");
+  assert.equal(requests.length, 0);
+  state.attributes = { frame_id: 1, hidden_revision: 0, displayed_photo_ids: ["next"], entity_picture: "/camera.jpg?frame=1" };
+  card._maybeSwap();
+  assert.equal(requests.length, 1);
+  requests[0].onload();
+  assert.equal(elements.get(card._showing).src, "/camera.jpg?frame=1");
+  assert.equal(JSON.stringify(card._displayedPhotoIds), '["next"]');
+});
+
 test("old image requests cannot reveal a frame after exclusion invalidation", () => {
   const requests = [];
   context.Image = class { constructor() { requests.push(this); } };
