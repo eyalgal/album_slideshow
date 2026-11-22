@@ -79,8 +79,8 @@ automatically reread in this experimental build.
 The fields are camera attributes, with each paired photo's values also in
 `caption_frames`. See the [attribute reference](reference.md#camera-attributes).
 Disabling the option stops camera/description enrichment; the separate GPS
-option is independent. A HACS reinstall or
-update can replace a locally installed test build.
+option is independent. A reinstall or update from the Marketplace or HACS
+can replace a locally installed test build.
 
 ### Google Location and Privacy
 
@@ -414,7 +414,7 @@ backend or the image decoder.
 - Apple's HTTP 330 partition redirects are accepted from either the JSON body
   or response headers, limited to one redirect to an Apple shared-streams host.
 
-To test: HACS > Album Slideshow > three-dot menu > **Redownload** > **v1.10.0** (or newer),
+To test, update to v1.10.0 or newer if you haven't already,
 then restart Home Assistant and retry the entry. If it still fails, share the
 new `Error querying iCloud album` or `iCloud validation failed` message after
 checking it for personal information. No album share link is needed for this

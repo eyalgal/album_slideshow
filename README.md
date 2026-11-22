@@ -58,14 +58,16 @@ sources provide dates, locations, and descriptions.
 <a id="-installation"></a>
 ## Installation
 
-### HACS (recommended)
+<a id="hacs-recommended"></a>
+### Marketplace or HACS (recommended)
 
-1. Find **Album Slideshow** in HACS and download it.
+1. Find **Album Slideshow** in **Settings > Marketplace** and install it. On
+   Home Assistant 2026.10 or older, find it in HACS and download it.
 2. Restart Home Assistant.
 3. Go to **Settings > Devices & services > Add Integration**, choose
    **Album Slideshow**, and follow the setup guide for your source above.
 
-[![Open Album Slideshow in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=eyalgal&repository=album_slideshow)
+[![Open Album Slideshow in the Marketplace](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=eyalgal&repository=album_slideshow)
 
 ### Manual Installation
 
@@ -78,7 +80,8 @@ sources provide dates, locations, and descriptions.
 <a id="upgrading-to-v1110"></a>
 ### Updating
 
-Update through HACS, restart Home Assistant, and reload the dashboard.
+Install the update from **Settings > Updates** (or HACS on Home Assistant
+2026.10 or older), restart Home Assistant, and reload the dashboard.
 See the [release notes](https://github.com/eyalgal/album_slideshow/releases)
 for version-specific upgrade instructions.
 
@@ -88,8 +91,8 @@ for version-specific upgrade instructions.
 <img src="https://raw.githubusercontent.com/eyalgal/album_slideshow/main/docs/weather-caption.jpg" alt="Photo with a weather icon and temperature, a clock, and the photo's date and place" width="500">
 
 In the dashboard editor, add an **Album Slideshow** card and select your camera.
-The card is registered automatically; no separate HACS frontend installation or
-manual resource entry is needed. Hard-refresh the dashboard after an upgrade
+The card is registered automatically; no separate card download or manual
+resource entry is needed. Hard-refresh the dashboard after an upgrade
 if the new card script has not loaded.
 
 ### Minimal Example

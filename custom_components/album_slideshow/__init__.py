@@ -59,8 +59,9 @@ async def _async_register_card(hass: HomeAssistant) -> None:
         )
         if not recovered:
             _LOGGER.warning(
-                "Album Slideshow card missing on disk (%s). Re-install"
-                " the integration via HACS (3-dot menu -> Redownload)"
+                "Album Slideshow card missing on disk (%s). Reinstall the"
+                " integration (Marketplace: three dots > Install another"
+                " version; HACS: three dots > Redownload)"
                 " or copy %s/%s into the album_slideshow folder."
                 " The custom:album-slideshow-card type will not be"
                 " available until this is fixed.",

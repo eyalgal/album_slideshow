@@ -16,8 +16,8 @@ transition entirely in the browser. The server renders one still per slide
 change; the card handles transitions in CSS.
 
 The card is registered automatically when the integration loads; you do **not**
-need to add it as a HACS frontend repository or configure a Lovelace resource
-manually. After installing or upgrading, hard-refresh the dashboard once
+need to install a separate card from the Marketplace or HACS, or add a dashboard
+resource manually. After installing or upgrading, hard-refresh the dashboard once
 (Ctrl+Shift+R) so the browser picks up the script.
 
 A visual editor is available: pick **Album Slideshow** from the card picker
