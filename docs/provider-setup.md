@@ -431,8 +431,10 @@ show everything in the **Shared Space**.
 
 1. Add the integration and choose **Synology Photos (direct API, full
    metadata)**.
-2. Enter your DSM address (e.g. `http://192.168.1.10:5000`, or your HTTPS /
-   QuickConnect URL) and an account username and password.
+2. Enter your DSM address on your network (e.g. `http://192.168.1.10:5000` or
+   `https://192.168.1.10:5001`) and an account username and password.
+   QuickConnect addresses aren't supported: they find your NAS for a web
+   browser, not for apps like this integration.
 3. Choose the **Personal** library (your photos, plus albums other users shared
    with you) or the **Shared Space** (all of its photos; it can't be narrowed
    down to albums, people or tags).

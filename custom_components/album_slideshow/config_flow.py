@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -174,6 +175,17 @@ def _describe_error(err: BaseException) -> str:
     status = getattr(err, "status", None)
     detail = str(err) or type(err).__name__
     return f"HTTP {status}: {detail}" if status else f"{type(err).__name__}: {detail}"
+
+
+def _synology_address_error(url: str) -> str | None:
+    """Flag addresses that can never reach the DSM API, before trying to log in."""
+    host = urlparse(url if "://" in url else f"//{url}").hostname or ""
+    # The QuickConnect portal, or a bare QuickConnect ID, only works in a browser.
+    if host in ("quickconnect.to", "quickconnect.cn") or not ("." in url or ":" in url):
+        return "synology_quickconnect"
+    if not url.lower().startswith(("http://", "https://")):
+        return "synology_url_scheme"
+    return None
 
 
 def _redact_token(token: str | None) -> str:
@@ -953,22 +965,26 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             from . import synology as syn_api
 
-            client = syn_api.SynologyClient(
-                self.hass,
-                url,
-                username=username,
-                password=password,
-                space=space,
-            )
-            try:
-                await client.async_login(otp_code=otp or None)
-            except syn_api.SynologyOtpRequired:
-                errors["otp_code"] = "synology_otp_required"
-            except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds
-                _LOGGER.warning(
-                    "Synology login failed for %s: %s", url, _describe_error(err)
+            address_error = _synology_address_error(url)
+            if address_error:
+                errors["base"] = address_error
+            else:
+                client = syn_api.SynologyClient(
+                    self.hass,
+                    url,
+                    username=username,
+                    password=password,
+                    space=space,
                 )
-                errors["base"] = "synology_cannot_connect"
+                try:
+                    await client.async_login(otp_code=otp or None)
+                except syn_api.SynologyOtpRequired:
+                    errors["otp_code"] = "synology_otp_required"
+                except Exception as err:  # noqa: BLE001 - any failure means bad URL/creds
+                    _LOGGER.warning(
+                        "Synology login failed for %s: %s", url, _describe_error(err)
+                    )
+                    errors["base"] = "synology_cannot_connect"
 
             if not errors:
                 # Login worked, so the URL and credentials are fine. Albums and

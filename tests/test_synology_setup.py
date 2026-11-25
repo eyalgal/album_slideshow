@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from custom_components.album_slideshow import synology
 from custom_components.album_slideshow.config_flow import ConfigFlow
 from custom_components.album_slideshow.const import (
@@ -53,8 +55,8 @@ class _Client:
         return []
 
 
-def _login(monkeypatch, space):
-    monkeypatch.setattr(synology, "SynologyClient", _Client)
+def _login(monkeypatch, space, *, url="http://nas.local:5000", client=_Client):
+    monkeypatch.setattr(synology, "SynologyClient", client)
     flow = ConfigFlow()
     flow.hass = object()
     flow.async_show_form = lambda **kwargs: kwargs
@@ -66,7 +68,7 @@ def _login(monkeypatch, space):
 
     flow.async_set_unique_id = set_unique_id
     form = asyncio.run(flow.async_step_synology({
-        CONF_SYNOLOGY_URL: "http://nas.local:5000",
+        CONF_SYNOLOGY_URL: url,
         CONF_SYNOLOGY_USERNAME: "photos",
         CONF_SYNOLOGY_PASSWORD: "secret",
         CONF_SYNOLOGY_SPACE: space,
@@ -100,6 +102,43 @@ def test_personal_library_lists_albums_shared_with_you(monkeypatch):
     album_field = next(key for key in form["data_schema"].schema if str(key) == "albums")
     labels = [option["label"] for option in form["data_schema"].schema[album_field].config["options"]]
     assert labels == ["Trip", "Grandma (shared)"]
+
+
+@pytest.mark.parametrize(
+    ("url", "error"),
+    [
+        ("myds", "synology_quickconnect"),
+        ("quickconnect.to/myds", "synology_quickconnect"),
+        ("https://quickconnect.to/myds", "synology_quickconnect"),
+        ("192.168.1.10:5000", "synology_url_scheme"),
+    ],
+)
+def test_unusable_addresses_get_a_clear_error_before_logging_in(monkeypatch, url, error):
+    logins = []
+
+    class Client(_Client):
+        async def async_login(self, otp_code=None):
+            logins.append(url)
+            return "sid"
+
+    _flow, form = _login(monkeypatch, SYNOLOGY_SPACE_PERSONAL, url=url, client=Client)
+
+    assert (form["step_id"], form["errors"]) == ("synology", {"base": error})
+    assert logins == []
+
+
+def test_a_local_name_without_dots_still_logs_in(monkeypatch):
+    _flow, form = _login(monkeypatch, SYNOLOGY_SPACE_PERSONAL, url="http://diskstation:5000")
+    assert form["step_id"] == "synology_select"
+
+
+def test_address_errors_have_text_in_both_translation_files():
+    import pathlib
+
+    root = pathlib.Path(__file__).parents[1] / "custom_components" / "album_slideshow"
+    for name in ("strings.json", "translations/en.json"):
+        errors = json.loads((root / name).read_text())["config"]["error"]
+        assert {"synology_quickconnect", "synology_url_scheme"} <= set(errors)
 
 
 def test_shared_space_step_text_exists_in_both_translation_files():
